@@ -1,5 +1,38 @@
 # UNMScope Python Roadmap
 
+## Status (updated 2026-08-28 — read this first)
+
+Plan below was written camera-first-skeleton-first. In practice, after
+this document was written, the user asked to pull real hardware
+validation forward instead of finishing the core skeleton first —
+**Phase 2's camera item and part of the FPGA item are done, ahead of
+Phase 1.** Concretely, as of the end of the 2026-08-28 session:
+
+- **Camera (Hamamatsu Orca Flash 4.0, real hardware) — working.** Connect,
+  snap, live view, exposure, external-trigger mode, all through a real
+  `Camera` ABC (`src/unmscope/hardware/camera.py`, `pymmcore-plus`-backed)
+  and a minimal real GUI (`python -m unmscope.gui`).
+- **FPGA trigger pulse (DIO4) — working and verified**, both on an
+  oscilloscope and end-to-end triggering the real camera (confirmed frame
+  arrival 230ms after the trigger, matching the configured exposure). See
+  `docs/fpga_io_map.md` for the corrected register sequence — it's
+  substantially more involved than the naive "toggle Trigger Enable?"
+  approach this roadmap's Phase 2 item implied.
+- **Not done**: the Phase 1 core skeleton itself (asyncio task/queue
+  architecture, state machine, pydantic config) — none of that exists yet.
+  The camera/FPGA code above is still spike-quality
+  (`spikes/`, `tools/fpga_live_panel.py`), not yet integrated into a
+  proper architecture. Also not done: static analog voltage output
+  verification on a galvo channel (the plan's original "Stage B").
+- Full narrative of how we got here: `docs/SESSION_LOG_2026-08-28.md`.
+
+Practical implication for whoever picks this up: don't assume Phase 1
+must happen before more hardware work — that assumption already changed
+once. Reasonable next steps are either (a) finish Stage B, (b) build the
+real Phase 1 skeleton now with two working hardware subsystems already
+proven to fold in, or (c) keep going hardware-first (motion stages next).
+No decision has been made on which.
+
 ## Context
 
 `UNMScope_Source` (LabVIEW, ~2,329 relevant VIs) is the current control

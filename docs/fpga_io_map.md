@@ -141,8 +141,14 @@ documented negative example, not a working method.
    the oscilloscope. No camera.
 4. `04_camera_trigger_setup.py` — arm the Orca4 for external/edge trigger,
    no FPGA firing yet.
-5. `05_roundtrip_test.py` — combine C+D: fire the FPGA trigger, confirm one
-   frame arrives.
+5. `05_roundtrip_test.py` — **done, 2026-08-28.** DIO4 physically wired to
+   the Orca Flash 4.0's external trigger BNC. Camera armed EXTERNAL/EDGE/
+   POSITIVE via `startSequenceAcquisition`, FPGA fired one pulse using the
+   corrected sequence -- frame arrived 230ms after the trigger (matching
+   the 100ms exposure + readout), a clean/consistent result (unlike the
+   ~19.7s lag or outright failures seen with the old broken trigger
+   sequence). **Confirmed end-to-end: the camera is triggered by the
+   FPGA's real external trigger line, through our own Python code.**
 
 Each stage requires explicit hardware confirmation before moving to the
 next.

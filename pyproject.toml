@@ -8,6 +8,7 @@ dependencies = [
     "numpy",
     "PySide6",
     "pymmcore-plus",
+    "qtpy",
     "nifpga",
 ]
 

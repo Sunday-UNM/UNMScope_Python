@@ -5,6 +5,10 @@ description = "Python control software for the UNM light-sheet microscope (Louis
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2",
+    "numpy",
+    "PySide6",
+    "pymmcore-plus",
+    "nifpga",
 ]
 
 [project.optional-dependencies]

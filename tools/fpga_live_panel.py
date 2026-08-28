@@ -215,6 +215,12 @@ class FpgaPanel(QWidget):
             QMessageBox.warning(self, "Error", f"Voltage write failed:\n{e}")
 
     def on_fire_trigger(self):
+        # CORRECTED sequence (verified on oscilloscope 2026-08-28 -- see
+        # docs/fpga_io_map.md). A bare Trigger Enable? toggle (the old
+        # version of this method) reliably produces NO pulse -- the AO
+        # waveform engine must actually be running, and the Trigger #s/
+        # Trigger stack #s/Trigger blast #s clusters (each {'# on','# off'})
+        # must be nonzero, or nothing fires despite clean register writes.
         if self.session is None:
             return
         if not self.confirm_check.isChecked():
@@ -223,16 +229,60 @@ class FpgaPanel(QWidget):
                                      "This will fire a real pulse on the camera trigger line.")
             return
         try:
+            up_ticks = self.trigger_up_ticks.value()
+            cam_delay = self.cam_delay_ticks.value()
+
+            self.session.registers["Cam Trigger delay (ticks)"].write(cam_delay)
             self.session.registers["# of triggers"].write(1)
             self.session.registers["Continuous Mode"].write(False)
+            self.session.registers["Cycle(Ticks)"].write(up_ticks)
+            self.session.registers["Trigger up (ticks)"].write(up_ticks)
+            self.session.registers["AO Trigger delay (ticks)"].write(0)
             self.session.registers["Free run"].write(False)
-            self.session.registers["Trigger up (ticks)"].write(self.trigger_up_ticks.value())
-            self.session.registers["Cam Trigger delay (ticks)"].write(self.cam_delay_ticks.value())
-            self._log("Trigger settings configured (# of triggers=1, Continuous=False, Free run=False).")
+            self.session.registers["AI # of channels"].write(0)
+            self.session.registers["AI loop period (ticks)"].write(4000)
+            self.session.registers["AO # of points per trigger"].write(1)
+            self.session.registers["AO ticks between points"].write(4000)
+            self.session.registers['Shutter Ticks "on" (Ticks)'].write(0)
+            on_off_one = {"# on": 1, "# off": 0}
+            self.session.registers["Trigger #s"].write(on_off_one)
+            self.session.registers["Trigger stack #s"].write(on_off_one)
+            self.session.registers["Trigger blast #s"].write(on_off_one)
+            self.session.registers["Set F.P. (T)"].write(True)
+            self._log("Full trigger+AO+AI register bundle written.")
+
+            zero_words = [0] * 48
+            fifo = self.session.fifos["Wvfrm2"]
+            fifo.stop()
+            fifo.start()
+            fifo.write(zero_words, timeout_ms=2000)
+            self._log(f"Wrote {len(zero_words)} all-zero words to Wvfrm2 FIFO.")
+
+            self.session.registers["AO Mode"].write(0)  # "Start/Run Wvfrm"
+            self.session.registers["Set F.P. (T)"].write(True)
+            import time as _time
+            t0 = _time.time()
+            ready = False
+            while _time.time() - t0 < 3.0:
+                ready = self.session.registers["AO wvfrm ready"].read()
+                if ready:
+                    break
+                _time.sleep(0.02)
+            self._log(f"AO wvfrm ready = {ready} (waited {_time.time()-t0:.2f}s)")
+            if not ready:
+                self._log("Waveform engine never became ready -- not firing.")
+                return
+
             self.session.registers["Trigger Enable?"].write(True)
-            self._log("Trigger Enable? = True -- pulse should have fired on DIO4.")
+            self.session.registers["Set F.P. (T)"].write(True)
+            _time.sleep(0.01)  # keep short -- longer hold produced a 2nd pulse
             self.session.registers["Trigger Enable?"].write(False)
-            self._log("Trigger Enable? = False (disarmed).")
+            self.session.registers["Set F.P. (T)"].write(True)
+            self._log("Trigger fired -- pulse should have appeared on DIO4.")
+
+            fifo.stop()
+            self.session.registers["AO Mode"].write(AO_MODE_SET_AO)  # back to safe static
+            self.session.registers["Set F.P. (T)"].write(True)
         except Exception as e:
             self._log(f"Fire trigger FAILED: {e}")
             QMessageBox.warning(self, "Error", f"Trigger sequence failed:\n{e}")

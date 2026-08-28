@@ -16,7 +16,7 @@ from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QFormLayout,
     QLabel, QPushButton, QComboBox, QDoubleSpinBox, QTextEdit, QMessageBox,
-    QSizePolicy,
+    QSizePolicy, QCheckBox,
 )
 
 from unmscope.hardware.camera import Camera, CameraError, OrcaFlash4Camera, SimulatedCamera
@@ -87,6 +87,19 @@ class MainWindow(QMainWindow):
         self.exposure_spin.valueChanged.connect(self.on_exposure_changed)
         acq_form.addRow("Exposure:", self.exposure_spin)
 
+        self.ext_trigger_check = QCheckBox("External Trigger (from FPGA, DIO4)")
+        self.ext_trigger_check.setEnabled(False)
+        self.ext_trigger_check.toggled.connect(self.on_ext_trigger_toggled)
+        acq_form.addRow(self.ext_trigger_check)
+        acq_note = QLabel(
+            "With External Trigger on, Snap/Live will wait for a real FPGA "
+            "pulse before showing a new frame -- the view will visibly hang "
+            "between pulses. This is expected."
+        )
+        acq_note.setWordWrap(True)
+        acq_note.setStyleSheet("color: #888; font-style: italic;")
+        acq_form.addRow(acq_note)
+
         acq_btn_row = QHBoxLayout()
         self.snap_btn = QPushButton("Snap")
         self.snap_btn.clicked.connect(self.on_snap_clicked)
@@ -152,11 +165,14 @@ class MainWindow(QMainWindow):
         self.snap_btn.setEnabled(True)
         self.live_btn.setEnabled(True)
         self.backend_combo.setEnabled(False)
+        self.ext_trigger_check.setEnabled(hasattr(self.camera, "set_trigger_source"))
 
     def on_disconnect_clicked(self):
         if self.live_timer.isActive():
             self.on_live_clicked()  # stop live first
         if self.camera is not None:
+            if self.ext_trigger_check.isChecked():
+                self.ext_trigger_check.setChecked(False)  # back to INTERNAL before disconnect
             self.camera.disconnect()
             self._log("Disconnected.")
         self.camera = None
@@ -167,6 +183,21 @@ class MainWindow(QMainWindow):
         self.snap_btn.setEnabled(False)
         self.live_btn.setEnabled(False)
         self.backend_combo.setEnabled(True)
+        self.ext_trigger_check.setEnabled(False)
+
+    def on_ext_trigger_toggled(self, checked: bool):
+        if self.camera is None or not hasattr(self.camera, "set_trigger_source"):
+            return
+        try:
+            if checked:
+                self.camera.set_trigger_source("EXTERNAL")
+                self.camera.set_trigger_polarity("POSITIVE")
+                self._log("External Trigger ON (EXTERNAL/POSITIVE) -- waiting for real FPGA pulses now.")
+            else:
+                self.camera.set_trigger_source("INTERNAL")
+                self._log("External Trigger OFF (back to INTERNAL/software trigger).")
+        except CameraError as e:
+            self._log(f"Set trigger mode FAILED: {e}")
 
     def on_exposure_changed(self, value: float):
         if self.camera is None or not self.camera.is_connected:

@@ -83,6 +83,47 @@ than raw ctypes DCAM SDK bindings — reuses a mature, already-installed
 driver. No camera-specific `.cfg` existed yet (only the MM demo config) as
 of 2026-08-28; one will be built as part of Stage D.
 
+## Firing a real trigger pulse -- the corrected, verified sequence
+
+**Confirmed working 2026-08-28** (real pulse seen on the oscilloscope,
+matching real LabVIEW's own pulse): a bare `Trigger Enable?` toggle is NOT
+enough. The full sequence, matching `HHMI - Set all FPGA devices with
+waveform config information.vi` + `HHMI - Start FPGA device waveform.vi`:
+
+1. Write the FULL register bundle together (a subset silently produces no
+   pulse -- no error, just nothing on DIO4):
+   `Cam Trigger delay (ticks)`, `# of triggers`, `Continuous Mode`,
+   `Cycle(Ticks)` (no space before "("), `Trigger up (ticks)`,
+   `AO Trigger delay (ticks)`, `Free run`, `AI # of channels`,
+   `AI loop period (ticks)`, `AO # of points per trigger`,
+   `AO ticks between points`, `Shutter Ticks "on" (Ticks)`, then
+   `Set F.P. (T) = True` to apply.
+2. **Critically**, also write these three clusters -- each shaped
+   `{'# on': int, '# off': int}`, NOT flat registers (the diagram labels
+   them "Chnl/Stack/TP Trigger #s" but the real registers are named
+   differently): `Trigger #s`, `Trigger stack #s`, `Trigger blast #s`.
+   All default to `{'# on': 0, '# off': 0}` -- **zero "on" count is why
+   nothing fired** in earlier attempts. Set `# on: 1, # off: 0` for a
+   single-trigger test.
+3. Push data into the `Wvfrm2` DMA FIFO (start it, write at least a few
+   dozen words -- all-zero is safe regardless of exact channel
+   count/order, since it just means zero volts on every channel no matter
+   how it's unpacked on the FPGA side).
+4. `AO Mode = 0` ("Start/Run Wvfrm"), `Set F.P. (T) = True`.
+5. Poll `AO wvfrm ready` until `True` (up to ~3s, matching LabVIEW's own wait).
+6. `Trigger Enable? = True` -- **keep the host-side hold SHORT** (~10ms).
+   Holding it across a `Cycle(Ticks)` boundary (~100ms in testing)
+   produced a SECOND spurious pulse -- the hardware appears to keep
+   re-firing on each internal cycle for as long as `Trigger Enable?` stays
+   asserted, rather than firing exactly once regardless of hold time. This
+   was diagnosed by direct comparison against real LabVIEW + oscilloscope.
+7. `Trigger Enable? = False`.
+
+Working script: `../spikes/03b_fpga_trigger_with_waveform.py`. The
+earlier, simpler `03_fpga_trigger_test.py` (bare `Trigger Enable?` toggle,
+no waveform engine) reliably produces NO pulse -- kept around as a
+documented negative example, not a working method.
+
 ## Staged validation (see `../spikes/`)
 
 1. `01_fpga_connect.py` — **done, 2026-08-28.** Opened a real nifpga
@@ -91,6 +132,9 @@ of 2026-08-28; one will be built as part of Stage D.
    state on the real `Static AO to set` cluster, closed cleanly. This is
    where the `AO Mode` int-enum and the real `Static AO to set` field names
    above were corrected against actual hardware. No camera involved.
+2. `03b_fpga_trigger_with_waveform.py` — **done, 2026-08-28.** Real,
+   clean, single ~3V pulse per second confirmed on the oscilloscope, using
+   the corrected sequence above. See "Firing a real trigger pulse" above.
 2. `02_static_ao_test.py` — hold a known voltage on X Galvo (AO1) for
    oscilloscope verification.
 3. `03_fpga_trigger_test.py` — fire one trigger pulse, verify on DIO4 with

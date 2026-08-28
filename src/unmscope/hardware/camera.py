@@ -201,10 +201,35 @@ class OrcaFlash4Camera(Camera):
             raise CameraError("Camera not connected")
         return self._mmc.getProperty(self.DEVICE_LABEL, name)
 
-    def snap_waiting_for_trigger(self, timeout_s: float = 30.0) -> np.ndarray:
-        """Like snap(), but documents intent: when TRIGGER SOURCE=EXTERNAL,
-        this call blocks until an external trigger pulse arrives (or the
-        adapter's own timeout elapses -- MINIMUM ACQUISITION TIMEOUT is
-        60000 ms by default). Use this to verify the FPGA is actually
-        driving the trigger line."""
-        return self.snap()
+    # -- Non-blocking arm/wait, for external-trigger verification -------
+    # NOTE: do NOT call snap()/snapImage() from a background thread to
+    # "wait" for an external trigger on the main thread -- this caused a
+    # real access-violation crash (VCRUNTIME140.dll, 0xc0000005) here,
+    # almost certainly from the native DCAM/MMCore layer being touched
+    # from two threads at once. Use start_sequence()/poll/stop_sequence()
+    # instead -- single-threaded, non-blocking, no crash risk.
+    def start_sequence(self, n_images: int = 1) -> None:
+        if self._mmc is None:
+            raise CameraError("Camera not connected")
+        self._mmc.startSequenceAcquisition(n_images, 0, True)
+
+    def remaining_image_count(self) -> int:
+        if self._mmc is None:
+            raise CameraError("Camera not connected")
+        return self._mmc.getRemainingImageCount()
+
+    def pop_image(self) -> np.ndarray:
+        if self._mmc is None:
+            raise CameraError("Camera not connected")
+        return self._mmc.popNextImage()
+
+    def is_sequence_running(self) -> bool:
+        if self._mmc is None:
+            return False
+        return self._mmc.isSequenceRunning()
+
+    def stop_sequence(self) -> None:
+        if self._mmc is None:
+            return
+        if self._mmc.isSequenceRunning():
+            self._mmc.stopSequenceAcquisition()

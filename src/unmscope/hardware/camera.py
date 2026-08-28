@@ -185,3 +185,26 @@ class OrcaFlash4Camera(Camera):
         if self._mmc is None:
             raise CameraError("Camera not connected")
         self._mmc.setProperty(self.DEVICE_LABEL, "TRIGGER SOURCE", source)
+
+    def set_trigger_polarity(self, polarity: str) -> None:
+        """polarity: 'POSITIVE' or 'NEGATIVE' (DCAM property, exposed by
+        the adapter as 'TriggerPolarity'). Default out of the box is
+        NEGATIVE; DIO4 ("Cam Ext Trigger Out DO") idles low and pulses
+        high, so this needs to be POSITIVE for FPGA-triggered acquisition
+        -- matches what UNMScope_Source's DCAM - Set Trigger.vi sets."""
+        if self._mmc is None:
+            raise CameraError("Camera not connected")
+        self._mmc.setProperty(self.DEVICE_LABEL, "TriggerPolarity", polarity)
+
+    def get_property(self, name: str) -> str:
+        if self._mmc is None:
+            raise CameraError("Camera not connected")
+        return self._mmc.getProperty(self.DEVICE_LABEL, name)
+
+    def snap_waiting_for_trigger(self, timeout_s: float = 30.0) -> np.ndarray:
+        """Like snap(), but documents intent: when TRIGGER SOURCE=EXTERNAL,
+        this call blocks until an external trigger pulse arrives (or the
+        adapter's own timeout elapses -- MINIMUM ACQUISITION TIMEOUT is
+        60000 ms by default). Use this to verify the FPGA is actually
+        driving the trigger line."""
+        return self.snap()

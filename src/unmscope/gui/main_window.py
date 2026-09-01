@@ -42,6 +42,7 @@ class MainWindow(QMainWindow):
         self.camera: Camera | None = None
         self.live_timer = QTimer(self)
         self.live_timer.timeout.connect(self._live_tick)
+        self.frame_count = 0
 
         self._build_ui()
 
@@ -111,6 +112,10 @@ class MainWindow(QMainWindow):
         acq_btn_row.addWidget(self.live_btn)
         acq_form.addRow(acq_btn_row)
 
+        self.frame_counter_label = QLabel("0")
+        self.frame_counter_label.setStyleSheet("font-weight: bold; font-size: 16pt; color: #2a7;")
+        acq_form.addRow("Frames received:", self.frame_counter_label)
+
         self.frame_info_label = QLabel("-")
         acq_form.addRow("Last frame:", self.frame_info_label)
 
@@ -148,6 +153,8 @@ class MainWindow(QMainWindow):
             self.camera = None
             return
 
+        self.frame_count = 0
+        self.frame_counter_label.setText("0")
         info = self.camera.info
         self.status_label.setText(f"Connected: {info.name} (S/N {info.serial}), {info.width}x{info.height}")
         self.status_label.setStyleSheet("font-weight: bold; color: green;")
@@ -236,13 +243,17 @@ class MainWindow(QMainWindow):
                 self.on_live_clicked()
             return
 
+        self.frame_count += 1
         pix = frame_to_qpixmap(frame)
         scaled = pix.scaled(self.image_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.image_label.setPixmap(scaled)
+        now = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        self.frame_counter_label.setText(f"{self.frame_count}  (last at {now})")
         self.frame_info_label.setText(
             f"{frame.shape[1]}x{frame.shape[0]} {frame.dtype}, "
             f"min={frame.min()} max={frame.max()} mean={frame.mean():.1f}"
         )
+        self._log(f"Frame #{self.frame_count} received at {now}")
 
     def closeEvent(self, event):
         if self.camera is not None:

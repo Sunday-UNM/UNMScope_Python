@@ -142,8 +142,8 @@ class MainWindow(QMainWindow):
         self._log(f"Connecting ({backend})...")
         try:
             self.camera.connect()
-        except CameraError as e:
-            self._log(f"Connect FAILED: {e}")
+        except Exception as e:
+            self._log(f"Connect FAILED: {type(e).__name__}: {e}")
             QMessageBox.warning(self, "Connection failed", str(e))
             self.camera = None
             return
@@ -196,16 +196,16 @@ class MainWindow(QMainWindow):
             else:
                 self.camera.set_trigger_source("INTERNAL")
                 self._log("External Trigger OFF (back to INTERNAL/software trigger).")
-        except CameraError as e:
-            self._log(f"Set trigger mode FAILED: {e}")
+        except Exception as e:
+            self._log(f"Set trigger mode FAILED: {type(e).__name__}: {e}")
 
     def on_exposure_changed(self, value: float):
         if self.camera is None or not self.camera.is_connected:
             return
         try:
             self.camera.set_exposure_ms(value)
-        except CameraError as e:
-            self._log(f"Set exposure failed: {e}")
+        except Exception as e:
+            self._log(f"Set exposure failed: {type(e).__name__}: {e}")
 
     def on_snap_clicked(self):
         self._snap_and_show()
@@ -226,8 +226,12 @@ class MainWindow(QMainWindow):
             return
         try:
             frame = self.camera.snap()
-        except CameraError as e:
-            self._log(f"Snap FAILED: {e}")
+        except Exception as e:
+            # Catch everything, not just our own CameraError -- a raw
+            # exception from pymmcore-plus/DCAM (e.g. a transient device
+            # error) escaping a Qt slot uncaught left the window looking
+            # "frozen" rather than showing what actually happened.
+            self._log(f"Snap FAILED: {type(e).__name__}: {e}")
             if self.live_timer.isActive():
                 self.on_live_clicked()
             return

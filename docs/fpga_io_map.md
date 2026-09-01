@@ -124,6 +124,63 @@ earlier, simpler `03_fpga_trigger_test.py` (bare `Trigger Enable?` toggle,
 no waveform engine) reliably produces NO pulse -- kept around as a
 documented negative example, not a working method.
 
+## Multi-trigger / continuous mode: the real architecture (found in source, 2026-08-29)
+
+We initially tried to brute-force multi-trigger bursts by trial and error
+against real hardware (see git history for `spikes/07_multi_trigger_burst.py`)
+and hit a real, reproducible failure: any hold of `Trigger Enable?` longer
+than one `Cycle(Ticks)` period underflowed the `Wvfrm2` FIFO (confirmed via
+`AO DMA Error` = `Buffer Underflow: True`, `AO wvfrm ready` dropping to
+`False` and getting stuck there for the rest of the session -- recoverable
+only with `session.reset()` + `session.run()`, matching LabVIEW's own
+Reset/Run FPGA init sequence). This happened **regardless of buffer size**
+(96 words or 20,000 words), which was the tell that a one-time write was
+never going to work.
+
+**The actual answer, found in `FPGA code\Host to FPGA\DMA\AO\`**:
+- `HHMI - AO Host generation loop.vi`: a persistent background loop
+  ("Loop till error or Stop is pressed") that runs for the ENTIRE scan,
+  checking "Next block ready to write?" and incrementally writing one
+  block at a time to the AO DMA channel -- not a single upfront write.
+- `HHMI - Duplicate AO array to fill empty spaces in DMA buffer.vi`: when
+  there's no new real per-stack waveform data ready yet, it just
+  duplicates the last computed block to keep the buffer topped up.
+- `Setup AO DMA buffer.vi`: buffer is sized in **blocks** (`Points/block`
+  = `AO rate (Hz)` x a chosen `Sec to transmit block` duration), with a
+  host-side "# of blocks to buffer" look-ahead depth, and the FPGA-side
+  `Wvfrm2.Configure` sets the actual hardware FIFO depth (matches the
+  16389-element depth found in the `.lvproj`'s FIFO definition).
+- `HHMI - Clear AO DMA Host and FPGA buffers.vi` is the proper recovery
+  call for a stuck/underflowed state (equivalent to what we found
+  `AO Mode = 3` "Clear AO DMA" partially does, plus `session.reset()`).
+
+**Implication for the Python side**: any acquisition longer than one quick
+pulse (Z-stack burst, Continuous mode) needs an analogous periodic refill
+loop feeding the `Wvfrm2` FIFO for the duration of the run, not a single
+`fifo.write()` before firing. This is being implemented in
+`src/unmscope/hardware/fpga_trigger.py`.
+
+### Observed pulse counts across every attempt (oscilloscope, DIO4)
+
+Even WITH the background refill thread + `fifo.configure(16000)` + a
+3-block pre-seed, the observed pulse count stays pinned at **1 (sometimes
+2)** and is completely unresponsive to:
+- `# of triggers` (tried 1 and 5)
+- `Trigger #s` / `Trigger stack #s` / `Trigger blast #s` `# on` (tried 1 and 5)
+- how long `Trigger Enable?` is held (tried 10 ms and 700 ms)
+
+**Conclusion: none of those registers is the pulse-count control.** The
+"2 pulses" case appears to be a spurious extra edge when the AO engine
+faults, not a real burst. Do NOT keep tuning these registers by trial and
+error -- that was a dead end that cost significant lab time. The count
+almost certainly derives from the AO waveform data stream itself
+(`AO # of points per trigger` is very likely meant to be in the hundreds --
+the X-galvo sweep samples forming the light sheet during one exposure --
+not `1`, and the all-zero waveform data we stream is not a neutral
+placeholder). A dedicated multi-agent source investigation of the
+FPGA-side VIs was run to settle this; see its conclusions before writing
+any more trigger code.
+
 ## Staged validation (see `../spikes/`)
 
 1. `01_fpga_connect.py` — **done, 2026-08-28.** Opened a real nifpga

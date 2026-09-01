@@ -31,6 +31,18 @@ def main():
         print(f">>> FIRING BURST {rep}/{REPEAT_COUNT} (N={N_TRIGGERS}) NOW -- watch/count on the scope <<<")
         ok = ctrl.fire_burst(N_TRIGGERS)
         print(f"  fire_burst() returned ok={ok}")
+        # Diagnostic: read live FPGA indicators to see WHERE the sequence
+        # actually stopped, instead of guessing further from diagrams.
+        try:
+            regs = ctrl._session.registers
+            print(f"    # of triggers read: {regs['# of triggers read'].read()}")
+            print(f"    # of triggers ignored: {regs['# of triggers ignored'].read()}")
+            print(f"    # AO generated: {regs['# AO generated'].read()}")
+            print(f"    AO Waveform State: {regs['AO Waveform State'].read()}")
+            print(f"    Int Cycle Trigger: {regs['Int Cycle Trigger'].read()}")
+            print(f"    Int Cycle+Added Trigger: {regs['Int Cycle+Added Trigger'].read()}")
+        except Exception as e:
+            print(f"    (diagnostic register read failed: {e})")
         if rep < REPEAT_COUNT:
             print(f"  Pausing {REPEAT_PAUSE_S:.0f}s before next repeat...")
             time.sleep(REPEAT_PAUSE_S)

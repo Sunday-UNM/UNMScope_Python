@@ -1,17 +1,24 @@
 """FPGA trigger controller -- the DIO4 camera-trigger side of the
 hardware abstraction layer, analogous to Camera for the imaging side.
 
-Wraps the corrected, oscilloscope-verified register sequence (see
-docs/fpga_io_map.md) PLUS the real LabVIEW architecture for anything
-longer than a single quick pulse: a persistent background thread that
-continuously refills the "Wvfrm2" AO DMA FIFO for as long as an
-acquisition runs, mirroring `HHMI - AO Host generation loop.vi` /
-`HHMI - Duplicate AO array to fill empty spaces in DMA buffer.vi` in
-`FPGA code\\Host to FPGA\\DMA\\AO\\`. A single upfront fifo.write() (what
-earlier spikes did) only survives until that data is consumed -- fine for
-one quick pulse, but underflows for a real burst or continuous run, which
-faults the whole AO waveform engine (confirmed via AO DMA Error / Buffer
-Underflow, requiring session.reset() to recover).
+PRAGMATIC DESIGN DECISION (2026-08-29): the FPGA's native multi-trigger
+burst mechanism (# of triggers / Trigger #s clusters / Continuous Mode)
+was investigated at length -- see docs/fpga_io_map.md "Multi-trigger: the
+real mechanism" and "still unresolved" -- and never produced a reliable
+N-pulse burst on real hardware, despite finding and fixing several real
+bugs along the way (a Cycle(Ticks)/Trigger up (ticks) race condition,
+among others). The internal `# of triggers read` counter never advanced
+past 0 even when a real pulse fired, and the chain that would explain that
+goes deeper than what's captured in the exported VI diagrams.
+
+What IS fully validated, reliable, and proven end-to-end (including
+triggering the real camera, confirmed via oscilloscope): a SINGLE trigger
+pulse, fired via the sequence in fire_single_trigger() below. So instead
+of depending on hardware behavior we don't yet trust, N-frame acquisition
+(Z-stack, Continuous) is built as a Python-side LOOP of that one proven
+primitive, once per frame -- less elegant than a hardware-native burst,
+but only uses the mechanism we actually trust. Revisit the native burst
+mechanism later if throughput becomes a real constraint.
 
 Z Galvo/Z Piezo/X Galvo etc. are still held at a fixed all-zero value --
 real per-slice waveform content (actual Z stepping, beam sweep) is
@@ -32,19 +39,24 @@ AO_MODE_START_RUN_WVFRM = 0
 AO_MODE_SET_AO = 2
 AO_MODE_CLEAR_AO_DMA = 3
 
-TRIGGER_UP_TICKS = 4_000_000  # ~100ms @ 40MHz -- oscilloscope-verified pulse width
-CYCLE_S = TRIGGER_UP_TICKS / 40e6
+# CORRECTED UNDERSTANDING (found in source -- see docs/fpga_io_map.md):
+#   - DIO4 pulse WIDTH is a hardcoded ~100us inside the FPGA's
+#     "Generate External Camera Trigger.vi" -- not controlled by any
+#     register. This is just the holdoff/repeat-rate config we still set
+#     even though we're only ever asking for a single pulse per call.
+CYCLE_TICKS = 4_000_000        # ~100ms @ 40MHz
+HOLDOFF_TICKS = 400_000        # ~10ms -- must stay well under CYCLE_TICKS
 AO_TICKS_BETWEEN_POINTS = 4000
 AO_POINTS_PER_TRIGGER = 1
+ENABLE_HOLD_S = 0.01           # validated: short hold, one clean pulse
 
-REFILL_BLOCK = [0] * 4000       # zero-filled block written repeatedly by the refill thread
-REFILL_WRITE_TIMEOUT_MS = 1000  # write() blocks until there's room -- this paces the thread
-FIFO_REQUESTED_DEPTH = 16000     # close to the FPGA-side max (16389, from the .lvproj FIFO def);
-                                  # matches LabVIEW's explicit Wvfrm2.Configure > Requested Depth step
+WVFRM_SEED_WORDS = [0] * 48    # validated size for a single-trigger fire
 STATIC_ZERO = {
     "X Galvo": 0, "Z Galvo": 0, "Z Piezo": 0,
     "Dither Galvo": 0, "Tiling": 0, "Filter": 0, "AOTF on?": False,
 }
+
+DEFAULT_WAIT_READY_TIMEOUT_S = 3.0
 
 
 class FpgaTriggerError(RuntimeError):
@@ -52,21 +64,16 @@ class FpgaTriggerError(RuntimeError):
 
 
 class FpgaTriggerController:
-    """Owns one nifpga.Session. Not thread-safe to call from multiple
-    threads yourself -- the internal refill thread is the only concurrent
-    access, which is the same concurrent-access-to-one-session pattern
-    LabVIEW's own parallel FPGA host loops use."""
+    """Owns one nifpga.Session."""
 
     def __init__(self):
         self._session: nifpga.Session | None = None
-        self._refill_thread: threading.Thread | None = None
-        self._refill_stop = threading.Event()
 
     # -- lifecycle --------------------------------------------------------
     def connect(self):
         self._session = nifpga.Session(bitfile=BITFILE, resource=RESOURCE)
         # Always reset+run at connect -- a stuck/underflowed AO DMA state
-        # can otherwise silently persist across sessions in the same test.
+        # can otherwise silently persist across sessions.
         self._session.reset()
         time.sleep(0.3)
         self._session.run()
@@ -74,7 +81,6 @@ class FpgaTriggerController:
         self.safe_state()
 
     def close(self):
-        self.stop()
         if self._session is not None:
             try:
                 self.safe_state()
@@ -98,41 +104,20 @@ class FpgaTriggerController:
         regs["Static AO to set"].write(STATIC_ZERO)
         regs["Set F.P. (T)"].write(True)
 
-    def clear_ao_dma_error(self):
+    # -- the one proven primitive: a single trigger pulse ------------------
+    def fire_single_trigger(self, wait_ready_timeout_s: float = DEFAULT_WAIT_READY_TIMEOUT_S) -> bool:
+        """Fire exactly ONE validated trigger pulse on DIO4. Full
+        arm -> fire -> disarm cycle each call (matches the sequence
+        confirmed on the oscilloscope and end-to-end with the real
+        camera). Returns True if the waveform engine armed OK and the
+        pulse was sent; False if it never became ready (not fired)."""
         regs = self._regs()
-        regs["AO Mode"].write(AO_MODE_CLEAR_AO_DMA)
-        regs["Set F.P. (T)"].write(True)
-        time.sleep(0.05)
 
-    # -- internal: refill thread ---------------------------------------
-    def _refill_loop(self, fifo):
-        while not self._refill_stop.is_set():
-            try:
-                fifo.write(REFILL_BLOCK, timeout_ms=REFILL_WRITE_TIMEOUT_MS)
-            except Exception:
-                # FIFO stopped/closed underneath us, or a real timeout --
-                # either way, stop trying rather than spin/crash.
-                return
-
-    def _start_refill(self, fifo):
-        self._refill_stop.clear()
-        self._refill_thread = threading.Thread(target=self._refill_loop, args=(fifo,), daemon=True)
-        self._refill_thread.start()
-
-    def _stop_refill(self):
-        self._refill_stop.set()
-        if self._refill_thread is not None:
-            self._refill_thread.join(timeout=2.0)
-        self._refill_thread = None
-
-    # -- configuration ----------------------------------------------------
-    def _configure_registers(self, continuous: bool, cam_trigger_delay_ticks: int = 0):
-        regs = self._regs()
-        regs["Cam Trigger delay (ticks)"].write(cam_trigger_delay_ticks)
+        regs["Cam Trigger delay (ticks)"].write(0)
         regs["# of triggers"].write(1)
-        regs["Continuous Mode"].write(continuous)
-        regs["Cycle(Ticks)"].write(TRIGGER_UP_TICKS)
-        regs["Trigger up (ticks)"].write(TRIGGER_UP_TICKS)
+        regs["Continuous Mode"].write(False)
+        regs["Cycle(Ticks)"].write(CYCLE_TICKS)
+        regs["Trigger up (ticks)"].write(HOLDOFF_TICKS)
         regs["AO Trigger delay (ticks)"].write(0)
         regs["Free run"].write(False)
         regs["AI # of channels"].write(0)
@@ -146,81 +131,89 @@ class FpgaTriggerController:
         regs["Trigger blast #s"].write(on_off_one)
         regs["Set F.P. (T)"].write(True)
 
-    def _arm(self, continuous: bool) -> bool:
-        """Clear any latched error, start the refill thread, start the AO
-        waveform engine, wait for ready. Returns True if armed OK."""
-        regs = self._regs()
-        self.clear_ao_dma_error()
-
         fifo = self._session.fifos["Wvfrm2"]
         fifo.stop()
-        fifo.configure(FIFO_REQUESTED_DEPTH)
         fifo.start()
-        # Pre-seed generously before the refill thread takes over, so
-        # there's a real cushion (not just one block) before the first
-        # scheduled refill needs to land.
-        fifo.write(REFILL_BLOCK, timeout_ms=2000)
-        fifo.write(REFILL_BLOCK, timeout_ms=2000)
-        fifo.write(REFILL_BLOCK, timeout_ms=2000)
-        self._start_refill(fifo)
+        fifo.write(WVFRM_SEED_WORDS, timeout_ms=2000)
 
-        self._configure_registers(continuous=continuous)
         regs["AO Mode"].write(AO_MODE_START_RUN_WVFRM)
         regs["Set F.P. (T)"].write(True)
         t0 = time.time()
         ready = False
-        while time.time() - t0 < 3.0:
+        while time.time() - t0 < wait_ready_timeout_s:
             ready = regs["AO wvfrm ready"].read()
             if ready:
                 break
             time.sleep(0.01)
-        if not ready:
-            self._stop_refill()
-            fifo.stop()
-        return ready
 
-    def _disarm(self, fifo):
-        regs = self._regs()
-        regs["Trigger Enable?"].write(False)
-        regs["Set F.P. (T)"].write(True)
-        self._stop_refill()
+        fired = False
+        if ready:
+            regs["Trigger Enable?"].write(True)
+            regs["Set F.P. (T)"].write(True)
+            time.sleep(ENABLE_HOLD_S)
+            regs["Trigger Enable?"].write(False)
+            regs["Set F.P. (T)"].write(True)
+            fired = True
+
         fifo.stop()
-        self.safe_state()
-
-    # -- public: burst (Z-stack building block) --------------------------
-    def fire_burst(self, n_triggers: int, hold_margin_cycles: float = 1.5) -> bool:
-        """Fire a burst of n_triggers pulses. Holds Trigger Enable? for
-        n_triggers cycles (+ margin) while the background thread keeps the
-        AO DMA fed, matching the real LabVIEW architecture. Returns True on
-        success (armed + fired without an AO DMA fault)."""
-        if not self._arm(continuous=False):
-            return False
-        fifo = self._session.fifos["Wvfrm2"]
-        regs = self._regs()
-        hold_s = CYCLE_S * (n_triggers + hold_margin_cycles)
-        regs["Trigger Enable?"].write(True)
+        regs["AO Mode"].write(AO_MODE_SET_AO)
+        regs["Static AO to set"].write(STATIC_ZERO)
         regs["Set F.P. (T)"].write(True)
-        time.sleep(hold_s)
-        ok = not regs["AO DMA Error"].read()["Buffer Underflow"]
-        self._disarm(fifo)
-        return ok
+        return fired
 
-    # -- public: continuous mode -----------------------------------------
-    def start_continuous(self) -> bool:
-        if not self._arm(continuous=True):
-            return False
-        regs = self._regs()
-        regs["Trigger Enable?"].write(True)
-        regs["Set F.P. (T)"].write(True)
-        return True
+    # -- public: N-frame burst (Z-stack), as a loop of the proven primitive
+    def fire_burst(self, n_triggers: int, inter_trigger_delay_s: float = 0.15,
+                    on_progress=None) -> int:
+        """Fire n_triggers single pulses, inter_trigger_delay_s apart
+        (should comfortably exceed the camera's exposure+readout time so
+        each pulse lands on a fresh frame). Returns how many actually
+        fired (== n_triggers unless something went wrong partway). Calls
+        on_progress(i, n_triggers) after each successful fire, if given."""
+        fired_count = 0
+        for i in range(n_triggers):
+            ok = self.fire_single_trigger()
+            if not ok:
+                break
+            fired_count += 1
+            if on_progress is not None:
+                on_progress(fired_count, n_triggers)
+            if i < n_triggers - 1:
+                time.sleep(inter_trigger_delay_s)
+        return fired_count
+
+    # -- public: continuous mode, as a repeating loop of the same primitive
+    def start_continuous(self, inter_trigger_delay_s: float = 0.15, on_frame=None):
+        """Start firing single pulses repeatedly, inter_trigger_delay_s
+        apart, on a background thread, until stop_continuous() is called.
+        on_frame(count) is called after each successful fire, if given."""
+        self._continuous_stop = threading.Event()
+
+        def _loop():
+            count = 0
+            while not self._continuous_stop.is_set():
+                ok = self.fire_single_trigger()
+                if not ok:
+                    break
+                count += 1
+                if on_frame is not None:
+                    on_frame(count)
+                self._continuous_stop.wait(inter_trigger_delay_s)
+
+        self._continuous_thread = threading.Thread(target=_loop, daemon=True)
+        self._continuous_thread.start()
 
     def stop_continuous(self):
-        fifo = self._session.fifos["Wvfrm2"]
-        self._disarm(fifo)
+        if getattr(self, "_continuous_stop", None) is not None:
+            self._continuous_stop.set()
+        thread = getattr(self, "_continuous_thread", None)
+        if thread is not None:
+            thread.join(timeout=5.0)
+        self._continuous_thread = None
+        self.safe_state()
 
     def stop(self):
         """Best-effort disarm regardless of current state."""
-        self._stop_refill()
+        self.stop_continuous()
         if self._session is not None:
             try:
                 regs = self._regs()

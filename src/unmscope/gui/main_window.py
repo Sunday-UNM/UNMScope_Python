@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (
     QFormLayout, QLabel, QPushButton, QComboBox, QDoubleSpinBox, QSpinBox,
     QTextEdit, QMessageBox, QSizePolicy, QCheckBox, QTabWidget, QSlider,
     QLineEdit, QTableWidget, QTableWidgetItem, QHeaderView, QProgressBar,
-    QSplitter,
+    QSplitter, QRadioButton, QButtonGroup, QToolButton, QScrollArea, QFrame,
 )
 
 from unmscope.hardware.camera import Camera, OrcaFlash4Camera, SimulatedCamera
@@ -58,8 +58,8 @@ MODE_CONTINUOUS = "Continuous Scan"
 MODE_ZSTACK = "Z stack"
 
 # -- LouisXIV-style palette (sampled from the real front panel) ------------
-PANEL_BG = "#d7d7f2"       # lavender window/tab background
-GROUP_BG = "#e7e7f7"       # slightly lighter group-box interior
+PANEL_BG = "#e8e8f8"       # light lavender window/tab background
+GROUP_BG = "#f2f2fb"       # even lighter group-box interior
 WHITE_BG = "#ffffff"
 BORDER = "#8f8fbf"
 IDLE_GREEN = "#2fa72f"
@@ -76,7 +76,7 @@ QTabBar::tab {{
 QTabBar::tab:selected {{ background: {WHITE_BG}; font-weight: bold; }}
 QGroupBox {{
     background-color: {GROUP_BG}; border: 1px solid {BORDER}; border-radius: 3px;
-    margin-top: 10px; font-weight: bold;
+    margin-top: 6px; font-weight: bold;
 }}
 QGroupBox::title {{
     subcontrol-origin: margin; left: 8px; padding: 0 4px; background: {PANEL_BG};
@@ -133,6 +133,12 @@ def _narrow(w, width: int = 80):
 def _stub_note(text: str) -> QLabel:
     lbl = QLabel(text)
     lbl.setWordWrap(True)
+    # A word-wrapped QLabel's minimumSizeHint doesn't actually shrink on its
+    # own in Qt -- without a cap here, these notes were forcing the whole
+    # window ~270px wider than intended (each one wanted its full unwrapped
+    # single-line width as a minimum). 220px matches the narrow columns
+    # these live in throughout Scan Setup.
+    lbl.setMaximumWidth(220)
     lbl.setStyleSheet(f"color: {DISABLED_NOTE}; font-style: italic; font-weight: normal;")
     return lbl
 
@@ -146,6 +152,10 @@ def _placeholder_tab(title: str, subtitle: str = "Not yet implemented.") -> QWid
     box.setAlignment(Qt.AlignCenter)
     box.setStyleSheet("background-color: #1e1e1e; color: #888; font-style: italic;")
     box.setMinimumHeight(120)
+    # Without word-wrap, a long subtitle (e.g. Waveforms') reports its full
+    # unwrapped width as a MINIMUM, which was forcing this tab's QTabWidget
+    # -- and everything above it up to the whole window -- ~270px wider.
+    box.setWordWrap(True)
     lay.addWidget(box)
     return w
 
@@ -163,7 +173,9 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("UNMScope -- LouisXIV (Python)")
-        self.resize(1360, 900)
+        # Match the real SPIM MAIN.vi window exactly (1381x931, measured via
+        # GetWindowRect off the live LouisXIV.exe front panel).
+        self.resize(1381, 898)
         self.setStyleSheet(STYLESHEET)
 
         self.camera: Camera | None = None
@@ -187,6 +199,8 @@ class MainWindow(QMainWindow):
         central.setObjectName("central")
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
+        root.setContentsMargins(6, 4, 6, 4)
+        root.setSpacing(4)
 
         root.addLayout(self._build_top_bar())
 
@@ -195,7 +209,8 @@ class MainWindow(QMainWindow):
 
         body.addWidget(self._build_left_tabs())
         body.addWidget(self._build_right_side())
-        body.setSizes([400, 960])
+        # 406/975 -- measured left/right panel widths off the real front panel.
+        body.setSizes([406, 975])
 
         self._on_mode_changed(self.mode_combo.currentText())
 
@@ -279,9 +294,16 @@ class MainWindow(QMainWindow):
         lay.addWidget(self._build_connection_bar())
 
         tabs = QTabWidget()
-        tabs.setMinimumWidth(470)
-        tabs.setMaximumWidth(560)
-        tabs.addTab(self._build_scan_setup_tab(), "Scan Setup")
+        tabs.setFixedWidth(406)  # measured off the real front panel
+        scan_setup_scroll = QScrollArea()
+        scan_setup_scroll.setWidget(self._build_scan_setup_tab())
+        scan_setup_scroll.setWidgetResizable(True)
+        scan_setup_scroll.setFrameShape(QFrame.NoFrame)
+        # Scan Setup's own content wants ~90px more height than the real
+        # panel's tighter native-control metrics allow -- scrolling here
+        # (rather than growing) keeps the WHOLE WINDOW pinned to the real
+        # panel's size; nothing is normally cut off at the target size.
+        tabs.addTab(scan_setup_scroll, "Scan Setup")
         tabs.addTab(self._build_camera_tab(), "Camera")
         tabs.addTab(_placeholder_tab("Utilities"), "Utilities")
         tabs.addTab(_placeholder_tab("Preferences"), "Preferences")
@@ -326,15 +348,6 @@ class MainWindow(QMainWindow):
     def _build_scan_setup_tab(self) -> QWidget:
         tab = QWidget()
         outer = QVBoxLayout(tab)
-        outer.addWidget(_stub_note(
-            "Layout + control LOGIC verified against the real LabVIEW source "
-            "(SPIM MAIN.vi, HHMI - SPIM Update GUI Axis control.vi, HHMI - "
-            "Check that only 1 laser is selected.vi, HHMI - SPIM AOTF cycle "
-            "enum, D Galvo Limits from ini file.vi -- see fpga_io_map.md). "
-            "Field values still don't drive real hardware except Camera, "
-            "Z Piezo Interval/Start/End/Slices (trigger count), and the "
-            "single-laser-selected check below -- those are real."
-        ))
 
         # Real panel is genuinely two side-by-side columns, not one column
         # with a single split top row -- confirmed from both of the user's
@@ -345,6 +358,7 @@ class MainWindow(QMainWindow):
         outer.addLayout(columns, stretch=1)
 
         left_col = QVBoxLayout()
+        left_col.setSpacing(4)
         left_col.addWidget(self._build_excitation_box())
         left_col.addLayout(self._build_cycle_lasers_row())
         self.timepoints_widget = self._build_timepoints_box()
@@ -357,6 +371,7 @@ class MainWindow(QMainWindow):
         columns.addLayout(left_col, stretch=1)
 
         right_col = QVBoxLayout()
+        right_col.setSpacing(4)
         right_col.addWidget(self._build_x_galvo_box())
         right_col.addWidget(self._build_z_galvo_box())
         right_col.addWidget(self._build_linked_box())
@@ -432,7 +447,6 @@ class MainWindow(QMainWindow):
         form.addRow("Range (um)", self.dg_range)
         form.addRow("# Sweeps", self.dg_sweeps)
         form.addRow("Fract. Flyback", self.dg_flyback)
-        form.addRow(_stub_note("Real axis (AO4), not yet sent to the FPGA -- see fpga_io_map.md."))
         return box
 
     def _on_linked_toggled(self, checked: bool):
@@ -477,13 +491,6 @@ class MainWindow(QMainWindow):
             row.addWidget(spin)
             form.addLayout(row)
             self.excitation_rows.append((chk, wavelength, spin))
-        form.addWidget(_stub_note(
-            "Real rule (HHMI - Check that only 1 laser is selected.vi): "
-            "acquisition requires exactly 1 line checked with Power > 0% "
-            "-- enforced below on Acquire, same dialog text as LabVIEW. "
-            "Per-channel AOTF power is NOT yet sent to hardware (bitfile "
-            "only has one overall AOTF on/off bit)."
-        ))
         return box
 
     def _build_x_galvo_box(self) -> QGroupBox:
@@ -533,10 +540,6 @@ class MainWindow(QMainWindow):
         form.addRow("Interval", self.zg_interval)
         form.addRow("Start Pos", self.zg_start)
         form.addRow("End Pos", self.zg_end)
-        form.addRow(_stub_note(
-            "Real per-slice Z-galvo stepping not yet hardware-validated -- "
-            "these values aren't sent to the FPGA yet."
-        ))
         return box
 
     def _build_z_piezo_box(self) -> QGroupBox:
@@ -564,13 +567,6 @@ class MainWindow(QMainWindow):
         self.slice_count_field.setMaximumWidth(80)
         self.slice_count_field.setStyleSheet("font-weight: bold;")
         form.addRow("Slices", self.slice_count_field)
-        form.addRow(_stub_note(
-            "Interval/Start/End/Slices are REAL -- they drive the Z-stack "
-            "trigger/frame count below (live). Actual Z piezo motion "
-            "between slices is NOT yet implemented -- the piezo stays at "
-            "a fixed safe value; only the trigger/frame-count mechanism "
-            "is being exercised."
-        ))
         self._update_slice_count()
         return box
 
@@ -682,18 +678,19 @@ class MainWindow(QMainWindow):
         bottom_tabs = QTabWidget()
         bottom_tabs.addTab(_placeholder_tab("Image Profile / Point Profile / Line Profile"), "Image Profile")
         bottom_tabs.addTab(_placeholder_tab("Stack Profile"), "Stack Profile")
-        bottom_tabs.addTab(_placeholder_tab("Stack Projections"), "Stack Projections")
+        bottom_tabs.addTab(self._build_stack_projections_tab(), "Stack Projections")
         bottom_tabs.addTab(_placeholder_tab("Row Profile"), "Row Profile")
         bottom_tabs.addTab(_placeholder_tab("Timing"), "Timing")
         bottom_tabs.addTab(self._build_diagnostics_tab(), "Diagnostics")
         splitter.addWidget(bottom_tabs)
 
-        splitter.setSizes([600, 220])
+        # 540/290 -- measured images-pane/stack-projections-pane height ratio.
+        splitter.setSizes([540, 290])
         return splitter
 
     def _build_images_tab(self) -> QWidget:
         tab = QWidget()
-        right_panel = QVBoxLayout(tab)
+        outer = QVBoxLayout(tab)
 
         self.frame_counter_label = QLabel("0")
         self.frame_counter_label.setStyleSheet("font-weight: bold; font-size: 16pt; color: #2a7;")
@@ -701,17 +698,224 @@ class MainWindow(QMainWindow):
         counter_row.addWidget(QLabel("Frames received:"))
         counter_row.addWidget(self.frame_counter_label)
         counter_row.addStretch(1)
-        right_panel.addLayout(counter_row)
+        outer.addLayout(counter_row)
 
         self.frame_info_label = QLabel("-")
-        right_panel.addWidget(self.frame_info_label)
+        outer.addWidget(self.frame_info_label)
 
+        # Real panel layout: narrow tool strip | bounded scrollable image |
+        # narrow display-options strip (see SPIM MAINp.png's Images tab).
+        # None of the three widgets built below drive real behavior yet --
+        # visual-only, same convention as the rest of this module (see the
+        # module docstring's "honesty about what's real").
+        image_row = QHBoxLayout()
+        image_row.setSpacing(6)
+        image_row.addWidget(self._build_image_left_toolbar())
+        image_row.addWidget(self._build_image_display(), stretch=1)
+        image_row.addWidget(self._build_max_counts_panel())
+        image_row.addWidget(self._build_display_options_panel())
+        outer.addLayout(image_row, stretch=1)
+        return tab
+
+    def _build_image_left_toolbar(self) -> QWidget:
+        col_widget = QWidget()
+        col_widget.setFixedWidth(80)  # measured off the real panel
+        col = QVBoxLayout(col_widget)
+        col.setContentsMargins(2, 0, 2, 0)
+        col.setSpacing(2)
+
+        self.img_tool_group = QButtonGroup(self)
+        tool_specs = [
+            ("zoom", "\U0001F50D"), ("pan", "✋"), ("crosshair", "➕"),
+            ("line", "╱"), ("roi", "▭"),
+        ]
+        for name, glyph in tool_specs:
+            btn = QToolButton()
+            btn.setText(glyph)
+            btn.setCheckable(True)
+            btn.setFixedSize(28, 28)
+            self.img_tool_group.addButton(btn)
+            col.addWidget(btn)
+            setattr(self, f"img_tool_{name}_btn", btn)
+        self.img_tool_zoom_btn.setChecked(True)
+
+        col.addSpacing(10)
+        self.cam_select_combo = QComboBox()
+        self.cam_select_combo.addItem("Cam 1")
+        col.addWidget(self.cam_select_combo)
+
+        col.addSpacing(10)
+        self.save_image_btn = QPushButton("\U0001F4BE Image")
+        col.addWidget(self.save_image_btn)
+
+        col.addSpacing(10)
+        self.cam_pan_btn = QPushButton("✥ Cam 1")
+        col.addWidget(self.cam_pan_btn)
+
+        col.addStretch(1)
+
+        for w in (self.img_tool_zoom_btn, self.img_tool_pan_btn,
+                  self.img_tool_crosshair_btn, self.img_tool_line_btn,
+                  self.img_tool_roi_btn, self.cam_select_combo,
+                  self.save_image_btn, self.cam_pan_btn):
+            w.setEnabled(False)
+        return col_widget
+
+    def _build_image_display(self) -> QScrollArea:
         self.image_label = QLabel("(no image yet)")
         self.image_label.setAlignment(Qt.AlignCenter)
-        self.image_label.setStyleSheet("background-color: #202020; color: #888;")
-        self.image_label.setMinimumHeight(400)
-        self.image_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        right_panel.addWidget(self.image_label, stretch=1)
+        # #f0f0f0 -- the real panel's empty-picture-control color, confirmed
+        # by pixel-sampling the live front panel (NOT black, despite how it
+        # reads at a glance/thumbnail size).
+        self.image_label.setStyleSheet("background-color: #f0f0f0; color: #666;")
+        self.image_label.setMinimumSize(300, 300)
+
+        scroll = QScrollArea()
+        scroll.setWidget(self.image_label)
+        scroll.setWidgetResizable(True)  # label still fills the viewport,
+        # matching the pre-restyle behavior that _poll_camera_for_frame()
+        # relies on (it scales each frame to self.image_label.size()) --
+        # this box only ADDS the bounded/bordered look, doesn't change sizing.
+        scroll.setStyleSheet(f"QScrollArea {{ border: 1px solid {BORDER}; }}")
+        scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        return scroll
+
+    def _build_max_counts_panel(self) -> QWidget:
+        # A SEPARATE bordered sub-panel from display-options below --
+        # confirmed by pixel-sampling the real front panel: there's a real
+        # ~14px gap and each side has its own 1px border the full panel
+        # height, not one wide column with a big left margin (that was my
+        # first, wrong read of it). 123px width measured off the real panel.
+        panel = QFrame()
+        panel.setObjectName("maxCountsPanel")
+        panel.setFixedWidth(123)
+        # Scoped by #maxCountsPanel, NOT a bare "QFrame" selector -- QLabel
+        # is itself a QFrame subclass in Qt, so an unscoped rule was also
+        # drawing a border around every label inside this panel.
+        panel.setStyleSheet(f"QFrame#maxCountsPanel {{ border: 1px solid {BORDER}; background-color: {GROUP_BG}; }}")
+        col = QVBoxLayout(panel)
+        col.setContentsMargins(6, 6, 6, 6)
+        col.addStretch(2)  # content sits in the lower ~2/3, not top-anchored
+
+        col.addWidget(QLabel("Max Counts"))
+        self.max_counts_spin = QSpinBox()
+        self.max_counts_spin.setRange(0, 65535)
+        col.addWidget(self.max_counts_spin)
+        self.max_counts_slider = QSlider(Qt.Horizontal)
+        self.max_counts_slider.setRange(0, 65535)
+        col.addWidget(self.max_counts_slider)
+
+        col.addSpacing(4)
+        col.addWidget(QLabel("Frames to Avg"))
+        self.frames_to_avg_spin = QSpinBox()
+        self.frames_to_avg_spin.setRange(1, 100)
+        self.frames_to_avg_spin.setValue(1)
+        col.addWidget(self.frames_to_avg_spin)
+
+        col.addSpacing(4)
+        col.addWidget(QLabel("Stack Max"))
+        self.stack_max_spin = QSpinBox()
+        self.stack_max_spin.setRange(0, 10000)
+        self.stack_max_spin.setValue(7)
+        col.addWidget(self.stack_max_spin)
+        self.stack_max_slider = QSlider(Qt.Horizontal)
+        self.stack_max_slider.setRange(0, 10000)
+        col.addWidget(self.stack_max_slider)
+        col.addStretch(1)
+
+        for w in (self.max_counts_spin, self.max_counts_slider,
+                  self.frames_to_avg_spin, self.stack_max_spin,
+                  self.stack_max_slider):
+            w.setEnabled(False)
+        return panel
+
+    def _build_display_options_panel(self) -> QWidget:
+        # The other sub-panel -- 214px, its own border, top-anchored
+        # content with Text Info Overlay pinned to the bottom.
+        panel = QFrame()
+        panel.setObjectName("displayOptionsPanel")
+        panel.setFixedWidth(214)
+        panel.setStyleSheet(f"QFrame#displayOptionsPanel {{ border: 1px solid {BORDER}; background-color: {GROUP_BG}; }}")
+        col = QVBoxLayout(panel)
+        col.setContentsMargins(8, 8, 8, 8)
+
+        palette_row = QHBoxLayout()
+        palette_row.addWidget(QLabel("Pallete Color"))
+        palette_col = QVBoxLayout()
+        palette_col.setSpacing(0)
+        self.palette_group = QButtonGroup(self)
+        self.palette_gray_radio = QRadioButton("Gray")
+        self.palette_gradient_radio = QRadioButton("Gradient")
+        self.palette_rainbow_radio = QRadioButton("Rainbow")
+        self.palette_gradient_radio.setChecked(True)
+        for rb in (self.palette_gray_radio, self.palette_gradient_radio, self.palette_rainbow_radio):
+            self.palette_group.addButton(rb)
+            palette_col.addWidget(rb)
+        palette_row.addLayout(palette_col)
+        col.addLayout(palette_row)
+
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignLeft)
+        form.setVerticalSpacing(2)
+        self.scalebar_check = QCheckBox()
+        self.zoom_to_fit_check = QCheckBox()
+        self.autoscale_z_check = QCheckBox()
+        self.autoscale_z_check.setChecked(True)
+        self.scale_to_counts_check = QCheckBox()
+        form.addRow("Scalebar", self.scalebar_check)
+        form.addRow("Zoom to fit", self.zoom_to_fit_check)
+        form.addRow("Autoscale Z", self.autoscale_z_check)
+        form.addRow("Scale to Counts", self.scale_to_counts_check)
+        col.addLayout(form)
+
+        col.addStretch(1)
+        self.text_info_overlay_check = QCheckBox("Text Info Overlay")
+        col.addWidget(self.text_info_overlay_check)
+
+        for w in (self.palette_gray_radio, self.palette_gradient_radio,
+                  self.palette_rainbow_radio, self.scalebar_check,
+                  self.zoom_to_fit_check, self.autoscale_z_check,
+                  self.scale_to_counts_check, self.text_info_overlay_check):
+            w.setEnabled(False)
+        return panel
+
+    def _build_stack_projections_tab(self) -> QWidget:
+        # Visual-only, matching SPIM MAINp.png's Stack Projections panel --
+        # not wired to any real projection computation yet. Box size
+        # (245x196) and gaps (~30px) measured off the live front panel.
+        tab = QWidget()
+        outer = QHBoxLayout(tab)
+        outer.setSpacing(29)
+
+        self.projection_labels = {}
+        for name in ("XY", "YZ", "XZ"):
+            col = QVBoxLayout()
+            col.addWidget(QLabel(name))
+            view = QLabel()
+            # #f0f0f0 -- confirmed by pixel-sampling, not black.
+            view.setStyleSheet("background-color: #f0f0f0;")
+            view.setFixedSize(245, 180)
+            self.projection_labels[name] = view
+            col.addWidget(view)
+            save_btn = QPushButton("\U0001F4BE")
+            save_btn.setFixedWidth(32)
+            save_btn.setEnabled(False)
+            col.addWidget(save_btn)
+            outer.addLayout(col)
+
+        outer.addStretch(1)
+
+        side = QVBoxLayout()
+        self.deskew_check = QCheckBox("DeSkew")
+        self.deskew_check.setChecked(True)
+        self.deskew_check.setEnabled(False)
+        side.addWidget(self.deskew_check)
+        self.calc_projections_btn = QPushButton("Calc")
+        self.calc_projections_btn.setEnabled(False)
+        side.addWidget(self.calc_projections_btn)
+        side.addStretch(1)
+        outer.addLayout(side)
+
         return tab
 
     def _build_diagnostics_tab(self) -> QWidget:

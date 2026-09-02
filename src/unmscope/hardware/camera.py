@@ -74,6 +74,11 @@ class SimulatedCamera(Camera):
         self._width = width
         self._height = height
         self._rng = np.random.default_rng()
+        self._trigger_source = "INTERNAL"
+        self._trigger_polarity = "NEGATIVE"
+        self._seq_running = False
+        self._seq_target: int | None = None
+        self._seq_count = 0
 
     def connect(self) -> None:
         self._connected = True
@@ -102,6 +107,44 @@ class SimulatedCamera(Camera):
             raise CameraError("Camera not connected")
         base = self._rng.poisson(lam=200, size=(self._height, self._width)).astype(np.uint16)
         return base
+
+    # -- No real trigger input to wait on (no hardware) -- these just
+    # record the requested state so GUI code paths that call them don't
+    # blow up with SimulatedCamera selected. start_sequence()/pop_image()
+    # free-run at whatever pace the GUI polls them, independent of any
+    # real trigger -- fine for exercising the GUI/app flow, NOT a stand-in
+    # for real FPGA-trigger timing (there is no simulated FPGA).
+    def set_trigger_source(self, source: str) -> None:
+        self._trigger_source = source
+
+    def set_trigger_polarity(self, polarity: str) -> None:
+        self._trigger_polarity = polarity
+
+    def start_sequence(self, n_images: int = 1) -> None:
+        if not self._connected:
+            raise CameraError("Camera not connected")
+        self._seq_running = True
+        self._seq_target = n_images
+        self._seq_count = 0
+
+    def remaining_image_count(self) -> int:
+        if not self._seq_running:
+            return 0
+        if self._seq_target is not None and self._seq_count >= self._seq_target:
+            return 0
+        return 1
+
+    def pop_image(self) -> np.ndarray:
+        if not self._seq_running:
+            raise CameraError("No sequence running")
+        self._seq_count += 1
+        return self.snap()
+
+    def is_sequence_running(self) -> bool:
+        return self._seq_running
+
+    def stop_sequence(self) -> None:
+        self._seq_running = False
 
 
 class OrcaFlash4Camera(Camera):

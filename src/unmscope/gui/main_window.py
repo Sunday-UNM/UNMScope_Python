@@ -264,8 +264,20 @@ class MainWindow(QMainWindow):
         top_bar.addWidget(exit_btn)
         return top_bar
 
-    # -- Left panel: tabbed, Scan Setup / Camera / Utilities / Preferences / Adv Setup
-    def _build_left_tabs(self) -> QTabWidget:
+    # -- Left panel: an always-visible Connection bar (Camera+FPGA connect --
+    #    this is OUR app's own hardware bring-up step, not part of the real
+    #    SPIM MAIN panel, so it deliberately does NOT hide inside a tab the
+    #    way the rest of this panel mimics the real layout: Acquire depends
+    #    on both being connected, and burying that behind a tab click made
+    #    the whole app look broken/"lost functionality" when it was really
+    #    just Connect never having been clicked) sitting above the tabbed
+    #    Scan Setup / Camera / Utilities / Preferences / Adv Setup panel.
+    def _build_left_tabs(self) -> QWidget:
+        container = QWidget()
+        lay = QVBoxLayout(container)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(self._build_connection_bar())
+
         tabs = QTabWidget()
         tabs.setMinimumWidth(470)
         tabs.setMaximumWidth(560)
@@ -274,7 +286,42 @@ class MainWindow(QMainWindow):
         tabs.addTab(_placeholder_tab("Utilities"), "Utilities")
         tabs.addTab(_placeholder_tab("Preferences"), "Preferences")
         tabs.addTab(self._build_adv_setup_tab(), "Adv Setup")
-        return tabs
+        lay.addWidget(tabs, stretch=1)
+        return container
+
+    def _build_connection_bar(self) -> QGroupBox:
+        box = QGroupBox("Hardware Connection")
+        grid = QGridLayout(box)
+
+        grid.addWidget(QLabel("Camera:"), 0, 0)
+        self.backend_combo = QComboBox()
+        self.backend_combo.addItems(["Orca Flash 4.0 (real)", "Simulated"])
+        grid.addWidget(self.backend_combo, 0, 1)
+        self.connect_btn = QPushButton("Connect")
+        self.connect_btn.clicked.connect(self.on_connect_clicked)
+        grid.addWidget(self.connect_btn, 0, 2)
+        self.disconnect_btn = QPushButton("Disconnect")
+        self.disconnect_btn.clicked.connect(self.on_disconnect_clicked)
+        self.disconnect_btn.setEnabled(False)
+        grid.addWidget(self.disconnect_btn, 0, 3)
+        self.status_label = QLabel("Not connected")
+        self.status_label.setStyleSheet("font-weight: bold;")
+        self.status_label.setWordWrap(True)
+        grid.addWidget(self.status_label, 1, 0, 1, 4)
+
+        grid.addWidget(QLabel("FPGA (DIO4):"), 2, 0)
+        self.fpga_connect_btn = QPushButton("Connect")
+        self.fpga_connect_btn.clicked.connect(self.on_fpga_connect_clicked)
+        grid.addWidget(self.fpga_connect_btn, 2, 2)
+        self.fpga_disconnect_btn = QPushButton("Disconnect")
+        self.fpga_disconnect_btn.clicked.connect(self.on_fpga_disconnect_clicked)
+        self.fpga_disconnect_btn.setEnabled(False)
+        grid.addWidget(self.fpga_disconnect_btn, 2, 3)
+        self.fpga_status_label = QLabel("Not connected")
+        self.fpga_status_label.setStyleSheet("font-weight: bold;")
+        grid.addWidget(self.fpga_status_label, 3, 0, 1, 4)
+
+        return box
 
     def _build_scan_setup_tab(self) -> QWidget:
         tab = QWidget()
@@ -588,64 +635,30 @@ class MainWindow(QMainWindow):
         return box
 
     def _build_camera_tab(self) -> QWidget:
+        # Connect/Disconnect + status live in the always-visible Hardware
+        # Connection bar above the tabs now -- this tab just holds settings
+        # for an already-connected camera.
         tab = QWidget()
         lay = QVBoxLayout(tab)
 
-        conn_box = QGroupBox("Camera")
-        conn_form = QFormLayout(conn_box)
-
-        self.backend_combo = QComboBox()
-        self.backend_combo.addItems(["Orca Flash 4.0 (real)", "Simulated"])
-        conn_form.addRow("Backend:", self.backend_combo)
-
-        btn_row = QHBoxLayout()
-        self.connect_btn = QPushButton("Connect")
-        self.connect_btn.clicked.connect(self.on_connect_clicked)
-        self.disconnect_btn = QPushButton("Disconnect")
-        self.disconnect_btn.clicked.connect(self.on_disconnect_clicked)
-        self.disconnect_btn.setEnabled(False)
-        btn_row.addWidget(self.connect_btn)
-        btn_row.addWidget(self.disconnect_btn)
-        conn_form.addRow(btn_row)
-
-        self.status_label = QLabel("Not connected")
-        self.status_label.setStyleSheet("font-weight: bold;")
-        self.status_label.setWordWrap(True)
-        conn_form.addRow("Status:", self.status_label)
-
+        settings_box = QGroupBox("Camera Settings")
+        form = QFormLayout(settings_box)
         self.exposure_spin = QDoubleSpinBox()
         self.exposure_spin.setRange(0.1, 10000.0)
         self.exposure_spin.setDecimals(2)
         self.exposure_spin.setSuffix(" ms")
         self.exposure_spin.setValue(100.0)
         self.exposure_spin.valueChanged.connect(self.on_exposure_changed)
-        conn_form.addRow("Exposure:", self.exposure_spin)
+        form.addRow("Exposure:", self.exposure_spin)
 
-        lay.addWidget(conn_box)
+        lay.addWidget(settings_box)
         lay.addStretch(1)
         return tab
 
     def _build_adv_setup_tab(self) -> QWidget:
-        tab = QWidget()
-        lay = QVBoxLayout(tab)
-
-        fpga_box = QGroupBox("FPGA Trigger (DIO4)")
-        fpga_form = QFormLayout(fpga_box)
-        fpga_btn_row = QHBoxLayout()
-        self.fpga_connect_btn = QPushButton("Connect FPGA")
-        self.fpga_connect_btn.clicked.connect(self.on_fpga_connect_clicked)
-        self.fpga_disconnect_btn = QPushButton("Disconnect FPGA")
-        self.fpga_disconnect_btn.clicked.connect(self.on_fpga_disconnect_clicked)
-        self.fpga_disconnect_btn.setEnabled(False)
-        fpga_btn_row.addWidget(self.fpga_connect_btn)
-        fpga_btn_row.addWidget(self.fpga_disconnect_btn)
-        fpga_form.addRow(fpga_btn_row)
-        self.fpga_status_label = QLabel("Not connected")
-        self.fpga_status_label.setStyleSheet("font-weight: bold;")
-        fpga_form.addRow("Status:", self.fpga_status_label)
-        lay.addWidget(fpga_box)
-        lay.addStretch(1)
-        return tab
+        # FPGA Connect/Disconnect + status live in the always-visible
+        # Hardware Connection bar above the tabs now.
+        return _placeholder_tab("Adv Setup", "Nothing else here yet.")
 
     # -- Right side: top tab row (Waveforms/Images/Bckgrd/Blank) over a
     #    bottom tab row (Image Profile/Stack Profile/.../Diagnostics) -----

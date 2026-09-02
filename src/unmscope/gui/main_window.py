@@ -691,17 +691,8 @@ class MainWindow(QMainWindow):
     def _build_images_tab(self) -> QWidget:
         tab = QWidget()
         outer = QVBoxLayout(tab)
-
-        self.frame_counter_label = QLabel("0")
-        self.frame_counter_label.setStyleSheet("font-weight: bold; font-size: 16pt; color: #2a7;")
-        counter_row = QHBoxLayout()
-        counter_row.addWidget(QLabel("Frames received:"))
-        counter_row.addWidget(self.frame_counter_label)
-        counter_row.addStretch(1)
-        outer.addLayout(counter_row)
-
-        self.frame_info_label = QLabel("-")
-        outer.addWidget(self.frame_info_label)
+        outer.setContentsMargins(4, 4, 4, 2)
+        outer.setSpacing(3)
 
         # Real panel layout: narrow tool strip | bounded scrollable image |
         # narrow display-options strip (see SPIM MAINp.png's Images tab).
@@ -715,6 +706,22 @@ class MainWindow(QMainWindow):
         image_row.addWidget(self._build_max_counts_panel())
         image_row.addWidget(self._build_display_options_panel())
         outer.addLayout(image_row, stretch=1)
+
+        # Frame counter/info live BELOW the canvas, in the thin strip the
+        # real panel puts there -- they used to sit ABOVE it, which cost the
+        # canvas ~61px of height the real panel spends on image (measured:
+        # real canvas is 496x440, ours had shrunk to 501x385).
+        status_strip = QHBoxLayout()
+        status_strip.setContentsMargins(0, 0, 0, 0)
+        status_strip.addWidget(QLabel("Frames received:"))
+        self.frame_counter_label = QLabel("0")
+        self.frame_counter_label.setStyleSheet("font-weight: bold; color: #2a7;")
+        status_strip.addWidget(self.frame_counter_label)
+        status_strip.addSpacing(12)
+        self.frame_info_label = QLabel("-")
+        status_strip.addWidget(self.frame_info_label)
+        status_strip.addStretch(1)
+        outer.addLayout(status_strip)
         return tab
 
     def _build_image_left_toolbar(self) -> QWidget:
@@ -885,23 +892,46 @@ class MainWindow(QMainWindow):
         # (245x196) and gaps (~30px) measured off the live front panel.
         tab = QWidget()
         outer = QHBoxLayout(tab)
-        outer.setSpacing(29)
+        outer.setSpacing(8)
+        outer.setContentsMargins(6, 4, 6, 4)
 
+        # Per projection the real panel puts the name label and its save
+        # button in a narrow gutter to the LEFT of the MIP box -- NOT above
+        # and below it. The ~29px I first measured "between the boxes" is
+        # that gutter, not empty space.
         self.projection_labels = {}
         for name in ("XY", "YZ", "XZ"):
-            col = QVBoxLayout()
-            col.addWidget(QLabel(name))
+            proj_row = QHBoxLayout()
+            proj_row.setSpacing(4)
+
+            gutter = QVBoxLayout()
+            gutter.setSpacing(4)
+            gutter.setContentsMargins(0, 4, 0, 0)
+            name_label = QLabel(name)
+            name_label.setFixedHeight(14)
+            gutter.addWidget(name_label)
+            save_btn = QPushButton("\U0001F4BE")
+            save_btn.setFixedSize(24, 24)
+            save_btn.setEnabled(False)
+            # Disabled QPushButtons grey their text out, which made the
+            # floppy glyph nearly invisible -- keep it dark and bump the
+            # glyph size so it reads like the real panel's save icon.
+            save_btn.setStyleSheet(
+                "QPushButton { font-size: 13px; padding: 0px; }"
+                "QPushButton:disabled { color: #222; }"
+            )
+            gutter.addWidget(save_btn)
+            gutter.addStretch(1)
+            proj_row.addLayout(gutter)
+
             view = QLabel()
             # #f0f0f0 -- confirmed by pixel-sampling, not black.
             view.setStyleSheet("background-color: #f0f0f0;")
-            view.setFixedSize(245, 180)
+            view.setFixedSize(245, 196)  # exact reference measurement
             self.projection_labels[name] = view
-            col.addWidget(view)
-            save_btn = QPushButton("\U0001F4BE")
-            save_btn.setFixedWidth(32)
-            save_btn.setEnabled(False)
-            col.addWidget(save_btn)
-            outer.addLayout(col)
+            proj_row.addWidget(view, alignment=Qt.AlignTop)
+
+            outer.addLayout(proj_row)
 
         outer.addStretch(1)
 

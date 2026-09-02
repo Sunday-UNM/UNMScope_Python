@@ -12,8 +12,8 @@ sys.path.insert(0, r"H:\UNM_Lightsheet\UNMScope_Python\src")
 
 from unmscope.hardware.fpga_trigger import FpgaTriggerController
 
-N_TRIGGERS = 3
-INTER_TRIGGER_DELAY_S = 0.5  # slow and easy to count on the scope
+N_TRIGGERS = 10
+INTER_TRIGGER_DELAY_S = 0.3  # faster, more pulses -- scope setup now confirmed working
 
 
 def main():

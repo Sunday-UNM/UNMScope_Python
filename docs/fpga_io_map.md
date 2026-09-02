@@ -219,6 +219,43 @@ Trigger.vi`, `HHMI - Trigger count.vi`, `HHMI - Camera Trigger Module.vi`.
   the comparison isn't visible in that one diagram) -- not yet needed for
   Continuous mode testing, revisit for bounded Z-stack bursts.
 
+## Oscilloscope discrepancy, resolved (2026-08-29)
+
+After the native-burst investigation, several single-trigger and static-
+voltage re-tests showed NOTHING on the oscilloscope, despite internal FPGA
+diagnostics (`# AO generated` incrementing correctly, same signature as
+earlier confirmed-successful fires) strongly suggesting the hardware was
+actually working. This was a real, multi-attempt scare -- worth recording
+the resolution process:
+
+1. Internal register diagnostics (`spikes/12_internal_register_scope.py`)
+   showed the FPGA's own state transitioning exactly as expected on every
+   fire, even when the external scope showed nothing -- this was the key
+   signal that pointed at the *observation* (scope/probe) rather than the
+   hardware or code.
+2. Switched to the simplest possible external test: a SUSTAINED 1V DC step
+   on X Galvo (AO1) instead of a ~100us pulse, removing all timing
+   sensitivity (`spikes/13_static_voltage_scope_check.py`). This also
+   initially showed nothing (three attempts) despite ground being
+   confirmed connected and a labeled BNC panel -- pointing at wrong-BNC
+   selection as the most likely cause.
+3. Root cause: the user was very likely probing the wrong BNC on the
+   panel (never fully confirmed which label was actually being probed).
+   Once reseated/reselected, the static 1V step became visible and
+   measured correctly (~1V, confirming the +/-10V <-> +/-32767 counts
+   scale assumption).
+4. Final combined confirmation (`spikes/14_combined_galvo_and_trigger_check.py`):
+   with both AO1 (X Galvo) and DIO4 (Cam Ext Trigger) connected
+   simultaneously, a run showing "X Galvo steady 1V -> drop to 0V as
+   arming -> one Cam Trigger pulse" was confirmed visible end-to-end on
+   both channels together.
+
+**Lesson for next time a signal "disappears"**: check the internal FPGA
+diagnostic registers FIRST (cheap, no hardware risk, decouples "is the
+hardware working" from "is the observation tool working") before assuming
+a real regression. A sustained DC-level test is a much more robust probe-
+identification tool than a narrow pulse.
+
 ## Staged validation (see `../spikes/`)
 
 1. `01_fpga_connect.py` — **done, 2026-08-28.** Opened a real nifpga

@@ -162,15 +162,19 @@ class FpgaTriggerController:
         return fired
 
     # -- public: N-frame burst (Z-stack), as a loop of the proven primitive
-    def fire_burst(self, n_triggers: int, inter_trigger_delay_s: float = 0.15,
+    def fire_burst(self, n_triggers: int, period_s: float = 0.15,
                     on_progress=None) -> int:
-        """Fire n_triggers single pulses, inter_trigger_delay_s apart
-        (should comfortably exceed the camera's exposure+readout time so
-        each pulse lands on a fresh frame). Returns how many actually
-        fired (== n_triggers unless something went wrong partway). Calls
-        on_progress(i, n_triggers) after each successful fire, if given."""
+        """Fire n_triggers single pulses at a true period of period_s.
+
+        period_s is trigger-to-trigger and must exceed the camera's
+        exposure + readout, or the camera drops the ones that arrive
+        while it is still busy. Like start_continuous(), this subtracts
+        the fire call's own duration rather than sleeping on top of it.
+        Returns how many actually fired.
+        """
         fired_count = 0
         for i in range(n_triggers):
+            cycle_start = time.monotonic()
             ok = self.fire_single_trigger()
             if not ok:
                 break
@@ -178,26 +182,56 @@ class FpgaTriggerController:
             if on_progress is not None:
                 on_progress(fired_count, n_triggers)
             if i < n_triggers - 1:
-                time.sleep(inter_trigger_delay_s)
+                remaining = period_s - (time.monotonic() - cycle_start)
+                if remaining > 0:
+                    time.sleep(remaining)
         return fired_count
 
     # -- public: continuous mode, as a repeating loop of the same primitive
-    def start_continuous(self, inter_trigger_delay_s: float = 0.15, on_frame=None):
-        """Start firing single pulses repeatedly, inter_trigger_delay_s
-        apart, on a background thread, until stop_continuous() is called.
-        on_frame(count) is called after each successful fire, if given."""
+    def start_continuous(self, period_s: float = 0.15, on_frame=None,
+                         on_rate=None):
+        """Fire single pulses at a true PERIOD of period_s until stopped.
+
+        period_s is trigger-to-trigger, NOT the gap between calls. That
+        distinction was a real bug: fire_single_trigger() itself costs
+        ENABLE_HOLD_S plus a pile of PCIe register writes, and the old
+        code slept the full delay ON TOP of that. With a 100ms exposure
+        the requested period was 150ms but the achieved period was ~165ms
+        (~6Hz instead of the expected ~10Hz) -- and because the overhead
+        is fixed, the shorter the exposure the worse the error, which is
+        why the frame rate looked like it barely responded to exposure.
+
+        on_frame(count) is called after each fire; on_rate(achieved_hz)
+        is called periodically so callers can display/verify the REAL
+        rate against a scope instead of trusting the requested one.
+        """
         self._continuous_stop = threading.Event()
 
         def _loop():
             count = 0
+            window_start = time.monotonic()
+            window_count = 0
             while not self._continuous_stop.is_set():
+                cycle_start = time.monotonic()
                 ok = self.fire_single_trigger()
                 if not ok:
                     break
                 count += 1
+                window_count += 1
                 if on_frame is not None:
                     on_frame(count)
-                self._continuous_stop.wait(inter_trigger_delay_s)
+
+                now = time.monotonic()
+                if on_rate is not None and now - window_start >= 1.0:
+                    on_rate(window_count / (now - window_start))
+                    window_start, window_count = now, 0
+
+                # Sleep only the REMAINDER of the period. If firing
+                # already overran the period we don't sleep at all --
+                # and the achieved rate reported above will show it.
+                remaining = period_s - (time.monotonic() - cycle_start)
+                if remaining > 0:
+                    self._continuous_stop.wait(remaining)
 
         self._continuous_thread = threading.Thread(target=_loop, daemon=True)
         self._continuous_thread.start()

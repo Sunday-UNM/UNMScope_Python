@@ -73,7 +73,8 @@ def phase_b_trigger_burst():
     def progress(i, n):
         print(f"  trigger {i}/{n} fired at {time.strftime('%H:%M:%S')}")
 
-    fired = ctrl.fire_burst(N_TRIGGERS, inter_trigger_delay_s=INTER_TRIGGER_DELAY_S, on_progress=progress)
+    # Now a true trigger-to-trigger period, not a post-fire gap.
+    fired = ctrl.fire_burst(N_TRIGGERS, period_s=INTER_TRIGGER_DELAY_S, on_progress=progress)
     ctrl.close()
     print(f"Phase B done. {fired}/{N_TRIGGERS} fired.\n")
 

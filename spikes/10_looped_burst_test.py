@@ -32,7 +32,11 @@ def main():
     def progress(i, n):
         print(f"  pulse {i}/{n} fired at {time.strftime('%H:%M:%S')}")
 
-    fired = ctrl.fire_burst(N_TRIGGERS, inter_trigger_delay_s=INTER_TRIGGER_DELAY_S, on_progress=progress)
+    # NOTE: this argument is now a true trigger-to-trigger PERIOD (it used
+    # to be the gap between calls, i.e. it slept on top of the fire call's
+    # own ~10ms+ cost). At 0.3s the difference is small, but pulses will
+    # now be marginally closer together than when this spike was recorded.
+    fired = ctrl.fire_burst(N_TRIGGERS, period_s=INTER_TRIGGER_DELAY_S, on_progress=progress)
     print(f"\nfire_burst() reports {fired}/{N_TRIGGERS} fired.")
 
     print("\nClosing (returns to safe state)...")

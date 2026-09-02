@@ -16,6 +16,7 @@ a matching adapter set; this module uses
 from __future__ import annotations
 
 import abc
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -37,6 +38,18 @@ class Camera(abc.ABC):
     """Abstract camera interface. All hardware backends (real or
     simulated) implement this so the rest of the app never talks to a
     vendor SDK directly."""
+
+    #: Sensor readout time in ms, on top of the exposure. In external
+    #: EDGE-trigger mode the minimum frame period is exposure + readout:
+    #: a trigger arriving sooner is ignored by the camera, so this is
+    #: what the FPGA trigger period has to be derived from. Subclasses
+    #: override with their real value.
+    READOUT_MS: float = 10.0
+
+    def min_frame_period_ms(self) -> float:
+        """Shortest usable trigger-to-trigger period at the current
+        exposure. Triggers fired faster than this get dropped."""
+        return self.get_exposure_ms() + self.READOUT_MS
 
     @abc.abstractmethod
     def connect(self) -> None: ...
@@ -79,6 +92,7 @@ class SimulatedCamera(Camera):
         self._seq_running = False
         self._seq_target: int | None = None
         self._seq_count = 0
+        self._last_frame_at = 0.0
 
     def connect(self) -> None:
         self._connected = True
@@ -126,22 +140,38 @@ class SimulatedCamera(Camera):
         self._seq_running = True
         self._seq_target = n_images
         self._seq_count = 0
+        self._last_frame_at = time.monotonic()
 
     def remaining_image_count(self) -> int:
+        """Pace simulated frames at the exposure rate.
+
+        This deliberately does NOT just return 1 whenever a sequence is
+        running: the GUI drains in a `while remaining > 0` loop, so a
+        constant 1 would hand it frames as fast as it can ask, pegging a
+        core and making simulated runs behave nothing like real ones.
+        """
         if not self._seq_running:
             return 0
         if self._seq_target is not None and self._seq_count >= self._seq_target:
             return 0
-        return 1
+        elapsed_ms = (time.monotonic() - self._last_frame_at) * 1000.0
+        return 1 if elapsed_ms >= self._exposure_ms else 0
 
     def pop_image(self) -> np.ndarray:
         if not self._seq_running:
             raise CameraError("No sequence running")
         self._seq_count += 1
+        self._last_frame_at = time.monotonic()
         return self.snap()
 
     def is_sequence_running(self) -> bool:
         return self._seq_running
+
+    def is_buffer_overflowed(self) -> bool:
+        return False  # no real buffer to overflow
+
+    def buffer_capacity(self) -> tuple[int, int]:
+        return (0, 0)
 
     def stop_sequence(self) -> None:
         self._seq_running = False
@@ -154,6 +184,13 @@ class OrcaFlash4Camera(Camera):
     DEVICE_LABEL = "Camera"
     ADAPTER_MODULE = "HamamatsuHam"
     ADAPTER_DEVICE = "HamamatsuHam_DCAM"
+
+    #: Orca Flash 4.0 full-frame (2048x2048) rolling-shutter readout.
+    #: NOT yet verified on this unit against a scope -- it is the
+    #: datasheet figure. If measured trigger-to-frame timing disagrees,
+    #: measure this and correct it here rather than padding magic
+    #: numbers into the trigger period.
+    READOUT_MS = 9.7
 
     def __init__(self):
         self._mmc = None
@@ -270,6 +307,24 @@ class OrcaFlash4Camera(Camera):
         if self._mmc is None:
             return False
         return self._mmc.isSequenceRunning()
+
+    def is_buffer_overflowed(self) -> bool:
+        """True once MMCore's circular buffer has filled.
+
+        This matters: when the GUI can't drain frames as fast as the FPGA
+        triggers them, the buffer fills and MMCore STOPS the sequence. No
+        exception is raised -- frames simply stop arriving -- so without
+        checking this the app just silently freezes mid-acquisition.
+        """
+        if self._mmc is None:
+            return False
+        return self._mmc.isBufferOverflowed()
+
+    def buffer_capacity(self) -> tuple[int, int]:
+        """(free, total) circular-buffer slots, for diagnostics."""
+        if self._mmc is None:
+            return (0, 0)
+        return (self._mmc.getBufferFreeCapacity(), self._mmc.getBufferTotalCapacity())
 
     def stop_sequence(self) -> None:
         if self._mmc is None:

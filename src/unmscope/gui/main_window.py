@@ -166,6 +166,7 @@ class FpgaSignals(QObject):
     non-GUI thread safely queues delivery to the connected slot on the GUI
     thread, rather than touching widgets directly from the wrong thread."""
     frame_fired = Signal(int)
+    rate_measured = Signal(float)
     error = Signal(str)
 
 
@@ -182,7 +183,10 @@ class MainWindow(QMainWindow):
         self.fpga: FpgaTriggerController | None = None
         self.fpga_signals = FpgaSignals()
         self.fpga_signals.frame_fired.connect(self._on_fpga_frame_fired)
+        self.fpga_signals.rate_measured.connect(self._on_fpga_rate_measured)
         self.fpga_signals.error.connect(self._on_fpga_error)
+        self._trigger_period_s = 0.0
+        self._triggers_fired = 0
 
         self.camera_poll_timer = QTimer(self)
         self.camera_poll_timer.timeout.connect(self._poll_camera_for_frame)
@@ -1175,10 +1179,22 @@ class MainWindow(QMainWindow):
 
         self.camera_poll_timer.start(30)
 
-        inter_delay_s = max(0.05, self.exposure_spin.value() / 1000.0 + 0.05)
+        # Trigger period = exposure + sensor readout. The camera IGNORES a
+        # trigger that lands while it is still exposing/reading out, so
+        # this is the real floor -- it is NOT a tunable margin. (This used
+        # to be `exposure + 50ms` slept ON TOP of the fire call's own
+        # cost, which made a 100ms exposure run at ~6Hz instead of ~10Hz.)
+        period_s = self.camera.min_frame_period_ms() / 1000.0
+        self._trigger_period_s = period_s
+        self._triggers_fired = 0
+        self._log(f"Trigger period {period_s * 1000:.1f} ms "
+                  f"({1.0 / period_s:.2f} Hz) = exposure "
+                  f"{self.camera.get_exposure_ms():.1f} ms + readout "
+                  f"{self.camera.READOUT_MS:.1f} ms")
         self.fpga.start_continuous(
-            inter_trigger_delay_s=inter_delay_s,
+            period_s=period_s,
             on_frame=lambda count: self.fpga_signals.frame_fired.emit(count),
+            on_rate=lambda hz: self.fpga_signals.rate_measured.emit(hz),
         )
 
     def _stop_acquisition(self):
@@ -1209,8 +1225,25 @@ class MainWindow(QMainWindow):
         self._clear_image_to_black()
         self._log("Acquisition stopped, back to IDLE.")
 
+    def _on_fpga_rate_measured(self, hz: float):
+        """Report the ACHIEVED trigger rate vs the requested one.
+
+        This is the number to compare against an oscilloscope. If they
+        disagree, the trigger period maths is wrong -- don't reconcile it
+        by padding magic numbers, fix the derivation.
+        """
+        want = 1.0 / self._trigger_period_s if self._trigger_period_s else 0.0
+        note = ""
+        if want and abs(hz - want) / want > 0.10:
+            note = f"  <-- OFF by {(hz - want) / want * 100:+.0f}%"
+        dropped = self._triggers_fired - self.frame_count
+        self._log(f"Trigger rate: {hz:.2f} Hz achieved vs {want:.2f} Hz "
+                  f"requested{note}   (fired {self._triggers_fired}, "
+                  f"frames {self.frame_count}, missing {dropped})")
+
     def _on_fpga_frame_fired(self, count: int):
         # Runs on the GUI thread (Qt marshals this safely across threads).
+        self._triggers_fired = count
         self._log(f"FPGA fired trigger #{count}.")
         if self.z_target_frames:
             pct = min(100, int(round(100 * count / self.z_target_frames)))
@@ -1223,28 +1256,70 @@ class MainWindow(QMainWindow):
     def _on_fpga_error(self, msg: str):
         self._log(f"FPGA error: {msg}")
 
+    # Cap on how many frames one timer tick will drain, so a big backlog
+    # can't freeze the GUI thread for an unbounded stretch.
+    MAX_DRAIN_PER_TICK = 64
+
     def _poll_camera_for_frame(self):
+        """Drain the camera's buffer and render only the NEWEST frame.
+
+        This used to pop exactly ONE frame per 30ms tick and then do a
+        full percentile + smooth rescale + min/max/mean over an 8MB
+        2048x2048 frame before the next pop. That per-frame cost exceeded
+        the tick interval, so we drained slower than the FPGA triggered,
+        MMCore's circular buffer filled, and MMCore silently STOPPED the
+        sequence -- acquisition froze around frame ~100 with no error.
+        Counting every frame but rendering only the last one decouples
+        the drain rate from the (expensive) display cost.
+        """
         if self.camera is None or not self.camera.is_connected:
             return
+
+        frame = None
+        drained = 0
         try:
-            if self.camera.remaining_image_count() <= 0:
-                return
-            frame = self.camera.pop_image()
+            while drained < self.MAX_DRAIN_PER_TICK and self.camera.remaining_image_count() > 0:
+                frame = self.camera.pop_image()
+                drained += 1
+                self.frame_count += 1
         except Exception as e:
             self._log(f"Camera poll FAILED: {type(e).__name__}: {e}")
             return
 
-        self.frame_count += 1
-        pix = frame_to_qpixmap(frame, label_text=f"Frame #{self.frame_count}")
-        scaled = pix.scaled(self.image_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        self.image_label.setPixmap(scaled)
-        now = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        self.frame_counter_label.setText(f"{self.frame_count}  (last at {now})")
-        self.frame_info_label.setText(
-            f"{frame.shape[1]}x{frame.shape[0]} {frame.dtype}, "
-            f"min={frame.min()} max={frame.max()} mean={frame.mean():.1f}"
-        )
-        self._log(f"Frame #{self.frame_count} received at {now}")
+        if frame is not None:
+            pix = frame_to_qpixmap(frame, label_text=f"Frame #{self.frame_count}")
+            scaled = pix.scaled(self.image_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.image_label.setPixmap(scaled)
+            now = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            self.frame_counter_label.setText(f"{self.frame_count}  (last at {now})")
+            # Stats on a strided view -- exact values over all 4.2M pixels
+            # cost three extra full passes per frame and were part of why
+            # we couldn't keep up.
+            sample = frame[::4, ::4]
+            self.frame_info_label.setText(
+                f"{frame.shape[1]}x{frame.shape[0]} {frame.dtype}, "
+                f"min={sample.min()} max={sample.max()} mean={sample.mean():.1f}"
+                + (f"  [+{drained - 1} not shown]" if drained > 1 else "")
+            )
+            self._log(f"Frame #{self.frame_count} received at {now}"
+                      + (f" (drained {drained} this tick)" if drained > 1 else ""))
+
+        # Surface the silent-stop conditions rather than just freezing.
+        if not self.acquiring:
+            return
+        try:
+            if self.camera.is_buffer_overflowed():
+                free, total = self.camera.buffer_capacity()
+                self._log(f"CAMERA BUFFER OVERFLOWED (capacity {total} frames) -- "
+                          "MMCore stopped the sequence because frames arrived "
+                          "faster than they could be drained. Stopping.")
+                self._stop_acquisition()
+            elif not self.camera.is_sequence_running():
+                self._log("Camera sequence stopped on its own (no overflow "
+                          "flagged) -- stopping acquisition.")
+                self._stop_acquisition()
+        except Exception as e:
+            self._log(f"Buffer-state check failed: {type(e).__name__}: {e}")
 
     def closeEvent(self, event):
         if self.acquiring:

@@ -33,6 +33,62 @@ real Phase 1 skeleton now with two working hardware subsystems already
 proven to fold in, or (c) keep going hardware-first (motion stages next).
 No decision has been made on which.
 
+## Status update (2026-08-29)
+
+Big milestone: **a real, working Continuous Scan / Z-stack GUI**
+(`python -m unmscope.gui`), scoped-down but functionally modeled on
+`SPIM MAIN.vi`'s real layout (top bar: Acquire/Stop, mode dropdown,
+Status, Exit; left Scan Setup panel; right image display). Confirmed
+working end-to-end on real hardware by the user: Continuous Scan free-runs
+frames until Stop; Z stack fires exactly the configured number of
+triggers, captures that many frames, and auto-returns to Idle. Each
+displayed frame has its number burned directly into the image; the
+display clears to black when acquisition stops.
+
+**How multi-frame acquisition actually works** (a real pivot from the
+original plan): the FPGA's native multi-trigger burst mechanism
+(`# of triggers`, `Trigger #s` clusters, `Continuous Mode`) was
+investigated at length and never produced a reliable N-pulse burst — see
+`docs/fpga_io_map.md` for the full story (a real Cycle(Ticks)/Trigger up
+(ticks) race-condition bug was found and fixed along the way, but even
+after that, native bursts stayed unreliable). Rather than keep
+reverse-engineering it, `src/unmscope/hardware/fpga_trigger.py`'s
+`FpgaTriggerController` builds N-frame acquisition as a Python-side loop
+of the one primitive that IS fully validated end-to-end (real oscilloscope
++ real camera): `fire_single_trigger()`, called once per frame, with
+`start_continuous()`/`fire_burst()` as thin wrappers (continuous = loop
+until stopped; Z-stack = loop until a target count, decided on the GUI
+thread from a Qt-signal callback — see the module's and `main_window.py`'s
+docstrings for the threading discipline this relies on).
+
+There was also a real scare mid-session: several re-tests showed nothing
+on the oscilloscope despite internal FPGA diagnostics looking fine. Root
+cause turned out to be an external oscilloscope/probe issue (most likely
+the wrong BNC on a labeled panel), not the code — resolved by switching to
+a sustained DC-voltage test (removes timing sensitivity) and simultaneous
+two-channel confirmation. Full resolution story in `docs/fpga_io_map.md`'s
+"Oscilloscope discrepancy, resolved" section — worth reading before
+trusting or distrusting a future "nothing on the scope" report.
+
+**Discovered along the way, not yet used**: `FPGA code\Host to FPGA\DMA\AI\HHMI - AI buffer.vi`
+is a genuine internal software oscilloscope — it reads the FPGA's `AI data`
+DMA FIFO, which carries real analog inputs (Connector0/AI0-7) bit-shifted
+together with internal digital signals including `D4 Cam Ext Trig Out`
+(DIO4 itself), `Int Cycle Trigger`, AOTF states, etc. Confirmed live by
+the user (running the VI directly in LabVIEW) showing exactly the expected
+clean, synchronized trigger+galvo waveform. This would let Python read a
+live internal trigger/waveform trace with **zero external hardware** — a
+genuinely valuable future diagnostic tool, but the exact bit-packing
+wasn't reverse-engineered (partial lead: `Active Channels` numeric indices
+`8,14,15,16,17,9,10,11` were confirmed live via LabVIEW COM automation)
+and building it was deliberately deferred in favor of shipping the GUI.
+
+**Still not done**: real Z motion (galvo/piezo stay at a fixed safe value
+throughout — Z-stack currently only proves the trigger/frame-count
+mechanism, not actual stage stepping), file saving, the Phase 1 core
+skeleton (asyncio/state machine/pydantic config), motion stages, adaptive
+optics, and everything else in Phase 2+ below.
+
 ## Context
 
 `UNMScope_Source` (LabVIEW, ~2,329 relevant VIs) is the current control

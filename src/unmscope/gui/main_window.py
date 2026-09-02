@@ -123,6 +123,13 @@ def frame_to_qpixmap(frame: np.ndarray, label_text: str | None = None) -> QPixma
     return pix
 
 
+def _narrow(w, width: int = 80):
+    """Cap a spinbox's width so it doesn't crowd out its label in the
+    real panel's tight two-column Scan Setup layout."""
+    w.setMaximumWidth(width)
+    return w
+
+
 def _stub_note(text: str) -> QLabel:
     lbl = QLabel(text)
     lbl.setWordWrap(True)
@@ -260,8 +267,8 @@ class MainWindow(QMainWindow):
     # -- Left panel: tabbed, Scan Setup / Camera / Utilities / Preferences / Adv Setup
     def _build_left_tabs(self) -> QTabWidget:
         tabs = QTabWidget()
-        tabs.setMinimumWidth(380)
-        tabs.setMaximumWidth(460)
+        tabs.setMinimumWidth(470)
+        tabs.setMaximumWidth(560)
         tabs.addTab(self._build_scan_setup_tab(), "Scan Setup")
         tabs.addTab(self._build_camera_tab(), "Camera")
         tabs.addTab(_placeholder_tab("Utilities"), "Utilities")
@@ -282,15 +289,40 @@ class MainWindow(QMainWindow):
             "single-laser-selected check below -- those are real."
         ))
 
-        row1 = QHBoxLayout()
-        row1.addWidget(self._build_excitation_box())
-        row1.addWidget(self._build_x_galvo_box())
-        outer.addLayout(row1)
+        # Real panel is genuinely two side-by-side columns, not one column
+        # with a single split top row -- confirmed from both of the user's
+        # screenshots: LEFT = Excitation/Cycle lasers/Timepoints/Stack
+        # time/Multi-location/Perfusion; RIGHT = X galvo/Z Galvo/Linked+Rel
+        # Offset/Z Piezo/Dither Galvo.
+        columns = QHBoxLayout()
+        outer.addLayout(columns, stretch=1)
 
-        outer.addWidget(self._build_z_galvo_box())
+        left_col = QVBoxLayout()
+        left_col.addWidget(self._build_excitation_box())
+        left_col.addLayout(self._build_cycle_lasers_row())
+        self.timepoints_widget = self._build_timepoints_box()
+        left_col.addWidget(self.timepoints_widget)
+        self.multilocation_widget = self._build_multilocation_box()
+        left_col.addWidget(self.multilocation_widget)
+        self.perfusion_widget = self._build_perfusion_box()
+        left_col.addWidget(self.perfusion_widget)
+        left_col.addStretch(1)
+        columns.addLayout(left_col, stretch=1)
 
-        cycle_row = QHBoxLayout()
-        cycle_row.addWidget(QLabel("Cycle lasers:"))
+        right_col = QVBoxLayout()
+        right_col.addWidget(self._build_x_galvo_box())
+        right_col.addWidget(self._build_z_galvo_box())
+        right_col.addWidget(self._build_linked_box())
+        right_col.addWidget(self._build_z_piezo_box())
+        right_col.addWidget(self._build_dither_galvo_box())
+        right_col.addStretch(1)
+        columns.addLayout(right_col, stretch=1)
+
+        return tab
+
+    def _build_cycle_lasers_row(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Cycle lasers:"))
         self.cycle_lasers_combo = QComboBox()
         # Real enum "HHMI - SPIM AOTF cycle enum.ctl": per Z (advance laser
         # channel every Z-plane), per Stack (advance once per Z-stack),
@@ -298,8 +330,13 @@ class MainWindow(QMainWindow):
         # default, consistent with the FPGA's single AOTF on/off bit).
         self.cycle_lasers_combo.addItems(["per Z", "per Stack", "None"])
         self.cycle_lasers_combo.setCurrentText("None")
-        cycle_row.addWidget(self.cycle_lasers_combo)
-        cycle_row.addStretch(1)
+        row.addWidget(self.cycle_lasers_combo)
+        row.addStretch(1)
+        return row
+
+    def _build_linked_box(self) -> QGroupBox:
+        box = QGroupBox()
+        lay = QVBoxLayout(box)
         self.linked_btn = QPushButton("Unlinked")
         self.linked_btn.setCheckable(True)
         self.linked_btn.setChecked(False)
@@ -311,25 +348,16 @@ class MainWindow(QMainWindow):
             "being set independently."
         )
         self.linked_btn.toggled.connect(self._on_linked_toggled)
-        cycle_row.addWidget(self.linked_btn)
-        cycle_row.addWidget(QLabel("Rel. Offset:"))
-        self.rel_offset_spin = QDoubleSpinBox()
+        lay.addWidget(self.linked_btn)
+        offset_row = QHBoxLayout()
+        offset_row.addWidget(QLabel("Rel. Offset:"))
+        self.rel_offset_spin = _narrow(QDoubleSpinBox())
         self.rel_offset_spin.setRange(-100.0, 100.0)
         self.rel_offset_spin.setDecimals(2)
-        cycle_row.addWidget(self.rel_offset_spin)
-        outer.addLayout(cycle_row)
-
-        outer.addWidget(self._build_z_piezo_box())
-        outer.addWidget(self._build_dither_galvo_box())
-        self.timepoints_widget = self._build_timepoints_box()
-        outer.addWidget(self.timepoints_widget)
-        self.multilocation_widget = self._build_multilocation_box()
-        outer.addWidget(self.multilocation_widget)
-        self.perfusion_widget = self._build_perfusion_box()
-        outer.addWidget(self.perfusion_widget)
-
-        outer.addStretch(1)
-        return tab
+        offset_row.addWidget(self.rel_offset_spin)
+        offset_row.addStretch(1)
+        lay.addLayout(offset_row)
+        return box
 
     def _build_dither_galvo_box(self) -> QGroupBox:
         # Real axis (AO4). "Range (um)"/"# Sweeps"/"Fract. Flyback" map to
@@ -342,15 +370,15 @@ class MainWindow(QMainWindow):
         # half-period. See fpga_io_map.md for the full VI chain.
         box = QGroupBox("Dither Galvo")
         form = QFormLayout(box)
-        self.dg_range = QDoubleSpinBox()
+        self.dg_range = _narrow(QDoubleSpinBox(), 90)
         self.dg_range.setRange(0, 55)
         self.dg_range.setSuffix(" um")
         self.dg_range.setToolTip("Clamped to +-55 um on the main rig (Dither Galvo um/V=10.0, D Galvo Limits=+-5.5V).")
-        self.dg_sweeps = QDoubleSpinBox()
+        self.dg_sweeps = _narrow(QDoubleSpinBox())
         self.dg_sweeps.setRange(0, 100)
         self.dg_sweeps.setDecimals(1)
         self.dg_sweeps.setValue(5.5)
-        self.dg_flyback = QDoubleSpinBox()
+        self.dg_flyback = _narrow(QDoubleSpinBox())
         self.dg_flyback.setRange(0.0, 1.0)
         self.dg_flyback.setDecimals(2)
         self.dg_flyback.setValue(0.10)
@@ -375,6 +403,7 @@ class MainWindow(QMainWindow):
         form = QVBoxLayout(box)
         self.excitation_rows: list[tuple[QCheckBox, int, QDoubleSpinBox]] = []
         for wavelength in self.EXCITATION_WAVELENGTHS_NM:
+            is_default_on = wavelength == 488  # matches the user's own screenshot
             row = QHBoxLayout()
             chk = QCheckBox()
             chk.setToolTip(
@@ -384,13 +413,15 @@ class MainWindow(QMainWindow):
             )
             slider = QSlider(Qt.Horizontal)
             slider.setRange(0, 1000)  # 0.1% steps
-            slider.setValue(1)
-            spin = QDoubleSpinBox()
+            slider.setMinimumWidth(40)
+            spin = _narrow(QDoubleSpinBox(), 78)
             spin.setRange(0.0, 100.0)
             spin.setDecimals(1)
             spin.setSingleStep(0.1)
             spin.setSuffix(" %")
-            spin.setValue(0.1)
+            spin.setValue(100.0 if is_default_on else 0.1)
+            slider.setValue(int(round(spin.value() * 10)))
+            chk.setChecked(is_default_on)
             slider.valueChanged.connect(lambda v, s=spin: s.setValue(v / 10.0))
             spin.valueChanged.connect(lambda v, sl=slider: sl.setValue(int(round(v * 10))))
             row.addWidget(QLabel(f"{wavelength}"))
@@ -411,10 +442,10 @@ class MainWindow(QMainWindow):
     def _build_x_galvo_box(self) -> QGroupBox:
         box = QGroupBox("X galvo")
         form = QFormLayout(box)
-        self.xg_offset = QDoubleSpinBox(); self.xg_offset.setRange(-1000, 1000)
-        self.xg_range = QDoubleSpinBox(); self.xg_range.setRange(-1000, 1000); self.xg_range.setValue(100)
-        self.xg_pixels = QSpinBox(); self.xg_pixels.setRange(1, 100000); self.xg_pixels.setValue(60)
-        self.xg_interval = QDoubleSpinBox()
+        self.xg_offset = _narrow(QDoubleSpinBox()); self.xg_offset.setRange(-1000, 1000)
+        self.xg_range = _narrow(QDoubleSpinBox()); self.xg_range.setRange(-1000, 1000); self.xg_range.setValue(100)
+        self.xg_pixels = _narrow(QSpinBox()); self.xg_pixels.setRange(1, 100000); self.xg_pixels.setValue(60)
+        self.xg_interval = _narrow(QDoubleSpinBox())
         self.xg_interval.setDecimals(2)
         self.xg_interval.setRange(0, 1_000_000)
         self.xg_interval.setEnabled(False)  # always computed -- see below
@@ -445,9 +476,9 @@ class MainWindow(QMainWindow):
     def _build_z_galvo_box(self) -> QGroupBox:
         box = QGroupBox("Z Galvo (um)")
         form = QFormLayout(box)
-        self.zg_interval = QDoubleSpinBox(); self.zg_interval.setDecimals(3); self.zg_interval.setRange(0, 1000)
-        self.zg_start = QDoubleSpinBox(); self.zg_start.setRange(-1000, 1000)
-        self.zg_end = QDoubleSpinBox(); self.zg_end.setRange(-1000, 1000); self.zg_end.setValue(2)
+        self.zg_interval = _narrow(QDoubleSpinBox()); self.zg_interval.setDecimals(3); self.zg_interval.setRange(0, 1000)
+        self.zg_start = _narrow(QDoubleSpinBox()); self.zg_start.setRange(-1000, 1000)
+        self.zg_end = _narrow(QDoubleSpinBox()); self.zg_end.setRange(-1000, 1000); self.zg_end.setValue(2)
         # End Pos only makes sense with a defined stop -- disabled in
         # Continuous Scan, enabled in Z stack (mode-gated in
         # _update_scan_setup_enable_state; confirmed against the user's
@@ -467,13 +498,13 @@ class MainWindow(QMainWindow):
         # same underlying logic as before (drives the Z-stack trigger count).
         box = QGroupBox("Z Piezo (um)")
         form = QFormLayout(box)
-        self.z_interval_spin = QDoubleSpinBox()
+        self.z_interval_spin = _narrow(QDoubleSpinBox())
         self.z_interval_spin.setRange(0.01, 1000.0)
         self.z_interval_spin.setValue(1.0)
-        self.z_start_spin = QDoubleSpinBox()
+        self.z_start_spin = _narrow(QDoubleSpinBox())
         self.z_start_spin.setRange(-1000.0, 1000.0)
         self.z_start_spin.setValue(0.0)
-        self.z_end_spin = QDoubleSpinBox()
+        self.z_end_spin = _narrow(QDoubleSpinBox())
         self.z_end_spin.setRange(-1000.0, 1000.0)
         self.z_end_spin.setValue(10.0)
         for w in (self.z_interval_spin, self.z_start_spin, self.z_end_spin):
@@ -505,22 +536,21 @@ class MainWindow(QMainWindow):
         form = QGridLayout(box)
         form.setContentsMargins(0, 0, 0, 0)
         form.addWidget(QLabel("Timepoints"), 0, 0)
-        tp_combo = QComboBox(); tp_combo.addItems(["Single"])
+        tp_combo = QComboBox(); tp_combo.addItems(["Single"]); tp_combo.setMinimumWidth(90)
         form.addWidget(tp_combo, 0, 1)
-        tp_spin = QSpinBox(); tp_spin.setRange(1, 9999); tp_spin.setValue(1)
+        tp_spin = _narrow(QSpinBox(), 55); tp_spin.setRange(1, 9999); tp_spin.setValue(1)
         form.addWidget(tp_spin, 0, 2)
         save_chk = QCheckBox("Save Files")
-        form.addWidget(save_chk, 0, 3)
+        form.addWidget(save_chk, 1, 0, 1, 3)
 
         for r, (label, default) in enumerate([
             ("Stack Acq. Time", "00:00.00"),
             ("Total time", "00:00:00"),
-        ], start=1):
-            form.addWidget(QLabel(label), r, 0, 1, 2)
-            field = QLineEdit(default)
+        ], start=2):
+            form.addWidget(QLabel(label), r, 0)
+            field = _narrow(QLineEdit(default), 110)
             field.setReadOnly(True)
-            field.setMaximumWidth(110)
-            form.addWidget(field, r, 2, 1, 2)
+            form.addWidget(field, r, 1, 1, 2)
         return box
 
     def _build_multilocation_box(self) -> QWidget:

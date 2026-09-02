@@ -24,8 +24,8 @@ from __future__ import annotations
 import datetime
 
 import numpy as np
-from PySide6.QtCore import Qt, QTimer, QObject, Signal
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtCore import Qt, QTimer, QObject, Signal, QRect
+from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QFont
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QFormLayout,
     QLabel, QPushButton, QComboBox, QDoubleSpinBox, QSpinBox, QTextEdit,
@@ -39,15 +39,35 @@ MODE_CONTINUOUS = "Continuous Scan"
 MODE_ZSTACK = "Z stack"
 
 
-def frame_to_qpixmap(frame: np.ndarray) -> QPixmap:
-    """uint16 (or any) 2D frame -> auto-contrast 8-bit QPixmap for display."""
+def frame_to_qpixmap(frame: np.ndarray, label_text: str | None = None) -> QPixmap:
+    """uint16 (or any) 2D frame -> auto-contrast 8-bit QPixmap for display.
+    If label_text is given, it's burned into the top-left corner of the
+    image itself (not just a separate widget), with a dark backing box for
+    readability regardless of the underlying frame's brightness."""
     lo, hi = np.percentile(frame, (0.5, 99.5))
     if hi <= lo:
         hi = lo + 1
     scaled = np.clip((frame.astype(np.float32) - lo) / (hi - lo) * 255.0, 0, 255).astype(np.uint8)
     h, w = scaled.shape
     qimg = QImage(scaled.data, w, h, w, QImage.Format_Grayscale8).copy()
-    return QPixmap.fromImage(qimg)
+    pix = QPixmap.fromImage(qimg)
+
+    if label_text:
+        painter = QPainter(pix)
+        font = QFont()
+        font.setPointSize(max(14, w // 40))
+        font.setBold(True)
+        painter.setFont(font)
+        metrics = painter.fontMetrics()
+        text_rect = metrics.boundingRect(label_text)
+        pad = 8
+        box = QRect(10, 10, text_rect.width() + 2 * pad, text_rect.height() + 2 * pad)
+        painter.fillRect(box, QColor(0, 0, 0, 160))
+        painter.setPen(QColor(255, 255, 0))
+        painter.drawText(box, Qt.AlignCenter, label_text)
+        painter.end()
+
+    return pix
 
 
 class FpgaSignals(QObject):
@@ -255,6 +275,11 @@ class MainWindow(QMainWindow):
         self.zstack_box.setVisible(mode == MODE_ZSTACK)
         self._update_slice_count()
 
+    def _clear_image_to_black(self):
+        black = QPixmap(self.image_label.size())
+        black.fill(QColor(0, 0, 0))
+        self.image_label.setPixmap(black)
+
     def _update_slice_count(self):
         interval = self.z_interval_spin.value()
         start = self.z_start_spin.value()
@@ -431,6 +456,7 @@ class MainWindow(QMainWindow):
         self.disconnect_btn.setEnabled(self.camera is not None)
         self.fpga_connect_btn.setEnabled(self.fpga is None)
         self.fpga_disconnect_btn.setEnabled(self.fpga is not None)
+        self._clear_image_to_black()
         self._log("Acquisition stopped, back to IDLE.")
 
     def _on_fpga_frame_fired(self, count: int):
@@ -455,7 +481,7 @@ class MainWindow(QMainWindow):
             return
 
         self.frame_count += 1
-        pix = frame_to_qpixmap(frame)
+        pix = frame_to_qpixmap(frame, label_text=f"Frame #{self.frame_count}")
         scaled = pix.scaled(self.image_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.image_label.setPixmap(scaled)
         now = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]

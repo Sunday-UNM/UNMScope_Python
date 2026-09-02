@@ -703,6 +703,10 @@ class MainWindow(QMainWindow):
         image_row.setSpacing(6)
         image_row.addWidget(self._build_image_left_toolbar())
         image_row.addWidget(self._build_image_display(), stretch=1)
+        # The real panel reserves a 16px vertical scrollbar gutter to the
+        # right of the canvas. We don't draw one, but the space still has
+        # to be spent or our canvas comes out wider than the reference.
+        image_row.addSpacing(16)
         image_row.addWidget(self._build_max_counts_panel())
         image_row.addWidget(self._build_display_options_panel())
         outer.addLayout(image_row, stretch=1)
@@ -711,8 +715,15 @@ class MainWindow(QMainWindow):
         # real panel puts there -- they used to sit ABOVE it, which cost the
         # canvas ~61px of height the real panel spends on image (measured:
         # real canvas is 496x440, ours had shrunk to 501x385).
-        status_strip = QHBoxLayout()
+        # Fixed 57px: the real panel spends ~55px below the canvas on its
+        # horizontal scrollbar + progress bar. Matching that height is what
+        # makes our canvas come out at the reference's 441px instead of
+        # swallowing the space (verify with tools/compare_to_labview.py).
+        status_holder = QWidget()
+        status_holder.setFixedHeight(57)
+        status_strip = QHBoxLayout(status_holder)
         status_strip.setContentsMargins(0, 0, 0, 0)
+        status_strip.setAlignment(Qt.AlignTop)
         status_strip.addWidget(QLabel("Frames received:"))
         self.frame_counter_label = QLabel("0")
         self.frame_counter_label.setStyleSheet("font-weight: bold; color: #2a7;")
@@ -721,7 +732,7 @@ class MainWindow(QMainWindow):
         self.frame_info_label = QLabel("-")
         status_strip.addWidget(self.frame_info_label)
         status_strip.addStretch(1)
-        outer.addLayout(status_strip)
+        outer.addWidget(status_holder)
         return tab
 
     def _build_image_left_toolbar(self) -> QWidget:

@@ -284,3 +284,130 @@ identification tool than a narrow pulse.
 
 Each stage requires explicit hardware confirmation before moving to the
 next.
+
+## Scan Setup tab -- real control wiring (2026-09-01)
+
+Investigated directly from `UNMScope_Source` (binary .vi/.ctl RSRC parsing
++ the exported VI_Diagrams PNGs + SPIMProject.ini/.cfg) to make the Python
+GUI's Scan Setup tab match SPIM MAIN.vi's real layout AND real control
+logic, not just its look. Confidence noted per item; "not determinable"
+items are flagged explicitly rather than guessed.
+
+**Excitation cluster** (confidence: high). Backing typedef: `SPIM LV8.6
+VIs\GUI\HHMI - SPIM Single Excitation GUI cluster.ctl`, 5 fields per row:
+`Enabled` (bool), `Wavelength` (STRING, not numeric -- holds label text
+like "637"), `Filter` (enum: `RG850`/`ND 1.0`/`UG11`, not shown on this
+row), `Laser ch` (int, hardware routing, not shown on this row), `Power`
+(float, confirmed 0-100%, NOT 0-1 -- `HHMI - Convert Excitation channels
+from percent to Volts.vi` divides by literal `100`). The outer cluster
+(`HHMI - SPIM Excitations GUI cluster.ctl`) has 7 slots ("Exc 0".."Exc
+6"); only 4 are shown because `SPIMProject.ini`'s `[AOTF Settings]` has
+`Number of channels = 4` and `Labels = "637,561,488,405"` (read via `HHMI
+- AOTF labels from ini file.vi`) -- **the wavelength labels are a runtime
+config value, not hardcoded**. Design-time default: all 4 unchecked,
+Power = 0.1%. **Enabled is an independent per-row toggle, NOT a radio
+button** -- multiple rows can be checked at the control level. Single-
+selection is enforced only at the point of use, by `SPIM LV8.6
+VIs\Scan\GUI\HHMI - Check that only 1 laser is selected.vi`: if the count
+of `Enabled AND Power>0%` rows isn't exactly 1, it blocks with "Please
+select only 1 excitation source to be 'ON' (with Power > 0%) and try
+again." -- reproduced verbatim in the Python GUI's Acquire-time check.
+
+**"Cycle lasers:" enum** (confidence: high). Backing typedef: `SPIM LV8.6
+VIs\DAQ\Control Modules\Utils\HHMI - SPIM AOTF cycle enum`, field name
+`AOTF cycle` (part of the `Waveform Config In` cluster). Exactly 3 items,
+in order: `per Z`, `per Stack`, `None` -- confirmed from the raw zlib-
+inflated type descriptor bytes (`\x03\x05per Z\tper Stack\x04None`) at
+two independent offsets in the same .ctl. (The Python port's earlier
+guess of `["per Z","per Stack","per Timepoint"]` was wrong on both counts
+-- fixed.) Semantics, traced through the two VIs that branch on it (`SPIM
+LV8.6 VIs\DAQ\Waveform\Common\Correct AOTF Channels for PerZ Cycling and
+XBidirect.vi` / `...PerStack Cycling and ZBidirect.vi`, both called from
+`HHMI - SPIM Calc Single Frame Ramp Waveform.vi`): `per Z` advances the
+active excitation/AOTF channel every Z-plane; `per Stack` advances it
+once per full Z-stack; `None` pins it to channel 0 with no cycling at all
+-- `HHMI - Configure display of AOTF slide control.vi` has a developer
+comment right on the diagram: "force to chnl 0 when cycle = None". `None`
+is the real hardware's current live default, which lines up with the
+FPGA bitfile only exposing one overall AOTF on/off bit (no per-channel
+control yet) -- so `None` is also the only one of the 3 that's currently
+meaningful on this hardware.
+
+**Dither Galvo (AO4)** (confidence: medium -- SPIM MAIN's own exported
+front panel in this checkout doesn't show this box, so the GUI-level
+wiring couldn't be visually confirmed; everything below is reconstructed
+from the underlying waveform-generation code, which does fully support a
+Dither axis). Real calibration constants, from `SPIMProject.ini`:
+`[Microns to Volt calibrations] Dither Galvo um/V = 10.0`; `[D Galvo
+Limits (V)] Min=-5.5, Max=5.5` (so +-55um max deflection on the main
+rig; the RemoteAcq variant's ini clamps to +-1.5V/+-15um instead). VI
+chain: `HHMI - Recalc SPIM Waveform.vi` -> `HHMI - SPIM Make Ramp
+Waveform.vi`'s `"D"` (Dither) fast-axis case, `Triangle` shape -> `HHMI -
+SPIM Generate Fast axis ramp for DOE or not.vi` (outputs `Array of
+volts`). Field mapping: `Range (um)` = sweep amplitude (via the 10um/V
+calibration, clamped by `D Galvo Limits from ini file.vi`); `# Sweeps` =
+`Dither Triangle Pulses` (fractional values allowed, e.g. a saved default
+of 5.5); `Fract. Flyback` = `Dither Fract. Flyback`, the fraction of each
+triangle half-period spent on turnaround smoothing (saved default 0.10).
+Reuses the same per-exposure ramp machinery as the X fast-scan axis, so
+it's tied to a single exposure's timescale -- consistent with (not
+literally proven as) "sweep during exposure to reduce stripe artifacts."
+Two `Misc Settings` ini flags hint at alternate uses, both currently
+`FALSE`: `Enable Z Piezo 2 (Dither Chnl.)` and `Use Z Galvo and Dither as
+Alternating Galvo Channels`.
+
+**X galvo "Interval" padlock** (confidence: high, mechanism; direction of
+the locked/unlocked cases is inferred). Real terminal `Lock interval (F)`
+on `HHMI - SPIM Update GUI Axis control.vi` (default False). The False
+case is explicitly labeled "Adjust interval." on the diagram and computes
+`Interval (um) = Range (um) / (# of pixels - 1)`, with a documented edge
+case "if pix = 1, change interval, range to zero." This is a real,
+verified formula -- confirmed numerically against the user's own
+screenshot (Range=100, #pixels=60 -> 100/59=1.6949.. -> displayed "1.69")
+-- and is now implemented for real in the Python GUI (`main_window.py`'s
+`_update_x_galvo_interval`), even though it's otherwise a decorative
+field. Interval has no up/down arrows on the real front panel (Offset/
+Range/#pixels do), consistent with it being computed/read-only by
+default.
+
+**Continuous Scan vs Z stack enable/disable rules** (confidence: mixed --
+see caveat). The literal per-field enable/disable wiring lives inline in
+`SPIM MAIN.vi`'s own block diagram, inside a `"Property nodes"` message
+case that is itself a 6-frame stacked sequence (`0 [0..5]`); the VI
+diagram export tool only captured frame 0 (unrelated: waveform-tab
+visibility, Multistack->Slices.Disabled, tab colors) -- frames 1-5, the
+likely home of this logic, and the combo box's Value-Change event case,
+were never captured by any export and are not recoverable from the static
+PNGs. Two dedicated "enable/disable" subVIs exist (`HHMI - SPIM Enable
+disable depending on scan state.vi` / `...on aquisition state.vi`) but
+both only gate idle-vs-acquiring, an orthogonal axis to Continuous-vs-
+Z-stack. **So the actual rule set below comes from the user's own two
+real-hardware screenshots (both modes), not from reading the block
+diagram** -- treat it as empirically confirmed-by-observation rather than
+source-verified:
+- Continuous Scan: Z Galvo/Z Piezo `End Pos` disabled; Z Piezo `Slices`
+  fixed at 1; `Cycle lasers:` disabled, shows `None`; Timepoints/Stack
+  Acq Time/Total time/Multi-location/Perfusion sections hidden entirely
+  (not just disabled).
+- Z stack: all of the above enabled/visible instead.
+
+**"Linked"/"Unlinked" toggle** (confidence: low/inferred -- explicitly
+NOT source-confirmed). Front-panel geometry places it directly between
+the Z Galvo and Z Piezo boxes; a recurring Z-Galvo/Z-Piezo-paired pattern
+elsewhere in the source (`Globals\Z Piezo and Galvo Static Positions.vi`,
+`Write Z Galvo-Piezo Offset.vi`, `HHMI - SPIM Z Galvo or Z Piezo
+enum.ctl`) plus the obvious SPIM physical meaning (Z galvo steers the
+sheet, Z piezo refocuses the detection objective, so they'd commonly move
+together with a fixed relative offset) supports: **Linked ties Z Piezo's
+position to Z Galvo + Rel. Offset** (Piezo Start/End follow Galvo rather
+than being set independently); Unlinked lets Z Piezo be set on its own.
+The literal Value-Change block diagram for this button was never found in
+the available exports, so this is the Python GUI's best-supported guess
+(implemented as: Linked disables Z Piezo's own Start/End fields), not a
+verified fact -- flag this if it ever turns out to matter for real
+hardware wiring.
+
+Investigation carried out via a 4-agent parallel Workflow (browsing +
+binary .vi/.ctl string extraction); full per-task transcripts in this
+session's workflow journal if the reasoning behind any of the above needs
+to be re-traced.

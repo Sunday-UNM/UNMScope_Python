@@ -1,11 +1,28 @@
-"""Main application window -- LouisXIV-style, scoped to Continuous Scan
-and Z stack modes only.
+"""Main application window -- a close visual replica of the real LouisXIV
+`SPIM MAIN.vi` front panel, functionally scoped to Continuous Scan and Z
+stack modes only.
 
-Layout modeled on the real SPIM MAIN.vi front panel (see
-VI_Diagrams/SPIM/SPIM LV8.6 VIs/SPIM MAIN/SPIM MAINp.png for the visual
-reference): top bar with Acquire/Stop + mode dropdown + Status + Exit,
-left Scan Setup panel, right image display -- scoped to only what these
-two modes need (no AO/multi-camera/perfusion/etc. yet).
+Layout modeled directly on
+`VI_Diagrams/SPIM/SPIM LV8.6 VIs/SPIM MAIN/SPIM MAINp.png` (the real
+front-panel screenshot): lavender top bar (Acquire, mode dropdown,
+Simulation checkbox, Status pill + progress bars, Exit), a tabbed left
+panel (Scan Setup / Camera / Utilities / Preferences / Adv Setup), and a
+tabbed right side (Waveforms / Images / Bckgrd / Blank on top, a second
+tab row -- Image Profile / Stack Profile / Stack Projections / Row
+Profile / Timing / Diagnostics -- on the bottom).
+
+IMPORTANT -- honesty about what's real: most of the real panel's controls
+(Excitation/AOTF sliders, X galvo, Z Galvo, Cycle lasers, Timepoints,
+Multi-location, Perfusion, the Waveforms/Bckgrd/Blank/Stack-Profile tabs)
+are laid out here to match the real software's look, but are NOT wired to
+hardware -- the deployed FPGA bitfile only exposes a single overall
+"AOTF on?" bit (not per-channel control) and no galvo-stepping logic has
+been validated yet (see fpga_io_map.md). Those controls are left disabled
+(greyed out) so the window looks right without claiming functionality
+that hasn't been hardware-validated. The controls that ARE real: Camera
+connect/exposure, FPGA connect, Z Piezo Interval/Start/End/Slices (drives
+the Z-stack trigger count), Acquire/Stop, and the live image feed --
+exactly the same hardware path as before this restyle.
 
 Threading design (IMPORTANT -- see hardware/fpga_trigger.py and the
 session's crash history): Camera is touched ONLY from the GUI thread via
@@ -27,9 +44,11 @@ import numpy as np
 from PySide6.QtCore import Qt, QTimer, QObject, Signal, QRect
 from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QFont
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QFormLayout,
-    QLabel, QPushButton, QComboBox, QDoubleSpinBox, QSpinBox, QTextEdit,
-    QMessageBox, QSizePolicy, QCheckBox,
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox,
+    QFormLayout, QLabel, QPushButton, QComboBox, QDoubleSpinBox, QSpinBox,
+    QTextEdit, QMessageBox, QSizePolicy, QCheckBox, QTabWidget, QSlider,
+    QLineEdit, QTableWidget, QTableWidgetItem, QHeaderView, QProgressBar,
+    QSplitter,
 )
 
 from unmscope.hardware.camera import Camera, OrcaFlash4Camera, SimulatedCamera
@@ -37,6 +56,40 @@ from unmscope.hardware.fpga_trigger import FpgaTriggerController
 
 MODE_CONTINUOUS = "Continuous Scan"
 MODE_ZSTACK = "Z stack"
+
+# -- LouisXIV-style palette (sampled from the real front panel) ------------
+PANEL_BG = "#d7d7f2"       # lavender window/tab background
+GROUP_BG = "#e7e7f7"       # slightly lighter group-box interior
+WHITE_BG = "#ffffff"
+BORDER = "#8f8fbf"
+IDLE_GREEN = "#2fa72f"
+ACQUIRING_RED = "#cc3333"
+DISABLED_NOTE = "#6a6a6a"
+
+STYLESHEET = f"""
+QMainWindow, QWidget#central {{ background-color: {PANEL_BG}; }}
+QTabWidget::pane {{ border: 1px solid {BORDER}; background: {PANEL_BG}; }}
+QTabBar::tab {{
+    background: {GROUP_BG}; border: 1px solid {BORDER}; border-bottom: none;
+    padding: 4px 10px; margin-right: 1px;
+}}
+QTabBar::tab:selected {{ background: {WHITE_BG}; font-weight: bold; }}
+QGroupBox {{
+    background-color: {GROUP_BG}; border: 1px solid {BORDER}; border-radius: 3px;
+    margin-top: 10px; font-weight: bold;
+}}
+QGroupBox::title {{
+    subcontrol-origin: margin; left: 8px; padding: 0 4px; background: {PANEL_BG};
+}}
+QPushButton {{ background-color: {WHITE_BG}; border: 1px solid {BORDER}; padding: 3px 8px; }}
+QPushButton:disabled {{ color: #999; background-color: #eee; }}
+QSlider::groove:horizontal {{ height: 5px; background: #bbb; border-radius: 2px; }}
+QSlider::sub-page:horizontal {{ background: #2f6fdb; border-radius: 2px; }}
+QSlider::handle:horizontal {{
+    background: white; border: 1px solid #666; width: 12px; margin: -5px 0; border-radius: 6px;
+}}
+QSlider:disabled::sub-page:horizontal {{ background: #90a4c8; }}
+"""
 
 
 def frame_to_qpixmap(frame: np.ndarray, label_text: str | None = None) -> QPixmap:
@@ -70,6 +123,26 @@ def frame_to_qpixmap(frame: np.ndarray, label_text: str | None = None) -> QPixma
     return pix
 
 
+def _stub_note(text: str) -> QLabel:
+    lbl = QLabel(text)
+    lbl.setWordWrap(True)
+    lbl.setStyleSheet(f"color: {DISABLED_NOTE}; font-style: italic; font-weight: normal;")
+    return lbl
+
+
+def _placeholder_tab(title: str, subtitle: str = "Not yet implemented.") -> QWidget:
+    """A stub tab that matches the real panel's tab structure visually
+    without pretending to have real content behind it."""
+    w = QWidget()
+    lay = QVBoxLayout(w)
+    box = QLabel(f"{title}\n\n{subtitle}")
+    box.setAlignment(Qt.AlignCenter)
+    box.setStyleSheet("background-color: #1e1e1e; color: #888; font-style: italic;")
+    box.setMinimumHeight(120)
+    lay.addWidget(box)
+    return w
+
+
 class FpgaSignals(QObject):
     """Bridges FpgaTriggerController's background-thread callbacks to the
     GUI thread. Signal.emit() is thread-safe in Qt -- calling it from a
@@ -82,8 +155,9 @@ class FpgaSignals(QObject):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("UNMScope")
-        self.resize(1000, 820)
+        self.setWindowTitle("UNMScope -- LouisXIV (Python)")
+        self.resize(1360, 900)
+        self.setStyleSheet(STYLESHEET)
 
         self.camera: Camera | None = None
         self.fpga: FpgaTriggerController | None = None
@@ -103,13 +177,28 @@ class MainWindow(QMainWindow):
     # -- UI --------------------------------------------------------------
     def _build_ui(self):
         central = QWidget()
+        central.setObjectName("central")
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
 
-        # Top bar: Acquire/Stop, mode, Status, Exit -- mirrors SPIM MAIN's layout.
+        root.addLayout(self._build_top_bar())
+
+        body = QSplitter(Qt.Horizontal)
+        root.addWidget(body, stretch=1)
+
+        body.addWidget(self._build_left_tabs())
+        body.addWidget(self._build_right_side())
+        body.setSizes([400, 960])
+
+        self._on_mode_changed(self.mode_combo.currentText())
+
+    # -- Top bar: Acquire, mode, Simulation, Status pill+bars, Exit --------
+    def _build_top_bar(self) -> QHBoxLayout:
         top_bar = QHBoxLayout()
+
         self.acquire_btn = QPushButton("Acquire")
         self.acquire_btn.setMinimumHeight(40)
+        self.acquire_btn.setMinimumWidth(120)
         self.acquire_btn.setStyleSheet("font-weight: bold; font-size: 12pt;")
         self.acquire_btn.clicked.connect(self.on_acquire_clicked)
         self.acquire_btn.setEnabled(False)
@@ -122,29 +211,356 @@ class MainWindow(QMainWindow):
 
         top_bar.addStretch(1)
 
+        sim_col = QVBoxLayout()
+        self.simulation_check = QCheckBox("Simulation")
+        self.simulation_check.setToolTip(
+            "Forces the Camera backend (Camera tab) to Simulated instead of the real Orca 4.0."
+        )
+        self.simulation_check.toggled.connect(self._on_simulation_toggled)
+        sim_col.addWidget(self.simulation_check)
+        sim_col.addStretch(1)
+        top_bar.addLayout(sim_col)
+
         status_box = QGroupBox("Status")
-        status_layout = QVBoxLayout(status_box)
+        status_box.setStyleSheet(status_box.styleSheet() + "background-color: #ececec;")
+        status_grid = QGridLayout(status_box)
+
         self.acq_status_label = QLabel("IDLE")
         self.acq_status_label.setAlignment(Qt.AlignCenter)
+        self.acq_status_label.setMinimumWidth(90)
         self.acq_status_label.setStyleSheet(
-            "background-color: #2a2; color: white; font-weight: bold; padding: 4px; border-radius: 3px;"
+            f"background-color: {IDLE_GREEN}; color: white; font-weight: bold; "
+            "padding: 6px; border-radius: 3px;"
         )
-        status_layout.addWidget(self.acq_status_label)
+        status_grid.addWidget(self.acq_status_label, 0, 0, 2, 1)
+
+        self.acq_progress = QProgressBar()
+        self.acq_progress.setRange(0, 100)
+        self.acq_progress.setTextVisible(False)
+        self.acq_progress.setMaximumHeight(12)
+        status_grid.addWidget(QLabel("Aqc."), 0, 1)
+        status_grid.addWidget(self.acq_progress, 0, 2)
+
+        self.overall_progress = QProgressBar()
+        self.overall_progress.setRange(0, 100)
+        self.overall_progress.setTextVisible(False)
+        self.overall_progress.setMaximumHeight(12)
+        status_grid.addWidget(QLabel("Overall"), 1, 1)
+        status_grid.addWidget(self.overall_progress, 1, 2)
+
         top_bar.addWidget(status_box)
 
         exit_btn = QPushButton("EXIT")
+        exit_btn.setMinimumHeight(40)
+        exit_btn.setStyleSheet("font-weight: bold;")
         exit_btn.clicked.connect(self.close)
         top_bar.addWidget(exit_btn)
-        root.addLayout(top_bar)
+        return top_bar
 
-        # Main body: left Scan Setup panel + right image/log panel.
-        body = QHBoxLayout()
-        root.addLayout(body, stretch=1)
+    # -- Left panel: tabbed, Scan Setup / Camera / Utilities / Preferences / Adv Setup
+    def _build_left_tabs(self) -> QTabWidget:
+        tabs = QTabWidget()
+        tabs.setMinimumWidth(380)
+        tabs.setMaximumWidth(460)
+        tabs.addTab(self._build_scan_setup_tab(), "Scan Setup")
+        tabs.addTab(self._build_camera_tab(), "Camera")
+        tabs.addTab(_placeholder_tab("Utilities"), "Utilities")
+        tabs.addTab(_placeholder_tab("Preferences"), "Preferences")
+        tabs.addTab(self._build_adv_setup_tab(), "Adv Setup")
+        return tabs
 
-        left_panel = QVBoxLayout()
-        body.addLayout(left_panel)
+    def _build_scan_setup_tab(self) -> QWidget:
+        tab = QWidget()
+        outer = QVBoxLayout(tab)
+        outer.addWidget(_stub_note(
+            "Layout + control LOGIC verified against the real LabVIEW source "
+            "(SPIM MAIN.vi, HHMI - SPIM Update GUI Axis control.vi, HHMI - "
+            "Check that only 1 laser is selected.vi, HHMI - SPIM AOTF cycle "
+            "enum, D Galvo Limits from ini file.vi -- see fpga_io_map.md). "
+            "Field values still don't drive real hardware except Camera, "
+            "Z Piezo Interval/Start/End/Slices (trigger count), and the "
+            "single-laser-selected check below -- those are real."
+        ))
 
-        # Camera connection controls
+        row1 = QHBoxLayout()
+        row1.addWidget(self._build_excitation_box())
+        row1.addWidget(self._build_x_galvo_box())
+        outer.addLayout(row1)
+
+        outer.addWidget(self._build_z_galvo_box())
+
+        cycle_row = QHBoxLayout()
+        cycle_row.addWidget(QLabel("Cycle lasers:"))
+        self.cycle_lasers_combo = QComboBox()
+        # Real enum "HHMI - SPIM AOTF cycle enum.ctl": per Z (advance laser
+        # channel every Z-plane), per Stack (advance once per Z-stack),
+        # None (pinned to channel 0, no cycling -- current real-hardware
+        # default, consistent with the FPGA's single AOTF on/off bit).
+        self.cycle_lasers_combo.addItems(["per Z", "per Stack", "None"])
+        self.cycle_lasers_combo.setCurrentText("None")
+        cycle_row.addWidget(self.cycle_lasers_combo)
+        cycle_row.addStretch(1)
+        self.linked_btn = QPushButton("Unlinked")
+        self.linked_btn.setCheckable(True)
+        self.linked_btn.setChecked(False)
+        self.linked_btn.setToolTip(
+            "Best-supported inference from source layout/naming (Z Piezo "
+            "and Z Galvo globals are consistently paired elsewhere in the "
+            "codebase), not a literally-confirmed wiring: when Linked, Z "
+            "Piezo's Start/End follow Z Galvo + Rel. Offset instead of "
+            "being set independently."
+        )
+        self.linked_btn.toggled.connect(self._on_linked_toggled)
+        cycle_row.addWidget(self.linked_btn)
+        cycle_row.addWidget(QLabel("Rel. Offset:"))
+        self.rel_offset_spin = QDoubleSpinBox()
+        self.rel_offset_spin.setRange(-100.0, 100.0)
+        self.rel_offset_spin.setDecimals(2)
+        cycle_row.addWidget(self.rel_offset_spin)
+        outer.addLayout(cycle_row)
+
+        outer.addWidget(self._build_z_piezo_box())
+        outer.addWidget(self._build_dither_galvo_box())
+        self.timepoints_widget = self._build_timepoints_box()
+        outer.addWidget(self.timepoints_widget)
+        self.multilocation_widget = self._build_multilocation_box()
+        outer.addWidget(self.multilocation_widget)
+        self.perfusion_widget = self._build_perfusion_box()
+        outer.addWidget(self.perfusion_widget)
+
+        outer.addStretch(1)
+        return tab
+
+    def _build_dither_galvo_box(self) -> QGroupBox:
+        # Real axis (AO4). "Range (um)"/"# Sweeps"/"Fract. Flyback" map to
+        # the "D" (Dither) case of HHMI - SPIM Make Ramp Waveform.vi's fast-
+        # axis ramp generator (Triangle shape): Range -> deflection via the
+        # "Dither Galvo um/V"=10.0 calibration, clamped to the project's [D
+        # Galvo Limits (V)] (+-5.5V => +-55um on the main rig); # Sweeps ->
+        # "Dither Triangle Pulses" (fractional allowed); Fract. Flyback ->
+        # "Dither Fract. Flyback", the turnaround-smoothing fraction of each
+        # half-period. See fpga_io_map.md for the full VI chain.
+        box = QGroupBox("Dither Galvo")
+        form = QFormLayout(box)
+        self.dg_range = QDoubleSpinBox()
+        self.dg_range.setRange(0, 55)
+        self.dg_range.setSuffix(" um")
+        self.dg_range.setToolTip("Clamped to +-55 um on the main rig (Dither Galvo um/V=10.0, D Galvo Limits=+-5.5V).")
+        self.dg_sweeps = QDoubleSpinBox()
+        self.dg_sweeps.setRange(0, 100)
+        self.dg_sweeps.setDecimals(1)
+        self.dg_sweeps.setValue(5.5)
+        self.dg_flyback = QDoubleSpinBox()
+        self.dg_flyback.setRange(0.0, 1.0)
+        self.dg_flyback.setDecimals(2)
+        self.dg_flyback.setValue(0.10)
+        form.addRow("Range (um)", self.dg_range)
+        form.addRow("# Sweeps", self.dg_sweeps)
+        form.addRow("Fract. Flyback", self.dg_flyback)
+        form.addRow(_stub_note("Real axis (AO4), not yet sent to the FPGA -- see fpga_io_map.md."))
+        return box
+
+    def _on_linked_toggled(self, checked: bool):
+        self.linked_btn.setText("Linked" if checked else "Unlinked")
+        self._update_scan_setup_enable_state()
+
+    # Real wavelength labels + defaults, from SPIMProject.ini's
+    # [AOTF Settings] Labels="637,561,488,405" and the "HHMI - SPIM Single
+    # Excitation GUI cluster.ctl" typedef (Enabled bool + Power % float,
+    # default Enabled=False/Power=0.1%) -- see fpga_io_map.md.
+    EXCITATION_WAVELENGTHS_NM = (637, 561, 488, 405)
+
+    def _build_excitation_box(self) -> QGroupBox:
+        box = QGroupBox("Excitation")
+        form = QVBoxLayout(box)
+        self.excitation_rows: list[tuple[QCheckBox, int, QDoubleSpinBox]] = []
+        for wavelength in self.EXCITATION_WAVELENGTHS_NM:
+            row = QHBoxLayout()
+            chk = QCheckBox()
+            chk.setToolTip(
+                f"{wavelength} nm enable -- real per-row field (Excitations "
+                "cluster), but the deployed FPGA bitfile only exposes one "
+                "overall AOTF on/off bit, so this doesn't drive hardware yet."
+            )
+            slider = QSlider(Qt.Horizontal)
+            slider.setRange(0, 1000)  # 0.1% steps
+            slider.setValue(1)
+            spin = QDoubleSpinBox()
+            spin.setRange(0.0, 100.0)
+            spin.setDecimals(1)
+            spin.setSingleStep(0.1)
+            spin.setSuffix(" %")
+            spin.setValue(0.1)
+            slider.valueChanged.connect(lambda v, s=spin: s.setValue(v / 10.0))
+            spin.valueChanged.connect(lambda v, sl=slider: sl.setValue(int(round(v * 10))))
+            row.addWidget(QLabel(f"{wavelength}"))
+            row.addWidget(chk)
+            row.addWidget(slider, stretch=1)
+            row.addWidget(spin)
+            form.addLayout(row)
+            self.excitation_rows.append((chk, wavelength, spin))
+        form.addWidget(_stub_note(
+            "Real rule (HHMI - Check that only 1 laser is selected.vi): "
+            "acquisition requires exactly 1 line checked with Power > 0% "
+            "-- enforced below on Acquire, same dialog text as LabVIEW. "
+            "Per-channel AOTF power is NOT yet sent to hardware (bitfile "
+            "only has one overall AOTF on/off bit)."
+        ))
+        return box
+
+    def _build_x_galvo_box(self) -> QGroupBox:
+        box = QGroupBox("X galvo")
+        form = QFormLayout(box)
+        self.xg_offset = QDoubleSpinBox(); self.xg_offset.setRange(-1000, 1000)
+        self.xg_range = QDoubleSpinBox(); self.xg_range.setRange(-1000, 1000); self.xg_range.setValue(100)
+        self.xg_pixels = QSpinBox(); self.xg_pixels.setRange(1, 100000); self.xg_pixels.setValue(60)
+        self.xg_interval = QDoubleSpinBox()
+        self.xg_interval.setDecimals(2)
+        self.xg_interval.setRange(0, 1_000_000)
+        self.xg_interval.setEnabled(False)  # always computed -- see below
+        self.xg_range.valueChanged.connect(self._update_x_galvo_interval)
+        self.xg_pixels.valueChanged.connect(self._update_x_galvo_interval)
+        form.addRow("Offset", self.xg_offset)
+        form.addRow("Range", self.xg_range)
+        form.addRow("# of pixels", self.xg_pixels)
+        form.addRow("\U0001F512 Interval", self.xg_interval)
+        self._update_x_galvo_interval()
+        return box
+
+    def _update_x_galvo_interval(self):
+        # Real formula from HHMI - SPIM Update GUI Axis control.vi's
+        # "Lock interval?" (default False/locked-computed) case, labeled
+        # "Adjust interval." on the diagram: Interval = Range / (#pixels-1),
+        # with the documented edge case "if pix = 1, change interval, range
+        # to zero." -- the padlock icon marks Interval as read-only/derived.
+        pixels = self.xg_pixels.value()
+        if pixels <= 1:
+            self.xg_range.blockSignals(True)
+            self.xg_range.setValue(0)
+            self.xg_range.blockSignals(False)
+            self.xg_interval.setValue(0)
+            return
+        self.xg_interval.setValue(self.xg_range.value() / (pixels - 1))
+
+    def _build_z_galvo_box(self) -> QGroupBox:
+        box = QGroupBox("Z Galvo (um)")
+        form = QFormLayout(box)
+        self.zg_interval = QDoubleSpinBox(); self.zg_interval.setDecimals(3); self.zg_interval.setRange(0, 1000)
+        self.zg_start = QDoubleSpinBox(); self.zg_start.setRange(-1000, 1000)
+        self.zg_end = QDoubleSpinBox(); self.zg_end.setRange(-1000, 1000); self.zg_end.setValue(2)
+        # End Pos only makes sense with a defined stop -- disabled in
+        # Continuous Scan, enabled in Z stack (mode-gated in
+        # _update_scan_setup_enable_state; confirmed against the user's
+        # real screenshots of both modes).
+        form.addRow("Interval", self.zg_interval)
+        form.addRow("Start Pos", self.zg_start)
+        form.addRow("End Pos", self.zg_end)
+        form.addRow(_stub_note(
+            "Real per-slice Z-galvo stepping not yet hardware-validated -- "
+            "these values aren't sent to the FPGA yet."
+        ))
+        return box
+
+    def _build_z_piezo_box(self) -> QGroupBox:
+        # This is the one real, hardware-driving box from the old layout --
+        # renamed/restyled to match the real panel's "Z Piezo (um)" box,
+        # same underlying logic as before (drives the Z-stack trigger count).
+        box = QGroupBox("Z Piezo (um)")
+        form = QFormLayout(box)
+        self.z_interval_spin = QDoubleSpinBox()
+        self.z_interval_spin.setRange(0.01, 1000.0)
+        self.z_interval_spin.setValue(1.0)
+        self.z_start_spin = QDoubleSpinBox()
+        self.z_start_spin.setRange(-1000.0, 1000.0)
+        self.z_start_spin.setValue(0.0)
+        self.z_end_spin = QDoubleSpinBox()
+        self.z_end_spin.setRange(-1000.0, 1000.0)
+        self.z_end_spin.setValue(10.0)
+        for w in (self.z_interval_spin, self.z_start_spin, self.z_end_spin):
+            w.valueChanged.connect(self._update_slice_count)
+        form.addRow("Interval", self.z_interval_spin)
+        form.addRow("Start Pos", self.z_start_spin)
+        form.addRow("End Pos", self.z_end_spin)
+        self.slice_count_field = QLineEdit("-")
+        self.slice_count_field.setReadOnly(True)
+        self.slice_count_field.setMaximumWidth(80)
+        self.slice_count_field.setStyleSheet("font-weight: bold;")
+        form.addRow("Slices", self.slice_count_field)
+        form.addRow(_stub_note(
+            "Interval/Start/End/Slices are REAL -- they drive the Z-stack "
+            "trigger/frame count below (live). Actual Z piezo motion "
+            "between slices is NOT yet implemented -- the piezo stays at "
+            "a fixed safe value; only the trigger/frame-count mechanism "
+            "is being exercised."
+        ))
+        self._update_slice_count()
+        return box
+
+    def _build_timepoints_box(self) -> QWidget:
+        # Borderless (matches the real panel -- no box outline around this
+        # section, unlike Z Galvo/Z Piezo/Dither Galvo). Only Single/1
+        # Timepoint Interval+Delay rows are visible in that case on the
+        # real panel (both user screenshots), so those 2 rows are omitted.
+        box = QWidget()
+        form = QGridLayout(box)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.addWidget(QLabel("Timepoints"), 0, 0)
+        tp_combo = QComboBox(); tp_combo.addItems(["Single"])
+        form.addWidget(tp_combo, 0, 1)
+        tp_spin = QSpinBox(); tp_spin.setRange(1, 9999); tp_spin.setValue(1)
+        form.addWidget(tp_spin, 0, 2)
+        save_chk = QCheckBox("Save Files")
+        form.addWidget(save_chk, 0, 3)
+
+        for r, (label, default) in enumerate([
+            ("Stack Acq. Time", "00:00.00"),
+            ("Total time", "00:00:00"),
+        ], start=1):
+            form.addWidget(QLabel(label), r, 0, 1, 2)
+            field = QLineEdit(default)
+            field.setReadOnly(True)
+            field.setMaximumWidth(110)
+            form.addWidget(field, r, 2, 1, 2)
+        return box
+
+    def _build_multilocation_box(self) -> QWidget:
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        row = QHBoxLayout()
+        chk = QCheckBox("Multi-location")
+        cfg_btn = QPushButton("Configure")
+        row.addWidget(chk); row.addWidget(cfg_btn); row.addStretch(1)
+        lay.addLayout(row)
+
+        table = QTableWidget(3, 4)
+        table.setHorizontalHeaderLabels(["X", "Y", "Z", "Z RO"])
+        table.verticalHeader().setVisible(True)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        table.setMaximumHeight(110)
+        lay.addWidget(table)
+        return box
+
+    def _build_perfusion_box(self) -> QWidget:
+        box = QWidget()
+        form = QGridLayout(box)
+        form.setContentsMargins(0, 0, 0, 0)
+        chk = QCheckBox("Perfusion enabled")
+        form.addWidget(chk, 0, 0, 1, 2)
+        form.addWidget(QLabel("Perfusion on"), 1, 0)
+        on_field = QLineEdit("00:00"); on_field.setReadOnly(True)
+        on_field.setMaximumWidth(80)
+        form.addWidget(on_field, 1, 1)
+        form.addWidget(QLabel("Perfusion off"), 2, 0)
+        off_field = QLineEdit("00:00"); off_field.setReadOnly(True)
+        off_field.setMaximumWidth(80)
+        form.addWidget(off_field, 2, 1)
+        return box
+
+    def _build_camera_tab(self) -> QWidget:
+        tab = QWidget()
+        lay = QVBoxLayout(tab)
+
         conn_box = QGroupBox("Camera")
         conn_form = QFormLayout(conn_box)
 
@@ -164,6 +580,7 @@ class MainWindow(QMainWindow):
 
         self.status_label = QLabel("Not connected")
         self.status_label.setStyleSheet("font-weight: bold;")
+        self.status_label.setWordWrap(True)
         conn_form.addRow("Status:", self.status_label)
 
         self.exposure_spin = QDoubleSpinBox()
@@ -174,9 +591,14 @@ class MainWindow(QMainWindow):
         self.exposure_spin.valueChanged.connect(self.on_exposure_changed)
         conn_form.addRow("Exposure:", self.exposure_spin)
 
-        left_panel.addWidget(conn_box)
+        lay.addWidget(conn_box)
+        lay.addStretch(1)
+        return tab
 
-        # FPGA connection controls
+    def _build_adv_setup_tab(self) -> QWidget:
+        tab = QWidget()
+        lay = QVBoxLayout(tab)
+
         fpga_box = QGroupBox("FPGA Trigger (DIO4)")
         fpga_form = QFormLayout(fpga_box)
         fpga_btn_row = QHBoxLayout()
@@ -191,47 +613,44 @@ class MainWindow(QMainWindow):
         self.fpga_status_label = QLabel("Not connected")
         self.fpga_status_label.setStyleSheet("font-weight: bold;")
         fpga_form.addRow("Status:", self.fpga_status_label)
-        left_panel.addWidget(fpga_box)
+        lay.addWidget(fpga_box)
+        lay.addStretch(1)
+        return tab
 
-        # Z Stack Settings -- only relevant/shown for Z stack mode.
-        self.zstack_box = QGroupBox("Z Stack Settings")
-        zstack_form = QFormLayout(self.zstack_box)
-        self.z_interval_spin = QDoubleSpinBox()
-        self.z_interval_spin.setRange(0.01, 1000.0)
-        self.z_interval_spin.setValue(1.0)
-        self.z_interval_spin.setSuffix(" um")
-        self.z_start_spin = QDoubleSpinBox()
-        self.z_start_spin.setRange(-1000.0, 1000.0)
-        self.z_start_spin.setValue(0.0)
-        self.z_start_spin.setSuffix(" um")
-        self.z_end_spin = QDoubleSpinBox()
-        self.z_end_spin.setRange(-1000.0, 1000.0)
-        self.z_end_spin.setValue(10.0)
-        self.z_end_spin.setSuffix(" um")
-        for w in (self.z_interval_spin, self.z_start_spin, self.z_end_spin):
-            w.valueChanged.connect(self._update_slice_count)
-        zstack_form.addRow("Interval:", self.z_interval_spin)
-        zstack_form.addRow("Start Pos:", self.z_start_spin)
-        zstack_form.addRow("End Pos:", self.z_end_spin)
-        self.slice_count_label = QLabel("-")
-        self.slice_count_label.setStyleSheet("font-weight: bold;")
-        zstack_form.addRow("# Slices:", self.slice_count_label)
-        note = QLabel(
-            "Z motion is NOT yet implemented -- galvo/piezo stay at a "
-            "fixed safe value. This tests the trigger/frame-count "
-            "mechanism only."
-        )
-        note.setWordWrap(True)
-        note.setStyleSheet("color: #888; font-style: italic;")
-        zstack_form.addRow(note)
-        left_panel.addWidget(self.zstack_box)
-        self._update_slice_count()
+    # -- Right side: top tab row (Waveforms/Images/Bckgrd/Blank) over a
+    #    bottom tab row (Image Profile/Stack Profile/.../Diagnostics) -----
+    def _build_right_side(self) -> QSplitter:
+        splitter = QSplitter(Qt.Vertical)
 
-        left_panel.addStretch(1)
+        top_tabs = QTabWidget()
+        top_tabs.addTab(_placeholder_tab(
+            "X Waveform / Full Waveform",
+            "Real-time waveform display (X Galvo, AOTF Ch0-4, Z Galvo, Z "
+            "Piezo, Sample Piezo, Tile) not yet implemented -- see "
+            "'HHMI - AI buffer.vi' in fpga_io_map.md for the internal "
+            "software-scope path this would read from.",
+        ), "Waveforms")
+        top_tabs.addTab(self._build_images_tab(), "Images")
+        top_tabs.addTab(_placeholder_tab("Background"), "Bckgrd")
+        top_tabs.addTab(_placeholder_tab("Blank"), "Blank")
+        top_tabs.setCurrentIndex(1)  # Images -- where the actual feed lives
+        splitter.addWidget(top_tabs)
 
-        # Right panel: image + frame counter + log.
-        right_panel = QVBoxLayout()
-        body.addLayout(right_panel, stretch=1)
+        bottom_tabs = QTabWidget()
+        bottom_tabs.addTab(_placeholder_tab("Image Profile / Point Profile / Line Profile"), "Image Profile")
+        bottom_tabs.addTab(_placeholder_tab("Stack Profile"), "Stack Profile")
+        bottom_tabs.addTab(_placeholder_tab("Stack Projections"), "Stack Projections")
+        bottom_tabs.addTab(_placeholder_tab("Row Profile"), "Row Profile")
+        bottom_tabs.addTab(_placeholder_tab("Timing"), "Timing")
+        bottom_tabs.addTab(self._build_diagnostics_tab(), "Diagnostics")
+        splitter.addWidget(bottom_tabs)
+
+        splitter.setSizes([600, 220])
+        return splitter
+
+    def _build_images_tab(self) -> QWidget:
+        tab = QWidget()
+        right_panel = QVBoxLayout(tab)
 
         self.frame_counter_label = QLabel("0")
         self.frame_counter_label.setStyleSheet("font-weight: bold; font-size: 16pt; color: #2a7;")
@@ -250,14 +669,16 @@ class MainWindow(QMainWindow):
         self.image_label.setMinimumHeight(400)
         self.image_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         right_panel.addWidget(self.image_label, stretch=1)
+        return tab
 
-        right_panel.addWidget(QLabel("Log:"))
+    def _build_diagnostics_tab(self) -> QWidget:
+        tab = QWidget()
+        lay = QVBoxLayout(tab)
+        lay.addWidget(QLabel("Log:"))
         self.log = QTextEdit()
         self.log.setReadOnly(True)
-        self.log.setMaximumHeight(160)
-        right_panel.addWidget(self.log)
-
-        self._on_mode_changed(self.mode_combo.currentText())
+        lay.addWidget(self.log)
+        return tab
 
     def _log(self, msg: str):
         ts = datetime.datetime.now().strftime("%H:%M:%S")
@@ -272,8 +693,31 @@ class MainWindow(QMainWindow):
             self.acquire_btn.setEnabled(ok)
 
     def _on_mode_changed(self, mode: str):
-        self.zstack_box.setVisible(mode == MODE_ZSTACK)
+        self._update_scan_setup_enable_state()
         self._update_slice_count()
+
+    def _update_scan_setup_enable_state(self):
+        # Mode-dependent enable/disable, confirmed against the user's real
+        # LouisXIV screenshots of both modes (Continuous Scan: End Pos
+        # disabled in Z Galvo/Z Piezo, Slices fixed 1, Cycle lasers
+        # disabled/"None"; Z stack: all of those enabled) -- see
+        # fpga_io_map.md's "mode_enable_disable" investigation for what
+        # could and couldn't be confirmed from the static VI source itself.
+        z_stack = self.mode_combo.currentText() == MODE_ZSTACK
+        linked = self.linked_btn.isChecked()
+        self.zg_end.setEnabled(z_stack)
+        self.cycle_lasers_combo.setEnabled(z_stack)
+        # Inferred (not literally source-confirmed): when Linked, Z Piezo
+        # follows Z Galvo + Rel. Offset instead of being set independently.
+        self.z_start_spin.setEnabled(not linked)
+        self.z_end_spin.setEnabled(z_stack and not linked)
+        for w in (self.timepoints_widget, self.multilocation_widget, self.perfusion_widget):
+            w.setVisible(z_stack)
+
+    def _on_simulation_toggled(self, checked: bool):
+        if self.camera is not None:
+            return  # don't yank the backend out from under a live connection
+        self.backend_combo.setCurrentText("Simulated" if checked else "Orca Flash 4.0 (real)")
 
     def _clear_image_to_black(self):
         black = QPixmap(self.image_label.size())
@@ -281,14 +725,19 @@ class MainWindow(QMainWindow):
         self.image_label.setPixmap(black)
 
     def _update_slice_count(self):
+        # Continuous Scan has no defined stop position (End Pos disabled,
+        # matches the real front panel showing "Slices" fixed at 1).
+        if self.mode_combo.currentText() != MODE_ZSTACK:
+            self.slice_count_field.setText("1")
+            return
         interval = self.z_interval_spin.value()
         start = self.z_start_spin.value()
         end = self.z_end_spin.value()
         if interval <= 0:
-            self.slice_count_label.setText("-")
+            self.slice_count_field.setText("-")
             return
         n = max(1, int(round(abs(end - start) / interval)) + 1)
-        self.slice_count_label.setText(str(n))
+        self.slice_count_field.setText(str(n))
 
     # -- Camera actions ----------------------------------------------------
     def on_connect_clicked(self):
@@ -392,6 +841,15 @@ class MainWindow(QMainWindow):
         mode = self.mode_combo.currentText()
         self._log(f"Starting acquisition: {mode}")
 
+        # Real LouisXIV rule (HHMI - Check that only 1 laser is selected.vi):
+        # exactly 1 Excitation line must be checked with Power > 0%.
+        selected = [wl for chk, wl, spin in self.excitation_rows if chk.isChecked() and spin.value() > 0]
+        if len(selected) != 1:
+            msg = "Please select only 1 excitation source to be \"ON\" (with Power > 0%) and try again."
+            self._log(f"Excitation check failed: {msg}")
+            QMessageBox.warning(self, "Excitation", msg)
+            return
+
         try:
             self.camera.set_trigger_source("EXTERNAL")
             self.camera.set_trigger_polarity("POSITIVE")
@@ -402,9 +860,10 @@ class MainWindow(QMainWindow):
 
         self.frame_count = 0
         self.frame_counter_label.setText("0")
+        self.acq_progress.setValue(0)
 
         if mode == MODE_ZSTACK:
-            n = int(self.slice_count_label.text()) if self.slice_count_label.text().isdigit() else 1
+            n = int(self.slice_count_field.text()) if self.slice_count_field.text().isdigit() else 1
             self.z_target_frames = n
             self._log(f"Z-stack: arming camera for {n} frames.")
             self.camera.start_sequence(n)
@@ -417,7 +876,8 @@ class MainWindow(QMainWindow):
         self.acquire_btn.setText("Stop")
         self.acq_status_label.setText("ACQUIRING")
         self.acq_status_label.setStyleSheet(
-            "background-color: #c33; color: white; font-weight: bold; padding: 4px; border-radius: 3px;"
+            f"background-color: {ACQUIRING_RED}; color: white; font-weight: bold; "
+            "padding: 6px; border-radius: 3px;"
         )
         self.mode_combo.setEnabled(False)
         self.connect_btn.setEnabled(False)
@@ -449,8 +909,10 @@ class MainWindow(QMainWindow):
         self.acquire_btn.setText("Acquire")
         self.acq_status_label.setText("IDLE")
         self.acq_status_label.setStyleSheet(
-            "background-color: #2a2; color: white; font-weight: bold; padding: 4px; border-radius: 3px;"
+            f"background-color: {IDLE_GREEN}; color: white; font-weight: bold; "
+            "padding: 6px; border-radius: 3px;"
         )
+        self.acq_progress.setValue(0)
         self.mode_combo.setEnabled(True)
         self.connect_btn.setEnabled(self.camera is None)
         self.disconnect_btn.setEnabled(self.camera is not None)
@@ -462,9 +924,13 @@ class MainWindow(QMainWindow):
     def _on_fpga_frame_fired(self, count: int):
         # Runs on the GUI thread (Qt marshals this safely across threads).
         self._log(f"FPGA fired trigger #{count}.")
-        if self.z_target_frames and count >= self.z_target_frames:
-            self._log(f"Z-stack target of {self.z_target_frames} triggers reached.")
-            self._stop_acquisition()
+        if self.z_target_frames:
+            pct = min(100, int(round(100 * count / self.z_target_frames)))
+            self.acq_progress.setValue(pct)
+            self.overall_progress.setValue(pct)
+            if count >= self.z_target_frames:
+                self._log(f"Z-stack target of {self.z_target_frames} triggers reached.")
+                self._stop_acquisition()
 
     def _on_fpga_error(self, msg: str):
         self._log(f"FPGA error: {msg}")

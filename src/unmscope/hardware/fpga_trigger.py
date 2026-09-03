@@ -27,6 +27,7 @@ trigger-count/continuous mechanism.
 """
 from __future__ import annotations
 
+import ctypes
 import threading
 import time
 
@@ -63,14 +64,81 @@ class FpgaTriggerError(RuntimeError):
     pass
 
 
+# -- Timing precision on Windows ------------------------------------------
+# MEASURED on this machine (Win 11 26200, CPython 3.11.9), overshoot beyond
+# a requested 109.7 ms delay (= 100 ms exposure + Orca readout), 120 reps:
+#
+#     time.sleep()              mean +0.41 ms   spread  0.7 ms
+#     threading.Event.wait()    mean +10.2 ms   spread 15.6 ms
+#
+# 15.6 ms is the coarse Windows timer tick. Since Windows 10 2004 the timer
+# resolution is PER PROCESS: NtQueryTimerResolution can report 1.0 ms
+# system-wide while our process still gets the coarse tick for waitable
+# objects, because some *other* process is what raised it. Confirmed by
+# experiment -- calling timeBeginPeriod(1) ourselves took Event.wait from
+# +10.2 ms/15.6 ms spread down to +0.76 ms/1.19 ms spread, and releasing it
+# put it straight back.
+#
+# This mattered: start_continuous() used Event.wait() for its inter-pulse
+# delay, so up to ~15.6 ms of quantization landed directly in the
+# trigger-to-trigger period -- visible on an oscilloscope as pulse spacing
+# that shifts around, and INTERMITTENT because it depends on what else is
+# running on the machine.
+#
+# time.sleep() is immune because CPython 3.11+ implements it with
+# CREATE_WAITABLE_TIMER_HIGH_RESOLUTION on Windows. So we wait on a
+# deadline using time.sleep() and poll the stop flag, instead of blocking
+# in Event.wait(). We also raise our own process's timer resolution, which
+# additionally helps Qt's timers in the GUI process.
+
+_TIMER_PERIOD_MS = 1
+
+
+def _begin_high_resolution_timers() -> bool:
+    """Raise THIS process's timer resolution to 1 ms. Idempotent-ish:
+    Windows refcounts timeBeginPeriod/timeEndPeriod, and we deliberately
+    never release it -- the controller is process-lifetime scoped, and the
+    cost (slightly higher idle power) is irrelevant on an instrument PC."""
+    try:
+        return ctypes.WinDLL("winmm").timeBeginPeriod(_TIMER_PERIOD_MS) == 0
+    except Exception:
+        return False  # not Windows, or winmm unavailable -- harmless
+
+
+def _wait_until(deadline: float, stop_event: threading.Event | None = None,
+                check_interval_s: float = 0.020) -> bool:
+    """Sleep until ``deadline`` (a time.perf_counter() value), staying
+    responsive to ``stop_event``. Returns False if stopped early.
+
+    Each iteration recomputes the remaining time from the ABSOLUTE
+    deadline, so per-sleep overshoot does not accumulate across chunks --
+    the final short sleep lands within ~0.4 ms of the deadline regardless
+    of how many chunks preceded it.
+    """
+    while True:
+        remaining = deadline - time.perf_counter()
+        if remaining <= 0:
+            return True
+        if stop_event is not None and stop_event.is_set():
+            return False
+        time.sleep(min(remaining, check_interval_s))
+
+
 class FpgaTriggerController:
     """Owns one nifpga.Session."""
 
     def __init__(self):
         self._session: nifpga.Session | None = None
+        #: Whether we successfully raised this process's timer resolution
+        #: (set in connect()). False means pulse timing will be coarser.
+        self.high_res_timers = False
 
     # -- lifecycle --------------------------------------------------------
     def connect(self):
+        # Do this before any timing-sensitive work -- see the notes above
+        # _begin_high_resolution_timers(). Without it this process gets the
+        # coarse ~15.6 ms Windows tick and pulse spacing visibly jitters.
+        self.high_res_timers = _begin_high_resolution_timers()
         self._session = nifpga.Session(bitfile=BITFILE, resource=RESOURCE)
         # Always reset+run at connect -- a stuck/underflowed AO DMA state
         # can otherwise silently persist across sessions.
@@ -173,8 +241,8 @@ class FpgaTriggerController:
         Returns how many actually fired.
         """
         fired_count = 0
+        next_cycle = time.perf_counter()
         for i in range(n_triggers):
-            cycle_start = time.monotonic()
             ok = self.fire_single_trigger()
             if not ok:
                 break
@@ -182,9 +250,12 @@ class FpgaTriggerController:
             if on_progress is not None:
                 on_progress(fired_count, n_triggers)
             if i < n_triggers - 1:
-                remaining = period_s - (time.monotonic() - cycle_start)
-                if remaining > 0:
-                    time.sleep(remaining)
+                # Absolute schedule, same rationale as start_continuous().
+                next_cycle += period_s
+                now = time.perf_counter()
+                if next_cycle < now:
+                    next_cycle = now
+                _wait_until(next_cycle)
         return fired_count
 
     # -- public: continuous mode, as a repeating loop of the same primitive
@@ -209,10 +280,14 @@ class FpgaTriggerController:
 
         def _loop():
             count = 0
-            window_start = time.monotonic()
+            window_start = time.perf_counter()
             window_count = 0
+            # ABSOLUTE schedule rather than "sleep the remainder each
+            # time". Advancing a deadline by exactly period_s per cycle
+            # means a late cycle is followed by a correspondingly shorter
+            # wait, so timing error does not accumulate over a long run.
+            next_cycle = time.perf_counter()
             while not self._continuous_stop.is_set():
-                cycle_start = time.monotonic()
                 ok = self.fire_single_trigger()
                 if not ok:
                     break
@@ -221,17 +296,21 @@ class FpgaTriggerController:
                 if on_frame is not None:
                     on_frame(count)
 
-                now = time.monotonic()
+                now = time.perf_counter()
                 if on_rate is not None and now - window_start >= 1.0:
                     on_rate(window_count / (now - window_start))
                     window_start, window_count = now, 0
 
-                # Sleep only the REMAINDER of the period. If firing
-                # already overran the period we don't sleep at all --
-                # and the achieved rate reported above will show it.
-                remaining = period_s - (time.monotonic() - cycle_start)
-                if remaining > 0:
-                    self._continuous_stop.wait(remaining)
+                next_cycle += period_s
+                # If firing overran the period, resync rather than trying
+                # to catch up -- catching up would fire a burst of
+                # back-to-back triggers the camera cannot accept, and the
+                # achieved rate reported via on_rate already shows the
+                # overrun.
+                if next_cycle < now:
+                    next_cycle = now
+                if not _wait_until(next_cycle, self._continuous_stop):
+                    break
 
         self._continuous_thread = threading.Thread(target=_loop, daemon=True)
         self._continuous_thread.start()

@@ -211,3 +211,26 @@ python -u spikes/27_gui_waveforms_scope_headless.py
 The Waveforms tab (FPGA Scope view) through the real GUI, FPGA only: runs
 a 10 Hz train, asserts the DIO4 statistics in the panel, and renders the
 tab to `docs/waveforms_tab_fpga_scope.png`.
+
+---
+
+## Waveform content (FPGA only; AO test clamp ±100 mV, nothing connected)
+
+```bash
+python -u spikes/28_wvfrm2_packing_on_scope.py
+```
+Decodes the `Wvfrm2` word packing by putting known values in the words and
+reading the scope's AO columns. `28b` probes the two prefix slots.
+
+```bash
+python -u spikes/29c_trigger_up_covers_block.py
+```
+5-slice X-sweep + Z-step waveform, every block compared to the sent words
+on the scope (expects 0 counts of error); also proves the last-block fix.
+
+```bash
+python -u spikes/30_gui_waveform_on_scope_headless.py
+```
+The GUI's own Scan-Setup waveform (Simulated camera + real FPGA) seen on
+its own Waveforms tab: X sweep ±25 mV per trigger and Z piezo steps at a
+500 mV test clamp, then everything frozen at 0 with the default clamp.

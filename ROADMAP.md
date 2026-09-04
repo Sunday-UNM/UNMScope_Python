@@ -317,3 +317,18 @@ FPGA Scope's AO columns. Caveat found while planning: the AI loop samples
 `AO DMA` after the range check, so under the 0-count clamp the columns
 read 0 regardless — verification needs an explicit small clamp (e.g.
 ±100 mV) with nothing connected to the AO BNCs, kept OFF by default.
+
+### Status (2026-09-04, early): C DONE — real waveform content, verified on the scope
+
+`Wvfrm2` decoded (2 I64 words per point, high slot first:
+`[prefix0, prefix1, X Galvo, Z Galvo | Z Piezo, Dither Galvo, Tiling,
+Filter]`, prefixes drive nothing observable), `waveform.py` builds the
+LouisXIV-style scan block (X sweep over the exposure + flyback, Z
+galvo/piezo stepping per slice, fitted to the trigger period), the GUI
+builds it from Scan Setup at every Acquire using `SPIMProject.ini`'s um/V
+calibrations, and the FPGA Scope confirmed X and Z to 0 counts. Found and
+fixed on the way: the last block of a bounded run is aborted when the
+Int-Sync pulse drops, so `Trigger up` now covers the block. Details:
+`docs/wvfrm2_packing.md`. Under the default simulate-on-FPGA clamp (0) the
+AO columns read 0 whatever the waveform says; the Waveforms tab has a
+"Scope test clamp" (mV) to see the shape with nothing connected.

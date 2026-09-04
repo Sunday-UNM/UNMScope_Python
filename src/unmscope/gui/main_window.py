@@ -55,6 +55,8 @@ from PySide6.QtWidgets import (
 from unmscope.hardware.camera import Camera, OrcaFlash4Camera, SimulatedCamera, other_camera_holders
 from unmscope.hardware.fpga_trigger import FpgaTriggerController, TICKS_PER_S, free_run_timing
 from unmscope.hardware.fpga_scope import FpgaScope
+from unmscope.hardware.waveform import build_scan_waveform
+from unmscope.config.calibration import load_calibration
 from unmscope.gui.scope_view import FpgaScopePanel
 
 MODE_CONTINUOUS = "Continuous Scan"
@@ -188,6 +190,9 @@ class MainWindow(QMainWindow):
         self.camera: Camera | None = None
         self.fpga: FpgaTriggerController | None = None
         self.scope: FpgaScope | None = None      # FPGA Scope, streams while the FPGA is connected
+        # LouisXIV's um/V calibrations + voltage limits (SPIMProject.ini).
+        self.calibration = load_calibration()
+        self.last_waveform = None                # ScanWaveform of the current/last acquisition
         self.fpga_signals = FpgaSignals()
         self.fpga_signals.frame_fired.connect(self._on_fpga_frame_fired)
         self.fpga_signals.status.connect(self._on_fpga_status)
@@ -1329,9 +1334,47 @@ class MainWindow(QMainWindow):
         # own limit registers. Real timing, nothing moves, no camera.
         sim_on_fpga = not self.camera.reacts_to_dio4
         self._sim_fed = 0
+
+        # ---- AO waveform for this scan (docs/wvfrm2_packing.md) -------------
+        # X galvo: one sweep of the Scan Setup Range around Offset per
+        # trigger, over the exposure, + flyback. Z piezo / Z galvo: constant
+        # per slice, stepping by their Interval per slice in a Z stack.
+        # Microns -> volts with LouisXIV's own calibrations; volts clamped
+        # to the ini limits. Points at 100 us (4000 ticks).
+        cal = self.calibration
+        n_slices = self.z_target_frames or 1
+        x_range_v = cal.x_galvo.um_to_v(self.xg_range.value())
+        x_offset_v = cal.x_galvo.clamp_v(cal.x_galvo.um_to_v(self.xg_offset.value()))
+        zp_start_v = cal.z_piezo.clamp_v(cal.z_piezo.um_to_v(self.z_start_spin.value()))
+        zp_dir = 1.0 if self.z_end_spin.value() >= self.z_start_spin.value() else -1.0
+        zp_step_v = cal.z_piezo.um_to_v(self.z_interval_spin.value()) * zp_dir if n_slices > 1 else 0.0
+        zg_start_v = cal.z_galvo.clamp_v(cal.z_galvo.um_to_v(self.zg_start.value()))
+        zg_dir = 1.0 if self.zg_end.value() >= self.zg_start.value() else -1.0
+        zg_step_v = cal.z_galvo.um_to_v(self.zg_interval.value()) * zg_dir if n_slices > 1 else 0.0
+        wf = build_scan_waveform(exposure_s, x_range_v, n_slices=n_slices,
+                                 z_galvo_start_v=zg_start_v, z_galvo_step_v=zg_step_v,
+                                 z_piezo_start_v=zp_start_v, z_piezo_step_v=zp_step_v,
+                                 x_offset_v=x_offset_v, period_s=period_s)
+        self.last_waveform = wf
+        block_ticks = wf.points_per_trigger * wf.ticks_between_points
+        # The Int-Sync high time must cover the block or the FPGA aborts the
+        # block after the last trigger of a bounded run (spikes/29b, 29c).
+        trigger_up_ticks = block_ticks + 40_000
+        self._log(f"Waveform: {wf.points_per_trigger} points/trigger ({block_ticks / TICKS_PER_S * 1e3:.1f} ms) x "
+                  f"{wf.n_slices} slice(s) = {len(wf.words)} words; X sweep {x_range_v * 1e3:+.1f} mV around "
+                  f"{x_offset_v * 1e3:+.1f} mV ({self.xg_range.value():g} um @ {cal.x_galvo.um_per_volt:g} um/V); "
+                  f"Z piezo {zp_start_v * 1e3:+.1f} mV step {zp_step_v * 1e3:+.2f} mV; "
+                  f"Z galvo {zg_start_v * 1e3:+.1f} mV step {zg_step_v * 1e3:+.2f} mV (calibration: {cal.source}).")
+        clamp_counts = self.scope_panel.test_clamp_counts() if sim_on_fpga else 0
+        if sim_on_fpga:
+            self._log("SIMULATE ON FPGA: AO clamp " + (f"+-{clamp_counts} counts (scope test clamp)" if clamp_counts
+                                                        else "0 -- every AO output frozen at 0 V."))
+
         self._arm_time = time.perf_counter()
         armed = self.fpga.start_free_run(
-            period_s, exposure_s, n_triggers=n_triggers, clamp_ao=sim_on_fpga,
+            period_s, exposure_s, n_triggers=n_triggers, clamp_ao=sim_on_fpga, clamp_counts=clamp_counts,
+            ao_points_per_trigger=wf.points_per_trigger, ao_ticks_between_points=wf.ticks_between_points,
+            ao_words=wf.words, trigger_up_ticks=trigger_up_ticks,
             on_trigger_count=lambda count: self.fpga_signals.frame_fired.emit(count),
             on_status=lambda st: self.fpga_signals.status.emit(st),
             on_error=lambda msg: self.fpga_signals.error.emit(msg),
@@ -1341,9 +1384,10 @@ class MainWindow(QMainWindow):
             self._stop_acquisition()
             QMessageBox.warning(self, "FPGA", f"Could not arm the FPGA:\n{self.fpga.last_error}")
             return
-        cycle, up = free_run_timing(period_s, exposure_s)
+        cycle, up = self.fpga.cycle_ticks, self.fpga.trigger_up_ticks
         self._log(f"FPGA armed once and free-running: Cycle(Ticks)={cycle} "
-                  f"({cycle / TICKS_PER_S * 1000:.3f} ms), Trigger up (ticks)={up}; "
+                  f"({cycle / TICKS_PER_S * 1000:.3f} ms), Trigger up (ticks)={up} "
+                  f"({up / TICKS_PER_S * 1000:.1f} ms, covers the AO block); "
                   + (f"bounded to {n_triggers} triggers." if n_triggers else "continuous until Stop."))
         if sim_on_fpga:
             self.acq_status_label.setText("ACQUIRING (SIM on FPGA)")

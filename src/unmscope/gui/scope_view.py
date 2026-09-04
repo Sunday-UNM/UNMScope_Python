@@ -202,6 +202,21 @@ class FpgaScopePanel(QWidget):
         self.stream_chk.setChecked(True)
         self.stream_chk.toggled.connect(self._on_stream_toggled)
         top.addWidget(self.stream_chk)
+        top.addSpacing(16)
+        # "Simulate on FPGA" normally clamps every AO output to 0, which also
+        # zeroes the AO columns the scope samples (they are read after the
+        # range check). A small test clamp lets waveform SHAPE be seen on
+        # the scope with nothing connected to the AO BNCs. 0 = frozen.
+        top.addWidget(QLabel("Scope test clamp"))
+        self.test_clamp_spin = QDoubleSpinBox()
+        self.test_clamp_spin.setRange(0.0, 500.0)
+        self.test_clamp_spin.setDecimals(0)
+        self.test_clamp_spin.setSingleStep(50.0)
+        self.test_clamp_spin.setSuffix(" mV")
+        self.test_clamp_spin.setValue(0.0)
+        self.test_clamp_spin.setToolTip("Simulate-on-FPGA only: allow AO outputs up to +-this much so the waveform "
+                                        "shows on the scope. Keep 0 unless nothing is connected to the AO BNCs.")
+        top.addWidget(self.test_clamp_spin)
         top.addStretch(1)
         root.addLayout(top)
 
@@ -258,6 +273,10 @@ class FpgaScopePanel(QWidget):
 
     def enabled_channels(self) -> list[int]:
         return [c for c, chk in self.channel_checks.items() if chk.isChecked()]
+
+    def test_clamp_counts(self) -> int:
+        """The simulate-on-FPGA AO clamp in DAC counts (0 = frozen)."""
+        return int(round(self.test_clamp_spin.value() * 32767 / 10000.0))
 
     def _on_channel_toggled(self, *_):
         self.trace.set_enabled(self.enabled_channels())

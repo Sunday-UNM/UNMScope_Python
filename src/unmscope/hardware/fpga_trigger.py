@@ -61,6 +61,7 @@ import time
 from dataclasses import dataclass
 
 import nifpga
+import numpy as np
 
 BITFILE = r"H:\UNM_Lightsheet\UNMScope_Source\bin\data\SPIMFPGAProject_SPIM_MAIN_VI.lvbitx"
 RESOURCE = "RIO0"
@@ -124,11 +125,15 @@ AO_LIMIT_CHANNELS = ("X Galvo", "Z Galvo", "Z Piezo", "Dither Galvo", "Tiling", 
 AO_LIMIT_FULL_SCALE = 32767          # the compile-time default (docs/fpga_reset_defaults.json)
 
 
-def ao_limits(clamp: bool) -> tuple[dict, dict]:
-    """(AO Limit Max, AO Limit Min) cluster values: clamped to 0 or full scale."""
+def ao_limits(clamp: bool, limit_counts: int = 0) -> tuple[dict, dict]:
+    """(AO Limit Max, AO Limit Min) cluster values. clamp=True limits every
+    channel to +-limit_counts (0 = nothing can move at all; a small value
+    such as 328 = +-100 mV lets waveform SHAPE be observed on the FPGA
+    Scope with nothing connected) and forces AOTF off; False = full scale."""
     if clamp:
-        mx = {c: 0 for c in AO_LIMIT_CHANNELS}
-        mn = {c: 0 for c in AO_LIMIT_CHANNELS}
+        lim = int(abs(limit_counts))
+        mx = {c: lim for c in AO_LIMIT_CHANNELS}
+        mn = {c: -lim for c in AO_LIMIT_CHANNELS}
         mx["AOTF on?"] = False
     else:
         mx = {c: AO_LIMIT_FULL_SCALE for c in AO_LIMIT_CHANNELS}
@@ -136,6 +141,18 @@ def ao_limits(clamp: bool) -> tuple[dict, dict]:
         mx["AOTF on?"] = True
     mn["AOTF on?"] = False
     return mx, mn
+
+
+def pack_ao_word(ch0: int, ch1: int, ch2: int, ch3: int) -> int:
+    """Pack four I16 values into one Wvfrm2 I64 word, ch0 in the low 16
+    bits (the FPGA splits a word with 'Split I64 into 4xI16.vi'; which
+    slot lands on which AO channel is established in spikes/28)."""
+    out = 0
+    for i, v in enumerate((ch0, ch1, ch2, ch3)):
+        out |= (int(v) & 0xFFFF) << (16 * i)
+    if out & (1 << 63):
+        out -= 1 << 64
+    return out
 
 
 def free_run_timing(period_s: float, exposure_s: float) -> tuple[int, int]:
@@ -259,7 +276,11 @@ class FpgaTriggerController:
         self.high_res_timers = False
         # -- AO clamp policy (written at every arm; see set_ao_clamp) --
         self.clamp_ao = False
+        self.clamp_counts = 0                    # +-limit while clamped (0 = frozen)
         self.ao_clamped: bool | None = None      # read back after the last write
+        # -- Wvfrm2 content: a repeating pattern of I64 words (default all-zero) --
+        self._pattern = np.zeros(1, dtype=np.int64)
+        self._pattern_pos = 0
         # -- AI stream (FPGA Scope) settings, written at every arm --
         self.ai_channels = 0
         self.ai_period_ticks = AO_TICKS_BETWEEN_POINTS
@@ -323,21 +344,44 @@ class FpgaTriggerController:
         regs["Static AO to set"].write(STATIC_ZERO)
         regs["Set F.P. (T)"].write(True)
 
-    def set_ao_clamp(self, clamp: bool) -> bool:
-        """Write the AO output limits: clamp=True forces every AO channel
-        to 0 counts whatever the waveform or static value says ("simulate
-        on FPGA" -- nothing may move); False restores full scale. Reads
-        the registers back and returns whether the clamp is in effect."""
+    def _write_ao_limits(self, clamp: bool, limit_counts: int) -> bool:
         regs = self._regs()
-        mx, mn = ao_limits(clamp)
+        mx, mn = ao_limits(clamp, limit_counts)
         regs["AO Limit Max (counts)"].write(mx)
         regs["AO Limit Min (counts)"].write(mn)
         regs["Set F.P. (T)"].write(True)
         self.clamp_ao = bool(clamp)
+        self.clamp_counts = int(abs(limit_counts))
         got_mx = dict(regs["AO Limit Max (counts)"].read())
         got_mn = dict(regs["AO Limit Min (counts)"].read())
-        self.ao_clamped = all(got_mx[c] == 0 and got_mn[c] == 0 for c in AO_LIMIT_CHANNELS)
+        lim = self.clamp_counts
+        self.ao_clamped = bool(clamp) and all(
+            got_mx[c] <= lim and got_mn[c] >= -lim for c in AO_LIMIT_CHANNELS) and not got_mx["AOTF on?"]
+        self._last_ao_limits = (got_mx, got_mn)
         return self.ao_clamped
+
+    def set_ao_clamp(self, clamp: bool, limit_counts: int = 0) -> bool:
+        """Write the AO output limits: clamp=True limits every AO channel to
+        +-limit_counts (default 0: nothing can move, "simulate on FPGA")
+        whatever the waveform or static value says, and forces AOTF off;
+        False restores full scale. Reads the registers back and returns
+        whether the clamp is in effect."""
+        return self._write_ao_limits(clamp, limit_counts)
+
+    # -- Wvfrm2 content ----------------------------------------------------------
+    def _set_pattern(self, words) -> None:
+        pattern = np.asarray([0] if words is None else words, dtype=np.int64).ravel()
+        if len(pattern) == 0:
+            pattern = np.zeros(1, dtype=np.int64)
+        self._pattern = pattern
+        self._pattern_pos = 0
+
+    def _next_words(self, n: int) -> list[int]:
+        """The next n words of the repeating pattern (advances the cursor)."""
+        p = self._pattern
+        idx = (self._pattern_pos + np.arange(n)) % len(p)
+        self._pattern_pos = int((self._pattern_pos + n) % len(p))
+        return p[idx].tolist()
 
     # -- the one proven primitive: a single trigger pulse ------------------
     def fire_single_trigger(self, wait_ready_timeout_s: float = DEFAULT_WAIT_READY_TIMEOUT_S) -> bool:
@@ -415,8 +459,10 @@ class FpgaTriggerController:
 
     # -- refill thread: keeps Wvfrm2 topped up for the whole run ------------
     def _refill_loop(self, fifo):
-        block = [0] * REFILL_BLOCK_WORDS
+        block = None
         while not self._refill_stop.is_set():
+            if block is None:
+                block = self._next_words(REFILL_BLOCK_WORDS)   # keep the same block until it lands
             try:
                 remaining = fifo.write(block, timeout_ms=REFILL_WRITE_TIMEOUT_MS)
             except nifpga.FifoTimeoutError:
@@ -430,6 +476,7 @@ class FpgaTriggerController:
                     self._refill_error = e
                 return
             self._refill_words += REFILL_BLOCK_WORDS
+            block = None
             self._fifo_empty_remaining = remaining
             if remaining < 2 * REFILL_BLOCK_WORDS:
                 time.sleep(0.02)  # nearly full; no need to hammer the driver
@@ -523,7 +570,9 @@ class FpgaTriggerController:
                        trigger_blast: dict | None = None,
                        ao_dma_timeout_ticks: int = AO_DMA_TIMEOUT_TICKS,
                        ai_channels: int | None = None, ai_period_ticks: int | None = None,
-                       ai_free_run: bool | None = None, clamp_ao: bool | None = None) -> bool:
+                       ai_free_run: bool | None = None, clamp_ao: bool | None = None,
+                       clamp_counts: int | None = None, ao_words=None,
+                       trigger_up_ticks: int | None = None) -> bool:
         """Arm the FPGA once and let it free-run DIO4 at ``period_s``.
 
         n_triggers=None -> Continuous Mode (until stop_free_run()).
@@ -542,6 +591,15 @@ class FpgaTriggerController:
         regs = self._regs()
         session = self._session
         cycle, up = free_run_timing(period_s, exposure_s)
+        if trigger_up_ticks is not None:
+            # The Int-Sync HIGH time also gates the AO block after the LAST
+            # trigger of a bounded run: once triggers are disabled the block
+            # is aborted when Int Sync drops (measured, spikes/29b: 101
+            # points = 10.1 ms at Trigger up = 10 ms). Callers streaming a
+            # waveform pass block length + margin here.
+            up = int(max(MIN_TRIGGER_UP_TICKS, min(int(trigger_up_ticks), cycle - MIN_TRIGGER_UP_TICKS)))
+        self.trigger_up_ticks = up
+        self.cycle_ticks = cycle
         continuous = n_triggers is None
         self.last_error = None
         self.last_status = None
@@ -598,20 +656,19 @@ class FpgaTriggerController:
         # leak into this one.
         if clamp_ao is None:
             clamp_ao = self.clamp_ao
-        mx, mn = ao_limits(clamp_ao)
-        regs["AO Limit Max (counts)"].write(mx)
-        regs["AO Limit Min (counts)"].write(mn)
+        if clamp_counts is None:
+            clamp_counts = self.clamp_counts
         regs["Set F.P. (T)"].write(True)
-        got_mx = dict(regs["AO Limit Max (counts)"].read())
-        got_mn = dict(regs["AO Limit Min (counts)"].read())
-        self.clamp_ao = bool(clamp_ao)
-        self.ao_clamped = all(got_mx[c] == 0 and got_mn[c] == 0 for c in AO_LIMIT_CHANNELS)
+        self._write_ao_limits(clamp_ao, clamp_counts)
         if clamp_ao and not self.ao_clamped:
             # Refuse to arm: the user's rule for this mode is that nothing
             # may move, and we cannot prove the clamp is in place.
             self.safe_state()
-            self.last_error = f"AO clamp did not take: Max={got_mx} Min={got_mn}"
+            self.last_error = f"AO clamp did not take: Max/Min={self._last_ao_limits}"
             return False
+        # Waveform content: a repeating pattern of I64 words (all-zero by
+        # default = every AO channel at 0 V). See pack_ao_word().
+        self._set_pattern(ao_words)
 
         # ---- Phase 2: AO engine, started once, refilled for the whole run ---
         # NOTE: deliberately NO 'Clear AO DMA' (AO Mode=3) here. Bisected on
@@ -623,7 +680,7 @@ class FpgaTriggerController:
         fifo.stop()
         fifo.configure(FIFO_REQUESTED_DEPTH)
         fifo.start()
-        fifo.write([0] * PRESEED_WORDS, timeout_ms=2000)
+        fifo.write(self._next_words(PRESEED_WORDS), timeout_ms=2000)
         self._start_refill(fifo)
         regs["AO Mode"].write(AO_MODE_START_RUN_WVFRM)
         regs["Set F.P. (T)"].write(True)

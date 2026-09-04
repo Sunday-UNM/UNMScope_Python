@@ -81,7 +81,12 @@ scope.stop()                                # FIFO off, AI # of channels = 0, Fr
 Register facts: `AI # of channels` and `AI loop period (ticks)` are read
 directly by the FPGA AI loop (no `Set F.P.` latch needed, written with one
 anyway); `Free run` is the AI free-run flag (unrelated to trigger
-repetition) and must be True for the stream to flow outside a scan.
+repetition). **Measured: the stream only flows while the waveform engine
+is armed** (`start_free_run()`); with the scope started and no trigger
+armed, 3 s produced no frames even with `Free run = True`. The first
+trigger pulse therefore sits at sample 0 of a capture (no rising edge to
+detect), and between acquisitions the Waveforms tab keeps showing the
+last capture.
 `start_free_run()` writes all three from the controller's `ai_*`
 attributes, so arming never silently switches a running scope off.
 

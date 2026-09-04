@@ -124,21 +124,46 @@ U32_MAX = 0xFFFF_FFFF
 AO_LIMIT_CHANNELS = ("X Galvo", "Z Galvo", "Z Piezo", "Dither Galvo", "Tiling", "Filter")
 AO_LIMIT_FULL_SCALE = 32767          # the compile-time default (docs/fpga_reset_defaults.json)
 
+# -- AOTF (docs/aotf.md) ------------------------------------------------------
+#: 'AOTF ch (V)' control / 'AOTF ch out (V)' indicator cluster keys. The
+#: four analog AOTF channels leave the breakout box on AO5, AO6, AO7, AO3
+#: (docs/fpga_io_map.md pinout); values are DAC counts like every AO.
+AOTF_LEVEL_KEYS = ("AOTF ch 0", "AOTF ch 1", "AOTF ch 2", "AOTF ch 3")
+AOTF_ANALOG_PIN = {0: "AO5", 1: "AO6", 2: "AO7", 3: "AO3"}
+AOTF_ZERO = {k: 0 for k in AOTF_LEVEL_KEYS}
 
-def ao_limits(clamp: bool, limit_counts: int = 0) -> tuple[dict, dict]:
+
+def aotf_level_cluster(levels: dict | None) -> dict:
+    """'AOTF ch (V)' cluster from {channel index: counts}; unset channels 0."""
+    out = dict(AOTF_ZERO)
+    for ch, counts in (levels or {}).items():
+        key = AOTF_LEVEL_KEYS[int(ch)]
+        out[key] = int(max(-32767, min(32767, int(counts))))
+    return out
+
+
+def ao_limits(clamp: bool, limit_counts: int = 0, allow_aotf_gate: bool | None = None) -> tuple[dict, dict]:
     """(AO Limit Max, AO Limit Min) cluster values. clamp=True limits every
     channel to +-limit_counts (0 = nothing can move at all; a small value
     such as 328 = +-100 mV lets waveform SHAPE be observed on the FPGA
-    Scope with nothing connected) and forces AOTF off; False = full scale."""
+    Scope with nothing connected); False = full scale.
+
+    The clusters also carry the 'AOTF on?' permission: the FPGA range-
+    checks every point's AOTF gate against Max/Min, so Max=False forces
+    the AOTF off whatever the stream says. allow_aotf_gate defaults to
+    ``not clamp``; a clamped run may pass True to let the gate through
+    with every AOTF level at 0 V (the gate is then visible on the scope
+    and nothing can light up)."""
+    if allow_aotf_gate is None:
+        allow_aotf_gate = not clamp
     if clamp:
         lim = int(abs(limit_counts))
         mx = {c: lim for c in AO_LIMIT_CHANNELS}
         mn = {c: -lim for c in AO_LIMIT_CHANNELS}
-        mx["AOTF on?"] = False
     else:
         mx = {c: AO_LIMIT_FULL_SCALE for c in AO_LIMIT_CHANNELS}
         mn = {c: -AO_LIMIT_FULL_SCALE for c in AO_LIMIT_CHANNELS}
-        mx["AOTF on?"] = True
+    mx["AOTF on?"] = bool(allow_aotf_gate)
     mn["AOTF on?"] = False
     return mx, mn
 
@@ -278,6 +303,8 @@ class FpgaTriggerController:
         self.clamp_ao = False
         self.clamp_counts = 0                    # +-limit while clamped (0 = frozen)
         self.ao_clamped: bool | None = None      # read back after the last write
+        self.aotf_gate_allowed = False           # 'AOTF on?' permission in the AO limits
+        self.aotf_levels: dict = dict(AOTF_ZERO)  # 'AOTF ch (V)' as last read back
         # -- Wvfrm2 content: a repeating pattern of I64 words (default all-zero) --
         self._pattern = np.zeros(1, dtype=np.int64)
         self._pattern_pos = 0
@@ -339,34 +366,61 @@ class FpgaTriggerController:
         return self._session.registers
 
     def safe_state(self):
+        """Static AO at 0 on every channel, AOTF gate off, every AOTF level
+        at 0 V (a laser can only be lit through set_aotf_levels() + the
+        per-point gate of a running waveform)."""
         regs = self._regs()
         regs["AO Mode"].write(AO_MODE_SET_AO)
         regs["Static AO to set"].write(STATIC_ZERO)
+        regs["AOTF ch (V)"].write(dict(AOTF_ZERO))
+        regs["AOTF level to set"].write(False)
         regs["Set F.P. (T)"].write(True)
+        self.aotf_levels = dict(AOTF_ZERO)
 
-    def _write_ao_limits(self, clamp: bool, limit_counts: int) -> bool:
+    def _write_ao_limits(self, clamp: bool, limit_counts: int, allow_aotf_gate: bool | None = None) -> bool:
         regs = self._regs()
-        mx, mn = ao_limits(clamp, limit_counts)
+        mx, mn = ao_limits(clamp, limit_counts, allow_aotf_gate)
         regs["AO Limit Max (counts)"].write(mx)
         regs["AO Limit Min (counts)"].write(mn)
         regs["Set F.P. (T)"].write(True)
         self.clamp_ao = bool(clamp)
         self.clamp_counts = int(abs(limit_counts))
+        self.aotf_gate_allowed = bool(mx["AOTF on?"])
         got_mx = dict(regs["AO Limit Max (counts)"].read())
         got_mn = dict(regs["AO Limit Min (counts)"].read())
         lim = self.clamp_counts
         self.ao_clamped = bool(clamp) and all(
-            got_mx[c] <= lim and got_mn[c] >= -lim for c in AO_LIMIT_CHANNELS) and not got_mx["AOTF on?"]
+            got_mx[c] <= lim and got_mn[c] >= -lim for c in AO_LIMIT_CHANNELS) and (
+            bool(got_mx["AOTF on?"]) == self.aotf_gate_allowed)
         self._last_ao_limits = (got_mx, got_mn)
         return self.ao_clamped
 
-    def set_ao_clamp(self, clamp: bool, limit_counts: int = 0) -> bool:
+    def set_ao_clamp(self, clamp: bool, limit_counts: int = 0, allow_aotf_gate: bool | None = None) -> bool:
         """Write the AO output limits: clamp=True limits every AO channel to
         +-limit_counts (default 0: nothing can move, "simulate on FPGA")
-        whatever the waveform or static value says, and forces AOTF off;
-        False restores full scale. Reads the registers back and returns
-        whether the clamp is in effect."""
-        return self._write_ao_limits(clamp, limit_counts)
+        whatever the waveform or static value says, and (unless
+        allow_aotf_gate=True) forces the AOTF gate off; False restores full
+        scale. Reads the registers back and returns whether the clamp is
+        in effect."""
+        return self._write_ao_limits(clamp, limit_counts, allow_aotf_gate)
+
+    # -- AOTF levels ----------------------------------------------------------
+    def set_aotf_levels(self, levels: dict | None) -> dict:
+        """Write 'AOTF ch (V)' = {channel index: counts} (unset channels 0)
+        and read it back. The level only reaches the output while the
+        per-point 'AOTF on?' gate of the running waveform is True AND the
+        AO limits allow the gate (docs/aotf.md)."""
+        regs = self._regs()
+        cluster = aotf_level_cluster(levels)
+        regs["AOTF ch (V)"].write(cluster)
+        regs["Set F.P. (T)"].write(True)
+        got = dict(regs["AOTF ch (V)"].read())
+        self.aotf_levels = got
+        return got
+
+    def read_aotf_out(self) -> dict:
+        """The FPGA's own 'AOTF ch out (V)' indicator (counts per channel)."""
+        return dict(self._regs()["AOTF ch out (V)"].read())
 
     # -- Wvfrm2 content ----------------------------------------------------------
     def _set_pattern(self, words) -> None:
@@ -572,13 +626,19 @@ class FpgaTriggerController:
                        ai_channels: int | None = None, ai_period_ticks: int | None = None,
                        ai_free_run: bool | None = None, clamp_ao: bool | None = None,
                        clamp_counts: int | None = None, ao_words=None,
-                       trigger_up_ticks: int | None = None) -> bool:
+                       trigger_up_ticks: int | None = None,
+                       allow_aotf_gate: bool | None = None, aotf_levels: dict | None = None) -> bool:
         """Arm the FPGA once and let it free-run DIO4 at ``period_s``.
 
         n_triggers=None -> Continuous Mode (until stop_free_run()).
         n_triggers=N    -> bounded: the FPGA stops accepting triggers by
                            itself after N ('Triggers Enabled.vi'), the
                            counter keeps its value until we disarm.
+
+        aotf_levels={channel: counts} sets 'AOTF ch (V)' for the run (the
+        output follows the waveform's per-point gate, docs/aotf.md); a
+        clamped run always writes 0 V levels. allow_aotf_gate is the
+        'AOTF on?' permission in the AO limits (default: not clamp_ao).
 
         Callbacks run on the monitor thread: on_trigger_count(n) whenever
         '# of triggers read' changes, on_status(FreeRunStatus) every
@@ -659,13 +719,16 @@ class FpgaTriggerController:
         if clamp_counts is None:
             clamp_counts = self.clamp_counts
         regs["Set F.P. (T)"].write(True)
-        self._write_ao_limits(clamp_ao, clamp_counts)
+        self._write_ao_limits(clamp_ao, clamp_counts, allow_aotf_gate)
         if clamp_ao and not self.ao_clamped:
             # Refuse to arm: the user's rule for this mode is that nothing
             # may move, and we cannot prove the clamp is in place.
             self.safe_state()
             self.last_error = f"AO clamp did not take: Max/Min={self._last_ao_limits}"
             return False
+        # AOTF levels for the run: 0 V whenever clamped (nothing may light
+        # up), otherwise what the caller asked for. Read back.
+        self.set_aotf_levels({} if clamp_ao else aotf_levels)
         # Waveform content: a repeating pattern of I64 words (all-zero by
         # default = every AO channel at 0 V). See pack_ao_word().
         self._set_pattern(ao_words)

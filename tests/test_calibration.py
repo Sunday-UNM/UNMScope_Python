@@ -44,3 +44,31 @@ def test_real_ini_if_present():
     assert cal.x_galvo.um_per_volt == 2000.0
     assert cal.z_galvo.um_per_volt == 7.0
     assert cal.z_piezo.um_per_volt == 8.0
+
+
+def test_aotf_defaults_and_linear_power_map(tmp_path):
+    cal = load_calibration(tmp_path / "nope.ini")
+    a = cal.aotf
+    assert a.labels == ("637", "561", "488", "405") and a.n_channels == 4
+    assert (a.v_min, a.v_max) == (0.0, 5.0)
+    assert a.power_pct_to_v(0) == 0.0
+    assert a.power_pct_to_v(100) == pytest.approx(5.0)
+    assert a.power_pct_to_v(1) == pytest.approx(0.05)        # 1 % = 50 mV = 164 counts
+    assert a.power_pct_to_v(250) == pytest.approx(5.0)       # clamped
+    assert a.channel_for_row(2) == 2                          # identity routing (488 nm row -> ch 2)
+
+
+def test_aotf_read_from_ini(tmp_path):
+    ini = tmp_path / "SPIMProject.ini"
+    ini.write_text(textwrap.dedent("""
+        [AOTF Settings]
+        Number of channels = 2
+        Labels = "561,488"
+
+        [AOTF Limits (V)]
+        Min (V) = 1.000000
+        Max (V) = 3.000000
+    """))
+    a = load_calibration(ini).aotf
+    assert a.labels == ("561", "488") and a.n_channels == 2
+    assert a.power_pct_to_v(50) == pytest.approx(2.0)

@@ -240,3 +240,12 @@ python -u spikes/31_dither_triangle_on_scope.py
 ```
 The Dither box's triangle on AO4, checked on the FPGA Scope: amplitude,
 peaks per block, and that the X sweep is unaffected.
+
+```bash
+python -u spikes/32_aotf_registers_on_scope.py
+```
+AOTF on the deployed bitfile, FPGA only: which register drives the AOTF
+outputs (`AOTF ch (V)` as a DC level in the default mode, read back on
+`AOTF ch out (V)`), that the AOTF waveform engine modes produce nothing,
+and that the AOTF never appears on the scope stream. Test levels 50 mV.
+See `docs/aotf.md`.

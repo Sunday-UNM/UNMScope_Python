@@ -85,6 +85,25 @@ sees `LouisXIV.exe` running at connect time.
   crash can never take the app down. This also fits the eventual hardware
   process-boundary design.
 
+## Camera Connect crash: a second click during a slow DCAM open (2026-09-04)
+
+**Status: cause found from the log order; guard not yet in the repo.**
+
+The 2026-09-03 "dcamapi.dll access violation on Connect" happened again,
+and this time the log shows how: the first Connect click blocked the GUI
+thread inside the DCAM initialisation for ~10 s with no result; a second
+Connect click was dispatched RE-ENTRANTLY on the same thread from inside
+that call (a native message pump inside the driver lets Qt deliver the
+queued click); the nested open finished and logged "Camera connected",
+control returned into the first, half-trampled initialisation, and the
+process died there (`camera.py connect()` / `initializeDevice`).
+
+Fix to port into `MainWindow.on_connect_clicked()`: refuse re-entry while
+a connect is in progress and disable the Connect button (with a busy
+cursor) BEFORE the blocking call, re-enabling it only if the connect
+fails; or move the connect off the GUI thread. A scratch launcher with
+exactly that guard ran a clean real-camera connect in 2 s the same day.
+
 ## Orca exposure silently lost after stopSequenceAcquisition (adapter quirk)
 
 **Status: worked around 2026-09-03.** Reproduced with

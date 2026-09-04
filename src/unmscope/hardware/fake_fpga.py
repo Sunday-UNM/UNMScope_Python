@@ -231,6 +231,20 @@ class FakeSession:
                 elif value == 3:                                # Clear AO DMA: wedges (measured)
                     self.values["AO wvfrm ready"] = False
                     self.values["AO Purging"] = True
+            elif name in ("AOTF ch (V)", "AO Limit Max (counts)"):
+                # Measured on the deployed bitfile (spikes/32): in the default
+                # AOTF mode, 'AOTF ch out (V)' follows 'AOTF ch (V)' as a DC
+                # level -- but only while the AO limits permit the gate
+                # ('AOTF on?'), so the clamp forces the AOTF off two ways.
+                self._recompute_aotf_out()
+
+    def _recompute_aotf_out(self):
+        """'AOTF ch out (V)' = 'AOTF ch (V)' while the AO limits permit the
+        AOTF gate, else 0 (see the write_register note)."""
+        levels = self.values.get("AOTF ch (V)", {})
+        allowed = bool(self.values.get("AO Limit Max (counts)", {}).get("AOTF on?", False))
+        keys = ("AOTF ch 0", "AOTF ch 1", "AOTF ch 2", "AOTF ch 3")
+        self.values["AOTF ch out (V)"] = {k: (int(levels.get(k, 0)) if allowed else 0) for k in keys}
 
     # -- the emulation loop ------------------------------------------------------
     def _triggers_allowed(self) -> bool:

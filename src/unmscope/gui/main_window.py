@@ -55,7 +55,7 @@ from PySide6.QtWidgets import (
 from unmscope.hardware.camera import Camera, OrcaFlash4Camera, SimulatedCamera, other_camera_holders
 from unmscope.hardware.fpga_trigger import FpgaTriggerController, TICKS_PER_S, free_run_timing
 from unmscope.hardware.fpga_scope import FpgaScope
-from unmscope.hardware.waveform import build_scan_waveform
+from unmscope.hardware.waveform import build_scan_waveform, COUNTS_PER_VOLT
 from unmscope.config.calibration import load_calibration
 from unmscope.gui.scope_view import FpgaScopePanel
 
@@ -504,9 +504,10 @@ class MainWindow(QMainWindow):
             row = QHBoxLayout()
             chk = QCheckBox()
             chk.setToolTip(
-                f"{wavelength} nm enable -- real per-row field (Excitations "
-                "cluster), but the deployed FPGA bitfile only exposes one "
-                "overall AOTF on/off bit, so this doesn't drive hardware yet."
+                f"{wavelength} nm enable. At Acquire this row's Power % becomes the level of "
+                f"AOTF channel {self.EXCITATION_WAVELENGTHS_NM.index(wavelength)} (0..5 V from the ini's "
+                "AOTF limits) for the whole run, 0 V at Stop. Exactly one row may be on. "
+                "Forced off in simulate-on-FPGA mode. See docs/aotf.md."
             )
             slider = QSlider(Qt.Horizontal)
             slider.setRange(0, 1000)  # 0.1% steps
@@ -1380,11 +1381,32 @@ class MainWindow(QMainWindow):
             self._log("SIMULATE ON FPGA: AO clamp " + (f"+-{clamp_counts} counts (scope test clamp)" if clamp_counts
                                                         else "0 -- every AO output frozen at 0 V."))
 
+        # ---- AOTF excitation level (docs/aotf.md) --------------------------
+        # The one selected Excitation row (enforced above) sets its AOTF
+        # channel to Power% -> volts -> DAC counts; every other channel 0.
+        # The FPGA drives 'AOTF ch (V)' as a DC level while armed, so the
+        # laser is on for the whole run. In simulate-on-FPGA mode
+        # start_free_run() forces all AOTF levels to 0 (nothing may light).
+        aotf_levels: dict[int, int] = {}
+        aotf_desc = "off"
+        for i, (chk, wl, spin) in enumerate(self.excitation_rows):
+            if chk.isChecked() and spin.value() > 0:
+                ch = cal.aotf.channel_for_row(i)
+                v = cal.aotf.power_pct_to_v(spin.value())
+                counts = int(round(v * COUNTS_PER_VOLT))
+                aotf_levels[ch] = counts
+                aotf_desc = (f"{wl} nm at {spin.value():g} % -> AOTF ch {ch} = {v:.3f} V ({counts} counts); "
+                             f"other channels 0")
+        if sim_on_fpga and aotf_levels:
+            self._log(f"SIMULATE ON FPGA: AOTF forced OFF (would have been {aotf_desc}).")
+        else:
+            self._log(f"AOTF: {aotf_desc}.")
+
         self._arm_time = time.perf_counter()
         armed = self.fpga.start_free_run(
             period_s, exposure_s, n_triggers=n_triggers, clamp_ao=sim_on_fpga, clamp_counts=clamp_counts,
             ao_points_per_trigger=wf.points_per_trigger, ao_ticks_between_points=wf.ticks_between_points,
-            ao_words=wf.words, trigger_up_ticks=trigger_up_ticks,
+            ao_words=wf.words, trigger_up_ticks=trigger_up_ticks, aotf_levels=aotf_levels,
             on_trigger_count=lambda count: self.fpga_signals.frame_fired.emit(count),
             on_status=lambda st: self.fpga_signals.status.emit(st),
             on_error=lambda msg: self.fpga_signals.error.emit(msg),

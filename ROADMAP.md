@@ -359,3 +359,19 @@ Still open after this: AOTF registers (`AOTF ch (V)`, `AOTF Mode`,
 per-channel shutters), file saving, the Phase 1 core skeleton, motion
 stages, adaptive optics, the camera driver in a subprocess, and pixel-
 matching the Waveforms tab against the live LabVIEW panel.
+
+### AOTF excitation levels (2026-09-04)
+
+The Excitation rows drive the FPGA's AOTF now: the one enabled row's
+Power % becomes its channel's `AOTF ch (V)` level (0..5 V from the ini
+limits, row N -> channel N -> AO5/AO6/AO7/AO3) at Acquire, 0 V at Stop,
+forced off in simulate-on-FPGA. Measured on the bitfile: the level is a
+DC output for the whole run and the FPGA reads it back on `AOTF ch out
+(V)`; per-frame blanking would need the AOTF clock engine, which gave no
+output from Python; the AOTF is not on the scope stream. `docs/aotf.md`.
+
+Still open: flyback blanking via the AOTF clock engine, the analog check
+of the AOTF pins (meter or loopback into AI0), the per-channel power
+calibration table, file saving, the Phase 1 core skeleton, motion stages,
+adaptive optics, the camera driver in a subprocess, pixel-matching the
+Waveforms tab.

@@ -82,3 +82,27 @@ def test_waveform_words_show_up_on_the_fake_ao_columns(ctrl):
     z = np.unique(snap.frames[:, 9])                            # Z Galvo column: 0, 0.1 V, 0.2 V steps (clamped to 2000)
     assert set(z.tolist()) >= {0, 328, 655} or set(z.tolist()) >= {0, 327, 655}
     assert snap.frames[:, 8].max() <= 2000 and snap.frames[:, 8].min() >= -2000
+
+
+def test_aotf_level_written_at_arm_and_zeroed_at_stop(ctrl):
+    """Measured on the deployed bitfile (spikes/32): 'AOTF ch out (V)' follows
+    'AOTF ch (V)' as a DC level while a run is armed with the gate permitted."""
+    regs = ctrl._session.registers
+    ok = ctrl.start_free_run(0.020, 0.010, n_triggers=3, aotf_levels={2: 16384})   # 488 nm row -> ch 2 = 5 V
+    assert ok
+    assert ctrl.aotf_levels["AOTF ch 2"] == 16384 and ctrl.aotf_levels["AOTF ch 0"] == 0
+    assert regs["AOTF ch out (V)"].read()["AOTF ch 2"] == 16384
+    assert ctrl.aotf_gate_allowed is True
+    ctrl.stop_free_run()
+    assert regs["AOTF ch (V)"].read()["AOTF ch 2"] == 0                              # safe_state zeroes
+    assert regs["AOTF ch out (V)"].read()["AOTF ch 2"] == 0
+
+
+def test_clamped_run_forces_aotf_off(ctrl):
+    regs = ctrl._session.registers
+    ok = ctrl.start_free_run(0.020, 0.010, n_triggers=2, clamp_ao=True, aotf_levels={0: 16384})
+    assert ok and ctrl.ao_clamped
+    assert regs["AOTF ch (V)"].read()["AOTF ch 0"] == 0                              # level forced to 0
+    assert regs["AO Limit Max (counts)"].read()["AOTF on?"] is False                 # and the gate is not permitted
+    assert regs["AOTF ch out (V)"].read()["AOTF ch 0"] == 0
+    ctrl.stop_free_run()

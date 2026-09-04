@@ -122,3 +122,39 @@ def test_arm_failure_is_reported_and_unwinds(app, window, monkeypatch):
     pump(app, 0.3)
     assert not w.acquiring
     assert any("arm FAILED" in m for m in w.logs)
+
+
+def test_simulate_on_fpga_keeps_aotf_off(app, window):
+    w = window
+    regs = w.fpga._session.registers
+    w.mode_combo.setCurrentText(mw.MODE_CONTINUOUS)
+    pump(app, 0.05)
+    w.on_acquire_clicked()
+    pump(app, 0.3)
+    assert any("AOTF forced OFF" in m for m in w.logs)
+    assert regs["AOTF ch (V)"].read()["AOTF ch 0"] == 0 and regs["AOTF ch out (V)"].read()["AOTF ch 0"] == 0
+    w.on_acquire_clicked()
+    pump(app, 0.3)
+
+
+def test_real_camera_run_drives_selected_aotf_channel(app, window):
+    """A camera that reacts to DIO4 (the Orca) is not clamped: the selected
+    Excitation row's power becomes its AOTF channel level for the run."""
+    w = window
+    w.camera.reacts_to_dio4 = True                    # behave like the Orca for the FPGA side
+    regs = w.fpga._session.registers
+    for i, (chk, _wl, spin) in enumerate(w.excitation_rows):
+        chk.setChecked(i == 2)                        # 488 nm row
+        spin.setValue(100.0 if i == 2 else 0)
+    w.mode_combo.setCurrentText(mw.MODE_CONTINUOUS)
+    pump(app, 0.05)
+    w.on_acquire_clicked()
+    pump(app, 0.3)
+    assert w.acquiring
+    assert any("488 nm at 100 % -> AOTF ch 2 = 5.000 V (16384 counts)" in m for m in w.logs)
+    assert regs["AOTF ch (V)"].read()["AOTF ch 2"] == 16384
+    assert regs["AOTF ch out (V)"].read()["AOTF ch 2"] == 16384
+    assert regs["AOTF ch (V)"].read()["AOTF ch 0"] == 0
+    w.on_acquire_clicked()
+    pump(app, 0.4)
+    assert regs["AOTF ch (V)"].read()["AOTF ch 2"] == 0    # off at Stop

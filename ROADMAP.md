@@ -345,3 +345,17 @@ is the injection point. `tests/test_gui_flow_fake_fpga.py` runs Z stack /
 Continuous / Z stack in both trigger modes plus simulate-on-FPGA and an
 arm-failure path, offscreen, in seconds. The hardware spikes remain the
 truth; the fake is for not breaking what they proved.
+
+### Dither galvo triangle (2026-09-04)
+
+The Dither box now drives a real triangle on AO4: `triangle_points()` /
+`smooth_turnarounds()` reproduce LabVIEW's segment construction (fractional
+sweeps included) and the GUI feeds Range / # Sweeps / Fract. Flyback into
+every scan waveform. Verified on the FPGA Scope (column 11) at 400 mV
+pk-pk × 5.5 sweeps with the X sweep unaffected. See
+`docs/wvfrm2_packing.md`, "Dither galvo".
+
+Still open after this: AOTF registers (`AOTF ch (V)`, `AOTF Mode`,
+per-channel shutters), file saving, the Phase 1 core skeleton, motion
+stages, adaptive optics, the camera driver in a subprocess, and pixel-
+matching the Waveforms tab against the live LabVIEW panel.

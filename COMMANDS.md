@@ -234,3 +234,9 @@ python -u spikes/30_gui_waveform_on_scope_headless.py
 The GUI's own Scan-Setup waveform (Simulated camera + real FPGA) seen on
 its own Waveforms tab: X sweep ±25 mV per trigger and Z piezo steps at a
 500 mV test clamp, then everything frozen at 0 with the default clamp.
+
+```bash
+python -u spikes/31_dither_triangle_on_scope.py
+```
+The Dither box's triangle on AO4, checked on the FPGA Scope: amplitude,
+peaks per block, and that the X sweep is unaffected.

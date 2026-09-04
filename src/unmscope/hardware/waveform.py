@@ -72,6 +72,43 @@ def unpack_words(words) -> dict[str, np.ndarray]:
     }
 
 
+def triangle_points(n_points: int, pulses: float, range_v: float, offset_v: float = 0.0) -> np.ndarray:
+    """LabVIEW's ``Generate Triangular Waveform.vi``: ``pulses`` triangle
+    periods spread over ``n_points``, built as ``round(2*pulses)`` linear
+    segments of equal length that alternate direction. Fractional pulses
+    are allowed (5.5 -> 11 segments, ending at the far extreme), which is
+    why the Dither box's "# Sweeps" accepts 5.5.
+
+    ``range_v`` is peak-to-peak (the GUI's "Range"), centred on offset_v.
+    """
+    n = max(1, int(n_points))
+    segments = max(1, int(round(2 * float(pulses))))
+    per = n / segments
+    idx = np.arange(n)
+    seg = np.minimum((idx / per).astype(np.int64), segments - 1)
+    frac = idx / per - seg
+    up = (seg % 2) == 0
+    return np.where(up, -0.5 + frac, 0.5 - frac) * float(range_v) + float(offset_v)
+
+
+def smooth_turnarounds(v: np.ndarray, pulses: float, flyback_fraction: float) -> np.ndarray:
+    """Round off each triangle turnaround over ``flyback_fraction`` of a
+    half-period (LabVIEW's "Fract. Flyback" / fractional smoothing), so the
+    galvo is not asked for an instantaneous reversal. A moving average of
+    that width is the cheap equivalent of the cubic overshoot LabVIEW fits.
+    """
+    if flyback_fraction <= 0 or len(v) < 3:
+        return v
+    segments = max(1, int(round(2 * float(pulses))))
+    half = len(v) / segments
+    w = int(max(1, round(flyback_fraction * half)))
+    if w <= 1:
+        return v
+    pad = np.concatenate((np.full(w, v[0]), v, np.full(w, v[-1])))
+    kernel = np.ones(w) / w
+    return np.convolve(pad, kernel, mode="same")[w: w + len(v)]
+
+
 @dataclass
 class ScanWaveform:
     """One trigger period's worth of AO points for each slice of a scan,
@@ -92,7 +129,8 @@ def build_scan_waveform(exposure_s: float, x_range_v: float, n_slices: int = 1,
                         z_piezo_start_v: float = 0.0, z_piezo_step_v: float = 0.0,
                         ticks_between_points: int = 4000, x_offset_v: float = 0.0,
                         flyback_fraction: float = 0.1, period_s: float | None = None,
-                        period_margin_s: float = 0.002) -> ScanWaveform:
+                        period_margin_s: float = 0.002, dither_range_v: float = 0.0,
+                        dither_pulses: float = 0.0, dither_flyback_fraction: float = 0.1) -> ScanWaveform:
     """The LouisXIV-style light-sheet waveform, one block per trigger:
 
     - X Galvo: a linear sweep of +-x_range_v/2 around x_offset_v over the
@@ -119,18 +157,28 @@ def build_scan_waveform(exposure_s: float, x_range_v: float, n_slices: int = 1,
     x_sweep = np.linspace(x_offset_v - x_range_v / 2, x_offset_v + x_range_v / 2, n_sweep)
     x_fly = np.linspace(x_offset_v + x_range_v / 2, x_offset_v - x_range_v / 2, n_fly + 2)[1:-1]
     x_block_v = np.concatenate((x_sweep, x_fly))
-    x_all, zg_all, zp_all = [], [], []
+    # Dither galvo: a triangle across the whole block (the dither runs for
+    # the exposure to smear out stripe artefacts), held at its start value
+    # when disabled.
+    if dither_range_v and dither_pulses:
+        d_block_v = smooth_turnarounds(
+            triangle_points(n_pts, dither_pulses, dither_range_v), dither_pulses, dither_flyback_fraction)
+    else:
+        d_block_v = np.zeros(n_pts)
+    x_all, zg_all, zp_all, d_all = [], [], [], []
     for k in range(max(1, n_slices)):
         x_all.append(x_block_v)
+        d_all.append(d_block_v)
         zg_all.append(np.full(n_pts, z_galvo_start_v + k * z_galvo_step_v))
         zp_all.append(np.full(n_pts, z_piezo_start_v + k * z_piezo_step_v))
     x_c = volts_to_counts(np.concatenate(x_all))
     zg_c = volts_to_counts(np.concatenate(zg_all))
     zp_c = volts_to_counts(np.concatenate(zp_all))
-    words = pack_points(x_c, zg_c, zp_c)
+    d_c = volts_to_counts(np.concatenate(d_all))
+    words = pack_points(x_c, zg_c, zp_c, dither=d_c)
     return ScanWaveform(words=words, points_per_trigger=n_pts, ticks_between_points=ticks_between_points,
                         n_slices=max(1, n_slices),
-                        channels={"X Galvo": x_c, "Z Galvo": zg_c, "Z Piezo": zp_c})
+                        channels={"X Galvo": x_c, "Z Galvo": zg_c, "Z Piezo": zp_c, "Dither Galvo": d_c})
 
 
 def block_fits_period(wf: ScanWaveform, period_s: float, margin_s: float = 0.0005) -> bool:

@@ -79,3 +79,29 @@ X −0.0900 → +0.0900 V and Z 0 / 15 / 30 / 45 / 60 mV with **0 counts of
 error** against the sent words (change-aligned sampling on the scope).
 With `period_s` given the block is shortened to fit `period − 2 ms`, which
 SYNCREADOUT needs (period == exposure).
+
+## Dither galvo (AO4 / scope column 11)
+
+`SPIMProject.ini` gives the dither axis 10 µm/V with ±5.5 V limits, and
+the Dither box's three fields map onto LabVIEW's triangle generator
+(`HHMI - SPIM Make Ramp Waveform.vi` "D" case →
+`Generate Triangular Waveform.vi`):
+
+| GUI field | LabVIEW | in `build_scan_waveform()` |
+|---|---|---|
+| Range (µm) | sweep amplitude, peak-to-peak, via 10 µm/V | `dither_range_v` |
+| # Sweeps | `Dither Triangle Pulses` (fractional allowed, default 5.5) | `dither_pulses` |
+| Fract. Flyback | turnaround smoothing fraction of a half period | `dither_flyback_fraction` |
+
+`triangle_points()` reproduces the VI's construction exactly:
+`round(2 × pulses)` equal linear segments of alternating direction across
+the block, so 5.5 sweeps is 11 segments and the trace ends at the far
+extreme. `smooth_turnarounds()` rounds each reversal over the flyback
+fraction (a moving average, in place of LabVIEW's cubic overshoot fit) so
+the galvo is never asked for an instantaneous reversal.
+
+**Measured on the scope** (`spikes/31_dither_triangle_on_scope.py`, 400 mV
+pk-pk × 5.5 sweeps, clamp ±500 mV, 3 blocks): column 11 showed
+−193.8…+190.1 mV with 5 peaks per block in every block, against a sent
+−196.2…+190.1 mV (the smoothing accounts for the rounding off 400 mV),
+and the X sweep on column 8 was unchanged at 50.1 mV pk-pk.

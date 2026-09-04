@@ -1356,10 +1356,13 @@ class MainWindow(QMainWindow):
         zg_start_v = cal.z_galvo.clamp_v(cal.z_galvo.um_to_v(self.zg_start.value()))
         zg_dir = 1.0 if self.zg_end.value() >= self.zg_start.value() else -1.0
         zg_step_v = cal.z_galvo.um_to_v(self.zg_interval.value()) * zg_dir if n_slices > 1 else 0.0
+        dither_range_v = cal.dither_galvo.um_to_v(self.dg_range.value())
         wf = build_scan_waveform(exposure_s, x_range_v, n_slices=n_slices,
                                  z_galvo_start_v=zg_start_v, z_galvo_step_v=zg_step_v,
                                  z_piezo_start_v=zp_start_v, z_piezo_step_v=zp_step_v,
-                                 x_offset_v=x_offset_v, period_s=period_s)
+                                 x_offset_v=x_offset_v, period_s=period_s,
+                                 dither_range_v=dither_range_v, dither_pulses=self.dg_sweeps.value(),
+                                 dither_flyback_fraction=self.dg_flyback.value())
         self.last_waveform = wf
         block_ticks = wf.points_per_trigger * wf.ticks_between_points
         # The Int-Sync high time must cover the block or the FPGA aborts the
@@ -1369,7 +1372,9 @@ class MainWindow(QMainWindow):
                   f"{wf.n_slices} slice(s) = {len(wf.words)} words; X sweep {x_range_v * 1e3:+.1f} mV around "
                   f"{x_offset_v * 1e3:+.1f} mV ({self.xg_range.value():g} um @ {cal.x_galvo.um_per_volt:g} um/V); "
                   f"Z piezo {zp_start_v * 1e3:+.1f} mV step {zp_step_v * 1e3:+.2f} mV; "
-                  f"Z galvo {zg_start_v * 1e3:+.1f} mV step {zg_step_v * 1e3:+.2f} mV (calibration: {cal.source}).")
+                  f"Z galvo {zg_start_v * 1e3:+.1f} mV step {zg_step_v * 1e3:+.2f} mV; "
+                  f"dither {dither_range_v * 1e3:.1f} mV pk-pk x {self.dg_sweeps.value():g} sweeps "
+                  f"(flyback {self.dg_flyback.value():.2f}) (calibration: {cal.source}).")
         clamp_counts = self.scope_panel.test_clamp_counts() if sim_on_fpga else 0
         if sim_on_fpga:
             self._log("SIMULATE ON FPGA: AO clamp " + (f"+-{clamp_counts} counts (scope test clamp)" if clamp_counts

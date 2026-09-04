@@ -197,6 +197,7 @@ class MainWindow(QMainWindow):
         self._run_closing = 0          # extra closing triggers this run (1 in SYNCREADOUT)
         self._warmup_remaining = 0     # leading frames to discard this run
         self._warmup_discarded = 0
+        self._sim_fed = 0              # "simulate on FPGA": FPGA trigger count already fed to the sim camera
         # SYNCREADOUT bookkeeping: True when the camera holds an exposure
         # that the next trigger will read out as a garbage frame -- after
         # any sync run (its last edge opened one) or an FPGA reset while
@@ -1138,11 +1139,17 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "FPGA connection failed", str(e))
             return
         self.fpga = ctrl
-        if self.camera is not None and self.camera.is_sequence_running():
+        if self.camera is not None and self.camera.reacts_to_dio4 and self.camera.is_sequence_running():
             # connect() did reset()+run(): that puts an edge on DIO4. A
             # camera that is armed (sequence running) in SYNCREADOUT now
             # holds an open exposure; one that is not capturing ignores it.
             self._sync_exposure_open = True
+        if self.camera is not None and not self.camera.reacts_to_dio4:
+            # Simulated camera + real FPGA = "simulate on FPGA": nothing may
+            # move, so clamp every AO output right away, before any arm.
+            clamped = ctrl.set_ao_clamp(True)
+            self._log(f"SIMULATE ON FPGA: AO outputs clamped to 0 (AO Limit Max/Min = 0) -> "
+                      f"{'verified' if clamped else 'READBACK MISMATCH'}.")
         self.fpga_status_label.setText("Connected, safe state")
         self.fpga_status_label.setStyleSheet("font-weight: bold; color: green;")
         self._log("FPGA connected and in safe state.")
@@ -1300,9 +1307,14 @@ class MainWindow(QMainWindow):
         # Bounded: the FPGA fires exactly frames + closing triggers
         # (SYNCREADOUT needs one more edge to read out the last frame).
         n_triggers = (self.z_target_frames + self._run_closing) if self.z_target_frames else None
+        # "Simulate on FPGA": a simulated camera driven by the REAL FPGA's
+        # trigger counter, with every AO output clamped to 0 by the FPGA's
+        # own limit registers. Real timing, nothing moves, no camera.
+        sim_on_fpga = not self.camera.reacts_to_dio4
+        self._sim_fed = 0
         self._arm_time = time.perf_counter()
         armed = self.fpga.start_free_run(
-            period_s, exposure_s, n_triggers=n_triggers,
+            period_s, exposure_s, n_triggers=n_triggers, clamp_ao=sim_on_fpga,
             on_trigger_count=lambda count: self.fpga_signals.frame_fired.emit(count),
             on_status=lambda st: self.fpga_signals.status.emit(st),
             on_error=lambda msg: self.fpga_signals.error.emit(msg),
@@ -1316,6 +1328,10 @@ class MainWindow(QMainWindow):
         self._log(f"FPGA armed once and free-running: Cycle(Ticks)={cycle} "
                   f"({cycle / TICKS_PER_S * 1000:.3f} ms), Trigger up (ticks)={up}; "
                   + (f"bounded to {n_triggers} triggers." if n_triggers else "continuous until Stop."))
+        if sim_on_fpga:
+            self.acq_status_label.setText("ACQUIRING (SIM on FPGA)")
+            self._log("SIMULATE ON FPGA: frames come from the simulated camera, one per FPGA trigger "
+                      f"(fed from '# of triggers read'); AO clamp verified = {self.fpga.ao_clamped}.")
 
     def _stop_acquisition(self):
         self._log("Stopping acquisition.")
@@ -1383,6 +1399,10 @@ class MainWindow(QMainWindow):
         # `count` is the FPGA's own '# of triggers read'.
         self._triggers_fired = count
         self._log(f"FPGA fired trigger #{count}.")
+        if self.camera is not None and not self.camera.reacts_to_dio4 and count > self._sim_fed:
+            # "Simulate on FPGA": hand the real edges to the simulated camera.
+            self.camera.external_trigger(count - self._sim_fed)
+            self._sim_fed = count
         if self.z_target_frames:
             total = self.z_target_frames + self._run_closing
             pct = min(100, int(round(100 * count / total)))
@@ -1415,7 +1435,11 @@ class MainWindow(QMainWindow):
 
     def _is_stale_pre_trigger_frame(self) -> bool:
         """True while it is physically too early for a triggered frame to
-        exist: less than half a trigger period since the FPGA was armed."""
+        exist: less than half a trigger period since the FPGA was armed.
+        Only a real camera can have stale frames; the simulated one gets
+        its edges in software and delivers instantly."""
+        if self.camera is None or not self.camera.reacts_to_dio4:
+            return False
         return (self._arm_time > 0 and self._trigger_period_s > 0
                 and time.perf_counter() - self._arm_time < 0.5 * self._trigger_period_s)
 

@@ -289,3 +289,14 @@ spread — the trigger is locked to the FPGA clock. `FpgaScope` (ring
 buffer, reader thread, shared session, `trigger_stats()`),
 `tools/fpga_scope_monitor.py`, unit tests. Details: `docs/fpga_scope.md`.
 Step 5 (Waveforms tab) is still open; B (simulate on FPGA) is next.
+
+### Status (2026-09-03, night): B DONE — "simulate on FPGA" works
+
+Simulated camera driven by the real FPGA's trigger counter
+(`SimulatedCamera.external_trigger()`, EDGE/SYNCREADOUT accounting as
+measured on the Orca), AO clamped to 0 by `AO Limit Max/Min (counts)` at
+connect and at every arm with readback verification (arm refused if the
+clamp does not take). Headless GUI on the FPGA alone: sync 10/11, 65/66,
+10/11; edge 10/10, 62/62, 10/10; limits read 0 throughout. Details:
+`docs/simulate_on_fpga.md`. Remaining in this phase: A step 5, the
+Waveforms tab fed by `FpgaScope`.

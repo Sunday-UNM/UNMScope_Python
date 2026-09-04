@@ -62,6 +62,11 @@ class Camera(abc.ABC):
     simulated) implement this so the rest of the app never talks to a
     vendor SDK directly."""
 
+    #: True for a physical camera wired to the FPGA's DIO4: it sees every
+    #: real edge, including the one an FPGA reset() emits. False for the
+    #: SimulatedCamera, which is fed edges in software (external_trigger()).
+    reacts_to_dio4: bool = False
+
     #: Fallback sensor readout time in ms, used only when the backend
     #: cannot report its own (see readout_ms()). In external EDGE-trigger
     #: mode the minimum frame period is exposure + readout: a trigger
@@ -215,9 +220,15 @@ class SimulatedCamera(Camera):
         self._seq_target: int | None = None
         self._seq_count = 0
         self._last_frame_at = 0.0
+        # "Simulate on FPGA": frames queued by external_trigger(), and the
+        # SYNCREADOUT open-exposure state, mirroring the measured Orca.
+        self._ext_pending = 0
+        self._exposure_open = False
 
     def connect(self) -> None:
         self._connected = True
+        self._ext_pending = 0
+        self._exposure_open = False      # a fresh device has nothing exposing
 
     def disconnect(self) -> None:
         self._connected = False
@@ -244,37 +255,57 @@ class SimulatedCamera(Camera):
         base = self._rng.poisson(lam=200, size=(self._height, self._width)).astype(np.uint16)
         return base
 
-    # -- No real trigger input to wait on (no hardware) -- these just
-    # record the requested state so GUI code paths that call them don't
-    # blow up with SimulatedCamera selected. start_sequence()/pop_image()
-    # free-run at whatever pace the GUI polls them, independent of any
-    # real trigger -- fine for exercising the GUI/app flow, NOT a stand-in
-    # for real FPGA-trigger timing (there is no simulated FPGA).
+    # -- Trigger handling. INTERNAL: frames free-run at the exposure pace
+    # (GUI/dev work with no FPGA). EXTERNAL: frames appear ONLY when
+    # external_trigger() is called -- in "simulate on FPGA" mode the GUI
+    # feeds it from the real FPGA's '# of triggers read' counter, so the
+    # whole acquisition flow runs on real hardware timing with no camera.
     def set_trigger_source(self, source: str) -> None:
         self._trigger_source = source
 
     def set_trigger_polarity(self, polarity: str) -> None:
         self._trigger_polarity = polarity
 
+    def external_trigger(self, n_edges: int = 1) -> int:
+        """Simulate n rising edges on the trigger input. Mirrors the Orca
+        as measured (spikes/24): EDGE -> one frame per edge; SYNCREADOUT ->
+        each edge reads out the exposure the PREVIOUS edge started, so a
+        fresh camera gives n-1 frames and an exposure left open by an
+        earlier run comes out first as a garbage frame. Returns the number
+        of frames queued. Ignored unless a sequence runs in EXTERNAL mode."""
+        if not self._seq_running or self._trigger_source != "EXTERNAL":
+            return 0
+        queued = 0
+        for _ in range(int(n_edges)):
+            if self.trigger_active == self.TRIGGER_SYNCREADOUT:
+                if self._exposure_open:
+                    queued += 1
+                self._exposure_open = True
+            else:
+                queued += 1
+        self._ext_pending += queued
+        return queued
+
     def start_sequence(self, n_images: int | None = None) -> None:
-        """n_images=None -> unbounded (until stop_sequence())."""
+        """n_images=None -> unbounded (until stop_sequence()). Like the real
+        camera, a restart does NOT clear a SYNCREADOUT open exposure."""
         if not self._connected:
             raise CameraError("Camera not connected")
         self._seq_running = True
         self._seq_target = n_images
         self._seq_count = 0
+        self._ext_pending = 0
         self._last_frame_at = time.monotonic()
 
     def remaining_image_count(self) -> int:
-        """Pace simulated frames at the exposure rate.
-
-        This deliberately does NOT just return 1 whenever a sequence is
-        running: the GUI drains in a `while remaining > 0` loop, so a
-        constant 1 would hand it frames as fast as it can ask, pegging a
-        core and making simulated runs behave nothing like real ones.
-        """
+        """EXTERNAL: frames queued by external_trigger(). INTERNAL: pace
+        simulated frames at the exposure rate -- deliberately NOT a
+        constant 1, because the GUI drains in a `while remaining > 0`
+        loop and would peg a core."""
         if not self._seq_running:
             return 0
+        if self._trigger_source == "EXTERNAL":
+            return self._ext_pending
         if self._seq_target is not None and self._seq_count >= self._seq_target:
             return 0
         elapsed_ms = (time.monotonic() - self._last_frame_at) * 1000.0
@@ -283,6 +314,10 @@ class SimulatedCamera(Camera):
     def pop_image(self) -> np.ndarray:
         if not self._seq_running:
             raise CameraError("No sequence running")
+        if self._trigger_source == "EXTERNAL":
+            if self._ext_pending <= 0:
+                raise CameraError("No triggered frame pending")
+            self._ext_pending -= 1
         self._seq_count += 1
         self._last_frame_at = time.monotonic()
         return self.snap()
@@ -298,12 +333,14 @@ class SimulatedCamera(Camera):
 
     def stop_sequence(self) -> None:
         self._seq_running = False
+        self._ext_pending = 0
 
 
 class OrcaFlash4Camera(Camera):
     """Real Hamamatsu Orca Flash 4.0 (C11440-42U32) via pymmcore-plus +
     the Hamamatsu DCAM Micro-Manager device adapter."""
 
+    reacts_to_dio4 = True
     DEVICE_LABEL = "Camera"
     ADAPTER_MODULE = "HamamatsuHam"
     ADAPTER_DEVICE = "HamamatsuHam_DCAM"

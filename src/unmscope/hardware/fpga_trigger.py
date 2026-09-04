@@ -115,6 +115,28 @@ ORCA_SYNC_READOUT_OFFSET_TICKS = 6600
 AO_DMA_TIMEOUT_TICKS = 100
 U32_MAX = 0xFFFF_FFFF
 
+# -- AO clamp ("simulate on FPGA": nothing may move) --------------------------
+#: Channels of the 'AO Limit Max/Min (counts)' clusters (plus the bool
+#: 'AOTF on?'). The FPGA range-checks every DMA point and every static
+#: value against them (Output DMA.vi / Range Check A0 Values.vi), so
+#: 0/0 forces every AO output to 0 V regardless of waveform content.
+AO_LIMIT_CHANNELS = ("X Galvo", "Z Galvo", "Z Piezo", "Dither Galvo", "Tiling", "Filter")
+AO_LIMIT_FULL_SCALE = 32767          # the compile-time default (docs/fpga_reset_defaults.json)
+
+
+def ao_limits(clamp: bool) -> tuple[dict, dict]:
+    """(AO Limit Max, AO Limit Min) cluster values: clamped to 0 or full scale."""
+    if clamp:
+        mx = {c: 0 for c in AO_LIMIT_CHANNELS}
+        mn = {c: 0 for c in AO_LIMIT_CHANNELS}
+        mx["AOTF on?"] = False
+    else:
+        mx = {c: AO_LIMIT_FULL_SCALE for c in AO_LIMIT_CHANNELS}
+        mn = {c: -AO_LIMIT_FULL_SCALE for c in AO_LIMIT_CHANNELS}
+        mx["AOTF on?"] = True
+    mn["AOTF on?"] = False
+    return mx, mn
+
 
 def free_run_timing(period_s: float, exposure_s: float) -> tuple[int, int]:
     """(Cycle(Ticks), Trigger up (ticks)) for a trigger-to-trigger period.
@@ -235,6 +257,9 @@ class FpgaTriggerController:
         #: Whether we successfully raised this process's timer resolution
         #: (set in connect()). False means pulse timing will be coarser.
         self.high_res_timers = False
+        # -- AO clamp policy (written at every arm; see set_ao_clamp) --
+        self.clamp_ao = False
+        self.ao_clamped: bool | None = None      # read back after the last write
         # -- AI stream (FPGA Scope) settings, written at every arm --
         self.ai_channels = 0
         self.ai_period_ticks = AO_TICKS_BETWEEN_POINTS
@@ -297,6 +322,22 @@ class FpgaTriggerController:
         regs["AO Mode"].write(AO_MODE_SET_AO)
         regs["Static AO to set"].write(STATIC_ZERO)
         regs["Set F.P. (T)"].write(True)
+
+    def set_ao_clamp(self, clamp: bool) -> bool:
+        """Write the AO output limits: clamp=True forces every AO channel
+        to 0 counts whatever the waveform or static value says ("simulate
+        on FPGA" -- nothing may move); False restores full scale. Reads
+        the registers back and returns whether the clamp is in effect."""
+        regs = self._regs()
+        mx, mn = ao_limits(clamp)
+        regs["AO Limit Max (counts)"].write(mx)
+        regs["AO Limit Min (counts)"].write(mn)
+        regs["Set F.P. (T)"].write(True)
+        self.clamp_ao = bool(clamp)
+        got_mx = dict(regs["AO Limit Max (counts)"].read())
+        got_mn = dict(regs["AO Limit Min (counts)"].read())
+        self.ao_clamped = all(got_mx[c] == 0 and got_mn[c] == 0 for c in AO_LIMIT_CHANNELS)
+        return self.ao_clamped
 
     # -- the one proven primitive: a single trigger pulse ------------------
     def fire_single_trigger(self, wait_ready_timeout_s: float = DEFAULT_WAIT_READY_TIMEOUT_S) -> bool:
@@ -482,7 +523,7 @@ class FpgaTriggerController:
                        trigger_blast: dict | None = None,
                        ao_dma_timeout_ticks: int = AO_DMA_TIMEOUT_TICKS,
                        ai_channels: int | None = None, ai_period_ticks: int | None = None,
-                       ai_free_run: bool | None = None) -> bool:
+                       ai_free_run: bool | None = None, clamp_ao: bool | None = None) -> bool:
         """Arm the FPGA once and let it free-run DIO4 at ``period_s``.
 
         n_triggers=None -> Continuous Mode (until stop_free_run()).
@@ -552,7 +593,25 @@ class FpgaTriggerController:
         regs["Trigger Check Filter?"].write(False)
         regs["Added time (Ticks)"].write(0)
         regs["Frame index to add time to"].write(0)
+        # AO output limits: clamped to 0 in "simulate on FPGA" mode, full
+        # scale otherwise -- written EVERY arm so a previous mode cannot
+        # leak into this one.
+        if clamp_ao is None:
+            clamp_ao = self.clamp_ao
+        mx, mn = ao_limits(clamp_ao)
+        regs["AO Limit Max (counts)"].write(mx)
+        regs["AO Limit Min (counts)"].write(mn)
         regs["Set F.P. (T)"].write(True)
+        got_mx = dict(regs["AO Limit Max (counts)"].read())
+        got_mn = dict(regs["AO Limit Min (counts)"].read())
+        self.clamp_ao = bool(clamp_ao)
+        self.ao_clamped = all(got_mx[c] == 0 and got_mn[c] == 0 for c in AO_LIMIT_CHANNELS)
+        if clamp_ao and not self.ao_clamped:
+            # Refuse to arm: the user's rule for this mode is that nothing
+            # may move, and we cannot prove the clamp is in place.
+            self.safe_state()
+            self.last_error = f"AO clamp did not take: Max={got_mx} Min={got_mn}"
+            return False
 
         # ---- Phase 2: AO engine, started once, refilled for the whole run ---
         # NOTE: deliberately NO 'Clear AO DMA' (AO Mode=3) here. Bisected on

@@ -196,3 +196,11 @@ The decode run: captures the `AI data` FIFO and reports every column's
 statistics, which columns pulse at the trigger period, and the measured
 period. `-n 40` probes beyond the 29-element array, `--period-ticks 400`
 runs at 100 kS/s.
+
+```bash
+python -u spikes/26_gui_simulate_on_fpga_headless.py
+```
+"Simulate on FPGA" through the real GUI, FPGA only: Simulated camera fed
+from the FPGA trigger counter, AO clamped and verified. `--edge` for EDGE
+accounting. In the GUI itself the mode is simply backend = Simulated with
+the FPGA connected.

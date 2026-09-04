@@ -127,3 +127,36 @@ target; re-measure rather than guessing if you need something not listed.
 | MIP boxes (XY/YZ/XZ) | 245 x 196 each |
 | MIP label + save button | in a gutter to the LEFT of each box |
 | Empty image/MIP fill colour | `#f0f0f0` (NOT black) |
+
+---
+
+## Hardware spikes added 2026-09-03 (need the real camera / FPGA)
+
+```bash
+python -u spikes/17_read_reset_defaults.py
+```
+Read-only: every FPGA register right after reset+run, recorded to
+`docs/fpga_reset_defaults.json`.
+
+```bash
+python -u spikes/19_free_run_trigger.py --seconds 10 --camera
+```
+The main check: FPGA free run with the Orca counting frames. Prints
+`VERDICT: PASS` only if the FPGA's own trigger counter matches the
+expectation and the camera delivered a frame per trigger. `--count 20`
+runs a bounded burst instead; `--exposure 0.02` a faster train.
+
+```bash
+python -u spikes/20_gui_free_run_headless.py
+```
+The real GUI, headless, on real hardware: Z stack, Continuous, Z stack.
+
+```bash
+python -u spikes/19b_arm_variants.py
+```
+Bisects an arm failure (`AO wvfrm ready` never True) one change at a time.
+
+```bash
+python -u spikes/18_probe_dcam_isolated.py
+```
+Camera open + snap, step by step, in its own process (crash isolation).

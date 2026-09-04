@@ -22,6 +22,29 @@ from dataclasses import dataclass
 import numpy as np
 
 
+#: Processes that are known to open the Hamamatsu camera through DCAM.
+#: Two processes opening DCAM at once is the prime suspect for the
+#: dcamapi.dll access violation in docs/known_issues.md.
+KNOWN_CAMERA_HOLDERS = ("LouisXIV.exe", "LabVIEW.exe", "LouisXIV-RemoteAcquisitionNode.exe")
+
+
+def other_camera_holders() -> list[str]:
+    """Names of running processes that may already hold the camera.
+
+    Best-effort (Windows `tasklist`); returns [] if that cannot be run.
+    Meant for a warning before connect, not as a hard gate -- LouisXIV can
+    be open without having connected to the camera.
+    """
+    import subprocess
+    try:
+        out = subprocess.run(["tasklist", "/FO", "CSV", "/NH"], capture_output=True,
+                             text=True, timeout=5, creationflags=0x08000000).stdout
+    except Exception:
+        return []
+    running = {line.split('","')[0].strip('"').lower() for line in out.splitlines() if line.startswith('"')}
+    return [name for name in KNOWN_CAMERA_HOLDERS if name.lower() in running]
+
+
 class CameraError(RuntimeError):
     """Raised for camera connect/acquire failures."""
 
@@ -39,17 +62,38 @@ class Camera(abc.ABC):
     simulated) implement this so the rest of the app never talks to a
     vendor SDK directly."""
 
-    #: Sensor readout time in ms, on top of the exposure. In external
-    #: EDGE-trigger mode the minimum frame period is exposure + readout:
-    #: a trigger arriving sooner is ignored by the camera, so this is
-    #: what the FPGA trigger period has to be derived from. Subclasses
-    #: override with their real value.
+    #: Fallback sensor readout time in ms, used only when the backend
+    #: cannot report its own (see readout_ms()). In external EDGE-trigger
+    #: mode the minimum frame period is exposure + readout: a trigger
+    #: arriving sooner is silently ignored by the camera, so this is what
+    #: the FPGA trigger period has to be derived from.
     READOUT_MS: float = 10.0
+
+    def readout_ms(self) -> float:
+        """Current sensor readout time in ms. Real backends query the
+        camera (it depends on scan mode, binning, ROI); the default is the
+        class constant."""
+        return self.READOUT_MS
 
     def min_frame_period_ms(self) -> float:
         """Shortest usable trigger-to-trigger period at the current
         exposure. Triggers fired faster than this get dropped."""
-        return self.get_exposure_ms() + self.READOUT_MS
+        return self.get_exposure_ms() + self.readout_ms()
+
+    def discard_buffered_frames(self) -> int:
+        """Pop and drop everything currently buffered. Returns the count.
+        Used right before arming the FPGA so a leftover frame from an
+        earlier run cannot be counted as a triggered one."""
+        n = 0
+        while self.remaining_image_count() > 0:
+            self.pop_image()
+            n += 1
+        return n
+
+    def repair_exposure_if_lost(self) -> bool:
+        """Backends with a known way to lose their exposure override this.
+        Returns True if a repair was performed (and settings re-applied)."""
+        return False
 
     @abc.abstractmethod
     def connect(self) -> None: ...
@@ -134,7 +178,8 @@ class SimulatedCamera(Camera):
     def set_trigger_polarity(self, polarity: str) -> None:
         self._trigger_polarity = polarity
 
-    def start_sequence(self, n_images: int = 1) -> None:
+    def start_sequence(self, n_images: int | None = None) -> None:
+        """n_images=None -> unbounded (until stop_sequence())."""
         if not self._connected:
             raise CameraError("Camera not connected")
         self._seq_running = True
@@ -185,16 +230,33 @@ class OrcaFlash4Camera(Camera):
     ADAPTER_MODULE = "HamamatsuHam"
     ADAPTER_DEVICE = "HamamatsuHam_DCAM"
 
-    #: Orca Flash 4.0 full-frame (2048x2048) rolling-shutter readout.
-    #: NOT yet verified on this unit against a scope -- it is the
-    #: datasheet figure. If measured trigger-to-frame timing disagrees,
-    #: measure this and correct it here rather than padding magic
-    #: numbers into the trigger period.
-    READOUT_MS = 9.7
+    #: Fallback only -- readout_ms() asks the camera. MEASURED 2026-09-03:
+    #: this unit reports 'ReadoutTime' = 33.3 ms at full frame in its
+    #: default scan mode (DCAM 'ScanMode' = 1), NOT the 9.7 ms datasheet
+    #: figure that used to live here. With a 100 ms exposure and a
+    #: 109.7 ms FPGA period the camera silently dropped every second
+    #: trigger (47 frames from 92 pulses) -- see docs/trigger_free_run_plan.md.
+    READOUT_MS = 33.3
+
+    def readout_ms(self) -> float:
+        """The camera's own 'ReadoutTime' (DCAM reports seconds). Depends
+        on scan mode / binning / ROI, so always re-read after changing
+        those. Falls back to READOUT_MS if the property is unavailable."""
+        if self._mmc is None:
+            return self.READOUT_MS
+        try:
+            return float(self._mmc.getProperty(self.DEVICE_LABEL, "ReadoutTime")) * 1000.0
+        except Exception:
+            return self.READOUT_MS
 
     def __init__(self):
         self._mmc = None
         self._connected = False
+        # Last REQUESTED settings, so repair_exposure_if_lost() can
+        # re-apply them after a device re-initialisation.
+        self._exposure_requested_ms: float | None = None
+        self._trigger_source_requested = "INTERNAL"
+        self._trigger_polarity_requested = "NEGATIVE"
 
     def connect(self) -> None:
         from pymmcore_plus import CMMCorePlus, find_micromanager
@@ -220,6 +282,15 @@ class OrcaFlash4Camera(Camera):
 
     def disconnect(self) -> None:
         if self._mmc is not None:
+            # Tearing the device down while its acquisition thread is still
+            # winding down produced an access violation in the next Qt
+            # event-loop pass (2026-09-03, docs/known_issues.md). Stop and
+            # wait first, then give the native side a moment.
+            try:
+                self.stop_sequence()
+            except Exception:
+                pass
+            time.sleep(0.2)
             try:
                 self._mmc.unloadAllDevices()
             except Exception:
@@ -244,12 +315,46 @@ class OrcaFlash4Camera(Camera):
     def set_exposure_ms(self, exposure_ms: float) -> None:
         if self._mmc is None:
             raise CameraError("Camera not connected")
+        self._exposure_requested_ms = float(exposure_ms)
         self._mmc.setExposure(exposure_ms)
 
     def get_exposure_ms(self) -> float:
         if self._mmc is None:
             raise CameraError("Camera not connected")
         return self._mmc.getExposure()
+
+    def repair_exposure_if_lost(self, tolerance: float = 0.01) -> bool:
+        """Work around a Micro-Manager Hamamatsu adapter quirk.
+
+        MEASURED 2026-09-03 (spikes/21-23): after stopSequenceAcquisition
+        the camera's real exposure sometimes drops to 0 and then 3.021 ms,
+        the adapter's 'Exposure' property keeps reporting the old value,
+        and every later setExposure()/setProperty('Exposure') is silently
+        ignored -- a nudge to another value, a snap, and trigger-mode
+        toggles all fail to bring it back. The ONLY thing that repairs it
+        is unloading and re-initialising the device (~0.5 s). If the
+        readback disagrees with the last requested exposure, do exactly
+        that, then re-apply exposure + trigger source + polarity.
+        Callers avoid needing this by never stopping the sequence between
+        acquisitions; it is the safety net for when one was stopped.
+        """
+        want = self._exposure_requested_ms
+        if self._mmc is None or want is None:
+            return False
+        got = self.get_exposure_ms()
+        if abs(got - want) <= tolerance * want:
+            return False
+        try:
+            if self._mmc.isSequenceRunning():
+                self._mmc.stopSequenceAcquisition()
+        except Exception:
+            pass
+        self.disconnect()
+        self.connect()
+        self._mmc.setExposure(want)
+        self._mmc.setProperty(self.DEVICE_LABEL, "TRIGGER SOURCE", self._trigger_source_requested)
+        self._mmc.setProperty(self.DEVICE_LABEL, "TriggerPolarity", self._trigger_polarity_requested)
+        return True
 
     def snap(self) -> np.ndarray:
         if self._mmc is None:
@@ -264,6 +369,7 @@ class OrcaFlash4Camera(Camera):
         see docs/fpga_io_map.md."""
         if self._mmc is None:
             raise CameraError("Camera not connected")
+        self._trigger_source_requested = source
         self._mmc.setProperty(self.DEVICE_LABEL, "TRIGGER SOURCE", source)
 
     def set_trigger_polarity(self, polarity: str) -> None:
@@ -274,6 +380,7 @@ class OrcaFlash4Camera(Camera):
         -- matches what UNMScope_Source's DCAM - Set Trigger.vi sets."""
         if self._mmc is None:
             raise CameraError("Camera not connected")
+        self._trigger_polarity_requested = polarity
         self._mmc.setProperty(self.DEVICE_LABEL, "TriggerPolarity", polarity)
 
     def get_property(self, name: str) -> str:
@@ -288,10 +395,18 @@ class OrcaFlash4Camera(Camera):
     # almost certainly from the native DCAM/MMCore layer being touched
     # from two threads at once. Use start_sequence()/poll/stop_sequence()
     # instead -- single-threaded, non-blocking, no crash risk.
-    def start_sequence(self, n_images: int = 1) -> None:
+    def start_sequence(self, n_images: int | None = None) -> None:
+        """n_images=None -> MMCore's continuous sequence (until
+        stop_sequence()). In EXTERNAL trigger mode frames only come when
+        the FPGA fires, so leaving this running between acquisitions is
+        free -- and it avoids the exposure-loss quirk described in
+        repair_exposure_if_lost()."""
         if self._mmc is None:
             raise CameraError("Camera not connected")
-        self._mmc.startSequenceAcquisition(n_images, 0, True)
+        if n_images is None:
+            self._mmc.startContinuousSequenceAcquisition(0)
+        else:
+            self._mmc.startSequenceAcquisition(n_images, 0, True)
 
     def remaining_image_count(self) -> int:
         if self._mmc is None:
@@ -326,8 +441,15 @@ class OrcaFlash4Camera(Camera):
             return (0, 0)
         return (self._mmc.getBufferFreeCapacity(), self._mmc.getBufferTotalCapacity())
 
-    def stop_sequence(self) -> None:
+    def stop_sequence(self, settle_timeout_s: float = 2.0) -> None:
+        """Stop the sequence and wait until the adapter agrees it stopped.
+        NOTE: on this adapter a stop can lose the exposure -- see
+        repair_exposure_if_lost(). The GUI therefore only stops at
+        Disconnect."""
         if self._mmc is None:
             return
         if self._mmc.isSequenceRunning():
             self._mmc.stopSequenceAcquisition()
+            deadline = time.monotonic() + settle_timeout_s
+            while self._mmc.isSequenceRunning() and time.monotonic() < deadline:
+                time.sleep(0.01)

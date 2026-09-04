@@ -167,3 +167,25 @@ highest-leverage first, FPGA last since it's the highest-risk integration):
 - OME-TIFF / data-format compatibility requirements for downstream
   analysis pipelines.
 - Final Python package name/structure (currently a placeholder skeleton).
+
+## Status update (2026-09-03) — FPGA-timed free run is in
+
+The trigger train is now timed by the FPGA, not by Python:
+`FpgaTriggerController.start_free_run()` arms once and the board's 40 MHz
+cycle counter fires every DIO4 edge (LabVIEW's own scheme). Verified on
+hardware and through the real GUI: bounded Z-stacks are exact (10/10,
+20/20), continuous runs deliver one frame per trigger (39/39, 92 in 10 s
+at 109.7 ms), zero ignored triggers, no AO faults. Full story and the
+three real causes of the earlier "native bursts are unreliable" verdict:
+`docs/trigger_free_run_plan.md` ("Hardware verification, 2026-09-03").
+
+Camera-side corrections that came out of it: the Orca's readout is 33.3 ms
+(queried from the camera now, not assumed), the period gets a 0.5 ms
+margin, the camera sequence stays armed between acquisitions because
+stopping it can silently lose the exposure (adapter quirk, worked around),
+and a Stop waits two periods for in-flight frames.
+
+Next candidates: SYNCREADOUT trigger mode (what LouisXIV uses, per
+`SPIMProject.ini`), real waveform content on the galvo/piezo channels
+(the `Wvfrm2` packing is 4×I16 per I64), the camera driver in a subprocess
+(two native AVs seen so far, one at connect, one at disconnect).

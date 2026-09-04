@@ -39,6 +39,7 @@ matching the discipline that avoided further native-layer crashes.
 from __future__ import annotations
 
 import datetime
+import time
 
 import numpy as np
 from PySide6.QtCore import Qt, QTimer, QObject, Signal, QRect
@@ -51,11 +52,15 @@ from PySide6.QtWidgets import (
     QSplitter, QRadioButton, QButtonGroup, QToolButton, QScrollArea, QFrame,
 )
 
-from unmscope.hardware.camera import Camera, OrcaFlash4Camera, SimulatedCamera
-from unmscope.hardware.fpga_trigger import FpgaTriggerController
+from unmscope.hardware.camera import Camera, OrcaFlash4Camera, SimulatedCamera, other_camera_holders
+from unmscope.hardware.fpga_trigger import FpgaTriggerController, TICKS_PER_S, free_run_timing
 
 MODE_CONTINUOUS = "Continuous Scan"
 MODE_ZSTACK = "Z stack"
+#: Added to exposure + camera readout for the FPGA trigger period. MEASURED
+#: 2026-09-03 on the Orca: at exactly exposure + ReadoutTime every second
+#: trigger was dropped; at +0.5 ms none were (spikes/19_free_run_trigger.py).
+TRIGGER_PERIOD_MARGIN_MS = 0.5
 
 # -- LouisXIV-style palette (sampled from the real front panel) ------------
 PANEL_BG = "#e8e8f8"       # light lavender window/tab background
@@ -165,8 +170,8 @@ class FpgaSignals(QObject):
     GUI thread. Signal.emit() is thread-safe in Qt -- calling it from a
     non-GUI thread safely queues delivery to the connected slot on the GUI
     thread, rather than touching widgets directly from the wrong thread."""
-    frame_fired = Signal(int)
-    rate_measured = Signal(float)
+    frame_fired = Signal(int)      # the FPGA's '# of triggers read' changed
+    status = Signal(object)        # a FreeRunStatus snapshot, ~20/s
     error = Signal(str)
 
 
@@ -183,10 +188,15 @@ class MainWindow(QMainWindow):
         self.fpga: FpgaTriggerController | None = None
         self.fpga_signals = FpgaSignals()
         self.fpga_signals.frame_fired.connect(self._on_fpga_frame_fired)
-        self.fpga_signals.rate_measured.connect(self._on_fpga_rate_measured)
+        self.fpga_signals.status.connect(self._on_fpga_status)
         self.fpga_signals.error.connect(self._on_fpga_error)
         self._trigger_period_s = 0.0
         self._triggers_fired = 0
+        self._arm_time = 0.0           # perf_counter() when the FPGA was armed
+        self._finishing = False        # Z-stack: all triggers fired, waiting for frames
+        self._stale_discarded = 0
+        self._last_status_log_t = 0.0
+        self._last_fpga_status = None
 
         self.camera_poll_timer = QTimer(self)
         self.camera_poll_timer.timeout.connect(self._poll_camera_for_frame)
@@ -1035,6 +1045,15 @@ class MainWindow(QMainWindow):
     def on_connect_clicked(self):
         backend = self.backend_combo.currentText()
         self.camera = OrcaFlash4Camera() if backend.startswith("Orca") else SimulatedCamera()
+        if backend.startswith("Orca"):
+            holders = other_camera_holders()
+            if holders:
+                # Not a hard gate: LouisXIV can be open without having
+                # connected. But if it DOES hold the camera, a second DCAM
+                # open can fault inside dcamapi.dll and kill this process
+                # outright -- see docs/known_issues.md.
+                self._log(f"WARNING: {', '.join(holders)} running. If it holds the camera, "
+                          "connecting here can crash the DCAM driver (docs/known_issues.md).")
         self._log(f"Connecting camera ({backend})...")
         try:
             self.camera.connect()
@@ -1145,6 +1164,21 @@ class MainWindow(QMainWindow):
         try:
             self.camera.set_trigger_source("EXTERNAL")
             self.camera.set_trigger_polarity("POSITIVE")
+            # Push the exposure every start, AFTER the trigger mode. Seen
+            # 2026-09-03: after a Z-stack (sequence + stop + back to
+            # INTERNAL) the Orca reported exposure 0.0 ms on the next
+            # EXTERNAL run and really did run at ~0 ms. The spin box is
+            # the source of truth, exactly like LabVIEW pushes settings at
+            # scan start.
+            self.camera.set_exposure_ms(self.exposure_spin.value())
+            if self.camera.repair_exposure_if_lost():
+                self._log("Camera had lost its exposure after the previous sequence stop "
+                          "(Micro-Manager Hamamatsu adapter quirk, docs/known_issues.md); "
+                          "re-initialised the camera in place and re-applied settings.")
+            got = self.camera.get_exposure_ms()
+            if abs(got - self.exposure_spin.value()) > 0.01 * self.exposure_spin.value():
+                self._log(f"WARNING: camera exposure reads {got:.3f} ms after setting "
+                          f"{self.exposure_spin.value():.3f} ms.")
         except Exception as e:
             self._log(f"Failed to set external trigger: {type(e).__name__}: {e}")
             QMessageBox.warning(self, "Error", f"Failed to set external trigger:\n{e}")
@@ -1157,12 +1191,21 @@ class MainWindow(QMainWindow):
         if mode == MODE_ZSTACK:
             n = int(self.slice_count_field.text()) if self.slice_count_field.text().isdigit() else 1
             self.z_target_frames = n
-            self._log(f"Z-stack: arming camera for {n} frames.")
-            self.camera.start_sequence(n)
+            self._log(f"Z-stack: arming camera; the FPGA will fire exactly {n} triggers.")
         else:
             self.z_target_frames = 0  # unbounded
-            self._log("Continuous: arming camera for a long sequence.")
-            self.camera.start_sequence(100000)
+            self._log("Continuous: arming camera.")
+        # The camera sequence is started ONCE and left running until
+        # Disconnect. Stopping it is what loses the exposure (see
+        # Camera.repair_exposure_if_lost), the FPGA gates every frame so an
+        # idle armed camera produces nothing, and the FPGA bounds a Z-stack
+        # by itself so the sequence never needs an exact count.
+        if not self.camera.is_sequence_running():
+            self.camera.start_sequence(None)
+            self._log("Camera sequence started (stays armed until Disconnect).")
+        stale = self.camera.discard_buffered_frames()
+        if stale:
+            self._log(f"Discarded {stale} leftover frame(s) from the camera buffer before arming.")
 
         self.acquiring = True
         self.acquire_btn.setText("Stop")
@@ -1179,35 +1222,66 @@ class MainWindow(QMainWindow):
 
         self.camera_poll_timer.start(30)
 
-        # Trigger period = exposure + sensor readout. The camera IGNORES a
-        # trigger that lands while it is still exposing/reading out, so
-        # this is the real floor -- it is NOT a tunable margin. (This used
-        # to be `exposure + 50ms` slept ON TOP of the fire call's own
-        # cost, which made a 100ms exposure run at ~6Hz instead of ~10Hz.)
-        period_s = self.camera.min_frame_period_ms() / 1000.0
+        # Trigger period = exposure + sensor readout + a small margin. The
+        # camera silently IGNORES a trigger that lands while it is still
+        # exposing/reading out. readout_ms() is the camera's own figure
+        # (33.3 ms on this Orca -- not the 9.7 ms datasheet value that used
+        # to be hard-coded, which made it drop every second trigger).
+        exposure_s = self.camera.get_exposure_ms() / 1000.0
+        period_s = (self.camera.min_frame_period_ms() + TRIGGER_PERIOD_MARGIN_MS) / 1000.0
         self._trigger_period_s = period_s
         self._triggers_fired = 0
+        self._finishing = False
+        self._stale_discarded = 0
+        self._last_status_log_t = 0.0
         self._log(f"Trigger period {period_s * 1000:.1f} ms "
                   f"({1.0 / period_s:.2f} Hz) = exposure "
                   f"{self.camera.get_exposure_ms():.1f} ms + readout "
-                  f"{self.camera.READOUT_MS:.1f} ms")
-        self.fpga.start_continuous(
-            period_s=period_s,
-            on_frame=lambda count: self.fpga_signals.frame_fired.emit(count),
-            on_rate=lambda hz: self.fpga_signals.rate_measured.emit(hz),
+                  f"{self.camera.readout_ms():.1f} ms + margin {TRIGGER_PERIOD_MARGIN_MS:.1f} ms")
+
+        # FPGA-timed free run: arm ONCE and let the FPGA's 40 MHz counter
+        # time every pulse (LabVIEW's own scheme; docs/trigger_free_run_plan.md).
+        # Bounded for a Z-stack (the FPGA stops itself after n), continuous
+        # otherwise. Callbacks arrive on the controller's monitor thread and
+        # are marshalled to the GUI thread through fpga_signals.
+        n_triggers = self.z_target_frames or None
+        self._arm_time = time.perf_counter()
+        armed = self.fpga.start_free_run(
+            period_s, exposure_s, n_triggers=n_triggers,
+            on_trigger_count=lambda count: self.fpga_signals.frame_fired.emit(count),
+            on_status=lambda st: self.fpga_signals.status.emit(st),
+            on_error=lambda msg: self.fpga_signals.error.emit(msg),
         )
+        if not armed:
+            self._log(f"FPGA free-run arm FAILED: {self.fpga.last_error}")
+            self._stop_acquisition()
+            QMessageBox.warning(self, "FPGA", f"Could not arm the FPGA:\n{self.fpga.last_error}")
+            return
+        cycle, up = free_run_timing(period_s, exposure_s)
+        self._log(f"FPGA armed once and free-running: Cycle(Ticks)={cycle} "
+                  f"({cycle / TICKS_PER_S * 1000:.3f} ms), Trigger up (ticks)={up}; "
+                  + (f"bounded to {n_triggers} triggers." if n_triggers else "continuous until Stop."))
 
     def _stop_acquisition(self):
         self._log("Stopping acquisition.")
-        self.camera_poll_timer.stop()
+        self._finishing = False
+        self._arm_time = 0.0
         if self.fpga is not None:
-            self.fpga.stop_continuous()
-        if self.camera is not None:
-            self.camera.stop_sequence()
-            try:
-                self.camera.set_trigger_source("INTERNAL")
-            except Exception:
-                pass
+            if self.fpga.free_run_active:
+                final = self.fpga.stop_free_run()
+                self._triggers_fired = final
+                self._log(f"FPGA disarmed (final accepted-trigger count {final}, "
+                          f"frames received {self.frame_count}).")
+            else:
+                self.fpga.stop()
+        # The camera sequence deliberately stays running (see
+        # _start_acquisition). Keep polling for a grace period so the
+        # frame(s) still exposing / in USB flight at Stop are counted
+        # rather than abandoned, then stop the timer.
+        if self.camera is not None and self._trigger_period_s > 0:
+            QTimer.singleShot(int(2 * self._trigger_period_s * 1000) + 200, self._end_stop_grace)
+        else:
+            self.camera_poll_timer.stop()
 
         self.acquiring = False
         self.acquire_btn.setText("Acquire")
@@ -1225,36 +1299,68 @@ class MainWindow(QMainWindow):
         self._clear_image_to_black()
         self._log("Acquisition stopped, back to IDLE.")
 
-    def _on_fpga_rate_measured(self, hz: float):
-        """Report the ACHIEVED trigger rate vs the requested one.
-
-        This is the number to compare against an oscilloscope. If they
-        disagree, the trigger period maths is wrong -- don't reconcile it
-        by padding magic numbers, fix the derivation.
-        """
+    def _on_fpga_status(self, st):
+        """~20/s snapshot of the FPGA's own counters while free-running,
+        logged once a second. The achieved rate is from the hardware
+        trigger counter, so it IS what an oscilloscope would show -- if it
+        disagrees with the requested rate, fix the derivation, don't pad."""
+        self._last_fpga_status = st
+        now = time.perf_counter()
+        if now - self._last_status_log_t < 1.0:
+            return
+        self._last_status_log_t = now
         want = 1.0 / self._trigger_period_s if self._trigger_period_s else 0.0
+        hz = st.achieved_hz
         note = ""
-        if want and abs(hz - want) / want > 0.10:
-            note = f"  <-- OFF by {(hz - want) / want * 100:+.0f}%"
-        dropped = self._triggers_fired - self.frame_count
-        self._log(f"Trigger rate: {hz:.2f} Hz achieved vs {want:.2f} Hz "
-                  f"requested{note}   (fired {self._triggers_fired}, "
-                  f"frames {self.frame_count}, missing {dropped})")
+        if want and hz and abs(hz - want) / want > 0.05:
+            note = f"  <-- OFF by {(hz - want) / want * 100:+.1f}%"
+        self._log(f"FPGA free-run: {st.triggers_read} triggers, {hz:.3f} Hz achieved vs "
+                  f"{want:.3f} Hz requested{note}; frames {self.frame_count}; "
+                  f"ignored {st.triggers_ignored}; AO pts {st.ao_generated}; "
+                  f"refill {st.refill_words_written} words")
 
     def _on_fpga_frame_fired(self, count: int):
         # Runs on the GUI thread (Qt marshals this safely across threads).
+        # `count` is the FPGA's own '# of triggers read'.
         self._triggers_fired = count
         self._log(f"FPGA fired trigger #{count}.")
         if self.z_target_frames:
             pct = min(100, int(round(100 * count / self.z_target_frames)))
             self.acq_progress.setValue(pct)
             self.overall_progress.setValue(pct)
-            if count >= self.z_target_frames:
-                self._log(f"Z-stack target of {self.z_target_frames} triggers reached.")
-                self._stop_acquisition()
+            if count >= self.z_target_frames and not self._finishing:
+                # The FPGA has stopped itself (bounded mode). The last
+                # frame is still exposing/reading out -- stopping the
+                # camera now would lose it, so wait for the frames.
+                self._finishing = True
+                self._log(f"Z-stack: all {self.z_target_frames} triggers fired; "
+                          "waiting for the last frame(s) to land.")
+                QTimer.singleShot(int(3 * self._trigger_period_s * 1000) + 500,
+                                  self._finish_if_still_waiting)
+
+    def _end_stop_grace(self):
+        if self.acquiring:
+            return  # a new acquisition started meanwhile and owns the timer
+        self.camera_poll_timer.stop()
+        self._log(f"Final: {self.frame_count} frames from {self._triggers_fired} triggers.")
+
+    def _finish_if_still_waiting(self):
+        if self.acquiring and self._finishing:
+            self._log(f"Z-stack: timed out waiting for frames "
+                      f"({self.frame_count} of {self.z_target_frames} received). Stopping.")
+            self._stop_acquisition()
+
+    def _is_stale_pre_trigger_frame(self) -> bool:
+        """True while it is physically too early for a triggered frame to
+        exist: less than half a trigger period since the FPGA was armed."""
+        return (self._arm_time > 0 and self._trigger_period_s > 0
+                and time.perf_counter() - self._arm_time < 0.5 * self._trigger_period_s)
 
     def _on_fpga_error(self, msg: str):
         self._log(f"FPGA error: {msg}")
+        if self.acquiring:
+            self._log("Stopping acquisition after FPGA error.")
+            self._stop_acquisition()
 
     # Cap on how many frames one timer tick will drain, so a big backlog
     # can't freeze the GUI thread for an unbounded stretch.
@@ -1279,14 +1385,23 @@ class MainWindow(QMainWindow):
         drained = 0
         try:
             while drained < self.MAX_DRAIN_PER_TICK and self.camera.remaining_image_count() > 0:
-                frame = self.camera.pop_image()
+                img = self.camera.pop_image()
+                if self._is_stale_pre_trigger_frame():
+                    # The Orca hands over one leftover frame right after a
+                    # sequence starts in EXTERNAL mode (measured: it lands
+                    # ~10 ms after arming, which no real exposure can).
+                    # Counting it put every frame count off by one.
+                    self._stale_discarded += 1
+                    self._log("Discarded a stale pre-trigger frame from the camera buffer.")
+                    continue
+                frame = img
                 drained += 1
                 self.frame_count += 1
         except Exception as e:
             self._log(f"Camera poll FAILED: {type(e).__name__}: {e}")
             return
 
-        if frame is not None:
+        if frame is not None and self.acquiring:   # during the stop grace period: count only
             pix = frame_to_qpixmap(frame, label_text=f"Frame #{self.frame_count}")
             scaled = pix.scaled(self.image_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
             self.image_label.setPixmap(scaled)
@@ -1304,9 +1419,14 @@ class MainWindow(QMainWindow):
             self._log(f"Frame #{self.frame_count} received at {now}"
                       + (f" (drained {drained} this tick)" if drained > 1 else ""))
 
-        # Surface the silent-stop conditions rather than just freezing.
         if not self.acquiring:
             return
+        if self._finishing and self.frame_count >= self.z_target_frames:
+            self._log(f"Z-stack complete: {self.frame_count} frames from "
+                      f"{self._triggers_fired} triggers.")
+            self._stop_acquisition()
+            return
+        # Surface the silent-stop conditions rather than just freezing.
         try:
             if self.camera.is_buffer_overflowed():
                 free, total = self.camera.buffer_capacity()

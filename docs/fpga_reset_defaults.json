@@ -1,0 +1,209 @@
+{
+  "recorded_at": "2026-09-03T18:11:12",
+  "bitfile": "H:\\UNM_Lightsheet\\UNMScope_Source\\bin\\data\\SPIMFPGAProject_SPIM_MAIN_VI.lvbitx",
+  "signature": "87448130D38110A595B587A752E3D560",
+  "note": "Values read immediately after session.reset()+run(), before ANY write. indicators_after_500ms is a second read to show what moves on its own.",
+  "controls": {
+    "# of steps": 0,
+    "# of triggers": 0,
+    "AI # of channels": 0,
+    "AI loop period (ticks)": 100,
+    "AO # of points per trigger": 0,
+    "AO # of points per trigger PB": 0,
+    "AO DMA Timeout (ticks per read)": 40,
+    "AO Limit Max (counts)": {
+      "X Galvo": 32767,
+      "Z Galvo": 32767,
+      "Z Piezo": 32767,
+      "Dither Galvo": 32767,
+      "Tiling": 32767,
+      "Filter": 32767,
+      "AOTF on?": true
+    },
+    "AO Limit Min (counts)": {
+      "X Galvo": -32767,
+      "Z Galvo": -32767,
+      "Z Piezo": -32767,
+      "Dither Galvo": -32767,
+      "Tiling": -32767,
+      "Filter": -32767,
+      "AOTF on?": false
+    },
+    "AO Mode": 2,
+    "AO Trigger delay (ticks)": 0,
+    "AO ticks between points": 0,
+    "AO ticks between points PB": 0,
+    "AOTF # of points per trigger": 0,
+    "AOTF # of points per trigger PB": 0,
+    "AOTF Delay (Ticks)": 0,
+    "AOTF Mode": 2,
+    "AOTF Sweep settings": {
+      "AOTF sweep phases": 0,
+      "AOTF sweep ticks/phase": 0,
+      "AOTF sweep ticks": 0,
+      "AOTF sweep \"on\" (Ticks)": 0,
+      "AOTF sweep \"off\" (Ticks)": 0,
+      "AOTF sweep freq (1/tick)": "0.9999999997671693563461303711",
+      "AOTF sweep periods/phase": "0.0002500000409781932830810546875"
+    },
+    "AOTF ch (V)": {
+      "AOTF ch 0": 0,
+      "AOTF ch 1": 0,
+      "AOTF ch 2": 0,
+      "AOTF ch 3": 0
+    },
+    "AOTF ch Mode": 2,
+    "AOTF level to set": false,
+    "AOTF pulse width (ticks)": 0,
+    "AOTF pulse width (ticks) PB": 0,
+    "AOTF sweep mode": 0,
+    "Added time (Ticks)": 0,
+    "Cam Trigger delay (ticks)": 0,
+    "Capillary V": 0,
+    "Continuous Mode": false,
+    "Cycle(Ticks)": 0,
+    "Filter position set": 0,
+    "Frame index to add time to": 0,
+    "Free run": false,
+    "Perfusion level?": false,
+    "Perfusion manual set?": false,
+    "Perfusion stack #s": {
+      "# on": 0,
+      "# off": 0
+    },
+    "Set F.P. (T)": false,
+    "Shutter Mode": 2,
+    "Shutter PBlast (Ticks)": {
+      "# on": 0,
+      "# off": 0
+    },
+    "Shutter Ticks \"on\" (Ticks)": 0,
+    "Shutter level to set": false,
+    "Static AO to set": {
+      "X Galvo": 0,
+      "Z Galvo": 0,
+      "Z Piezo": 0,
+      "Dither Galvo": 0,
+      "Tiling": 0,
+      "Filter": 0,
+      "AOTF on?": false
+    },
+    "Stop": false,
+    "Tab Control": 0,
+    "Trigger #s": {
+      "# on": 0,
+      "# off": 0
+    },
+    "Trigger Check Filter?": false,
+    "Trigger Enable?": false,
+    "Trigger Look for Arm?": false,
+    "Trigger blast #s": {
+      "# on": 0,
+      "# off": 0
+    },
+    "Trigger skips": 0,
+    "Trigger stack #s": {
+      "# on": 0,
+      "# off": 0
+    },
+    "Trigger up (ticks)": 0,
+    "X Galvo Real Time Mods (counts)": {
+      "Old Offset": 0,
+      "New Offset": 0,
+      "Range Ratio (New/Old)": "1.00000000"
+    },
+    "Z Galvo Real Time Mods (counts)": {
+      "Old Offset": 0,
+      "New Offset": 0,
+      "Range Ratio (New/Old)": "1.00000000"
+    }
+  },
+  "indicators": {
+    "# AO generated": 0,
+    "# of Pblast images": 0,
+    "# of triggers ignored": 0,
+    "# of triggers read": 0,
+    "AI Error": {
+      "I/O Error": false,
+      "Buffer Underflow": false,
+      "DMA Timeout": false
+    },
+    "AO # points left": 0,
+    "AO DMA": {
+      "X Galvo": 0,
+      "Z Galvo": 0,
+      "Z Piezo": 0,
+      "Dither Galvo": 0,
+      "Tiling": 0,
+      "Filter": 0,
+      "AOTF on?": false
+    },
+    "AO DMA Error": {
+      "I/O Error": false,
+      "Buffer Underflow": false,
+      "DMA Timeout": false
+    },
+    "AO DMA Read Time (Ticks)": 0,
+    "AO Purged": false,
+    "AO Purging": false,
+    "AO Waveform State": 0,
+    "AO wvfrm ready": false,
+    "AOTF ch # generated": 0,
+    "AOTF ch out (V)": {
+      "AOTF ch 0": 0,
+      "AOTF ch 1": 0,
+      "AOTF ch 2": 0,
+      "AOTF ch 3": 0
+    },
+    "Cap # generated": 0,
+    "DMA Get Exp error": false,
+    "Filter position desired": 0,
+    "Int Cycle Trigger": false,
+    "Int Cycle+Added Trigger": false,
+    "SW Version": 3
+  },
+  "indicators_after_500ms": {
+    "# AO generated": 0,
+    "# of Pblast images": 0,
+    "# of triggers ignored": 0,
+    "# of triggers read": 0,
+    "AI Error": {
+      "I/O Error": false,
+      "Buffer Underflow": false,
+      "DMA Timeout": false
+    },
+    "AO # points left": 0,
+    "AO DMA": {
+      "X Galvo": 0,
+      "Z Galvo": 0,
+      "Z Piezo": 0,
+      "Dither Galvo": 0,
+      "Tiling": 0,
+      "Filter": 0,
+      "AOTF on?": false
+    },
+    "AO DMA Error": {
+      "I/O Error": false,
+      "Buffer Underflow": false,
+      "DMA Timeout": false
+    },
+    "AO DMA Read Time (Ticks)": 0,
+    "AO Purged": false,
+    "AO Purging": false,
+    "AO Waveform State": 0,
+    "AO wvfrm ready": false,
+    "AOTF ch # generated": 0,
+    "AOTF ch out (V)": {
+      "AOTF ch 0": 0,
+      "AOTF ch 1": 0,
+      "AOTF ch 2": 0,
+      "AOTF ch 3": 0
+    },
+    "Cap # generated": 0,
+    "DMA Get Exp error": false,
+    "Filter position desired": 0,
+    "Int Cycle Trigger": false,
+    "Int Cycle+Added Trigger": false,
+    "SW Version": 3
+  }
+}

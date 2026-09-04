@@ -9,6 +9,11 @@ is **not yet hardware-verified**.
 
 Supersedes two claims in `fpga_io_map.md` — see "Corrections" at the end.
 
+> **Update, later on 2026-09-03: the free run is now HARDWARE-VERIFIED
+> and in production use by the GUI.** Jump to "Hardware verification,
+> 2026-09-03" at the end for what actually happened, including two arm
+> failures this plan did not predict and the camera-side findings.
+
 ---
 
 ## The short version
@@ -265,7 +270,7 @@ Both established from the VI diagrams; both currently wrong in that file:
 
 ---
 
-## Verification status — read this before trusting the above
+## Verification status as originally written (superseded by the section after it)
 
 - **MEASURED (software only):** all host-side timing numbers.
 - **READ FROM SOURCE, not hardware-verified:** every claim about FPGA
@@ -279,3 +284,84 @@ Both established from the VI diagrams; both currently wrong in that file:
   refutations of the free-run recommendation itself. One verifier
   independently *confirmed* the reset-on-enable mechanism.
 - **Nothing here has been tested on the microscope.**
+
+---
+
+## Hardware verification, 2026-09-03 (later session) — IT WORKS
+
+Everything below was measured on the microscope with `spikes/17`–`23` and
+the GUI itself (`spikes/20_gui_free_run_headless.py`). Production code is
+`FpgaTriggerController.start_free_run()` / `stop_free_run()`, and the GUI
+now uses it for both Continuous Scan and Z stack.
+
+### Prerequisite 1 — compile-time defaults (recorded)
+
+`spikes/17_read_reset_defaults.py` → `docs/fpga_reset_defaults.json`. All
+five suspects are benign: `Added time (Ticks)=0`, `Frame index to add
+time to=0`, `Trigger skips=0`, `Trigger Look for Arm?=False`, `Trigger
+Check Filter?=False`. Also learned: `AO DMA Timeout (ticks per read)=40`
+(LabVIEW writes 100), `AO Limit Max/Min=±32767`, `AO Mode=2` (Set AO),
+`AI loop period=100`, and every `... PB` register is 0. `Int Cycle
+Trigger` vs `Int Cycle+Added Trigger` never disagreed across ~10,000
+samples while armed: the added-time path is not live.
+
+### What actually broke the arm, in order of discovery
+
+| Symptom | Cause (bisected on hardware) | Fix |
+|---|---|---|
+| `AO wvfrm ready` never True | `Clear AO DMA` (AO Mode=3) before the FIFO: engine sits in `AO Purging=1` forever, refill thread or not (`spikes/19b_arm_variants.py`, V5/V8/V9) | don't send it; `reset()+run()` at connect is the recovery path |
+| `AO DMA Error = Buffer Underflow` at t=0, `AO # points left = 65535` | `Trigger blast #s={1,0}` flags every trigger as a blast trigger → the AO engine uses `AO # of points per trigger PB` / `AO ticks between points PB`, both 0 → first point is **Late** → reported as "Buffer Underflow" (`HHMI - AO Check if Error or done.vi`: Late? → Buffer Underflow) | mirror the normal AO timing into the PB registers (`write_pb_registers=True`); `blast={0,0}` without PB also works. The DMA timeout (40 vs 100) was a red herring — tested both |
+
+The 2026-08-29 "native bursts are unreliable" verdict is therefore fully
+explained: the Cycle==Trigger-up race plus the PB-register defaults, with
+the Late flag misread as a FIFO underflow. No hardware fault.
+
+### Results
+
+| Test | Result |
+|---|---|
+| continuous, 100 ms exposure, 109.7 ms period, 10 s, FPGA only | 92 triggers = expected; period bracket from the counter 108.7–109.9 ms; 0 ignored; AO points == triggers; no faults |
+| bounded `n_triggers=20` | exactly 20, FPGA self-stops (`Triggers Enabled.vi`), counter holds until disarm |
+| refill thread | keeps up at 1 and 100 AO points/trigger (≈900 words/s); host buffer full most of the time (timeouts are the normal state) |
+| GUI Z stack ×2, Continuous 5 s (real Orca + FPGA, headless, 3 runs) | 10/10 frames, 38–39 triggers → same number of frames, 10/10 frames; auto-return to IDLE |
+
+First-trigger latency after the enable write is between ~2.5 and ~19 ms
+(fencepost analysis of run boundaries) — the counter reset by the enable
+means the first edge is immediate but not instantaneous.
+
+### Camera-side findings (these cost more time than the FPGA)
+
+1. **Orca readout is 33.3 ms, not 9.7 ms.** The camera's own
+   `ReadoutTime` property (DCAM `ScanMode=1`, full frame) says 0.0333 s.
+   With the old 9.7 ms assumption every second trigger was dropped
+   (47 frames from 92 pulses; intervals ≈ 2 periods). `Camera.readout_ms()`
+   now queries the camera; period = exposure + readout + 0.5 ms margin.
+   At exactly exposure + readout (margin 0) the camera still alternated;
+   +0.5 ms was enough. `SPIMProject.ini` has `Sync Readout = TRUE` for this
+   camera: LouisXIV uses DCAM's SYNCREADOUT trigger mode, which allows a
+   tighter cycle than EDGE. Not ported yet — follow-up.
+2. **One stale frame after the sequence starts in EXTERNAL mode** when
+   the FPGA is connected (reset/run) while the camera is already armed —
+   lands ~10 ms after arm, impossible for a real exposure. GUI flushes the
+   buffer before arming and additionally discards anything arriving within
+   half a period of the arm.
+3. **Exposure lost after `stopSequenceAcquisition`** (intermittent): real
+   exposure → 0 → 3.021 ms, adapter property still says 100, every later
+   set is ignored; only a device re-initialisation repairs it (~0.5 s).
+   Changing exposure while the sequence RUNS works. So the GUI starts the
+   camera sequence once and leaves it running until Disconnect, and
+   `OrcaFlash4Camera.repair_exposure_if_lost()` is the safety net.
+4. A Stop now keeps polling for two periods so in-flight frames are
+   counted (39/39 above instead of 141/153 before).
+
+### Still open
+
+- SYNCREADOUT trigger mode (what LouisXIV uses) — would make the period
+  ≈ exposure instead of exposure + 33 ms.
+- An access violation in the Qt event loop right after Disconnect in one
+  headless run (continuous sequence stopped and device unloaded back to
+  back). `disconnect()` now stops + settles first; two further runs were
+  clean. See `known_issues.md`.
+- Real waveform content in the `Wvfrm2` words (still all zeros); the I64
+  packing is 4×I16 per word on the FPGA side (`Split I64 into 4xI16.vi`),
+  ~1 word per AO point in the deployed build by the consumption numbers.

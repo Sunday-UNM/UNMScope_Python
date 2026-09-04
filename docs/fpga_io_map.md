@@ -150,6 +150,17 @@ earlier, simpler `03_fpga_trigger_test.py` (bare `Trigger Enable?` toggle,
 no waveform engine) reliably produces NO pulse -- kept around as a
 documented negative example, not a working method.
 
+> **CORRECTION 2026-09-03 — the two sections below are now largely
+> superseded.** The FPGA-timed free run WORKS on hardware (see
+> `trigger_free_run_plan.md`, "Hardware verification, 2026-09-03"), and
+> the "Buffer Underflow" seen in every earlier burst attempt was never a
+> FIFO underflow: `HHMI - AO Check if Error or done.vi` raises that flag
+> from the AO loop's **Late?** bit. The engine was late on its very first
+> point because `Trigger blast #s = {1,0}` routes every trigger through the
+> `... PB` AO timing registers, whose compile-time defaults are 0. Buffer
+> size never mattered. `Clear AO DMA` (AO Mode=3) additionally leaves this
+> bitfile stuck in `AO Purging`. Production code: `start_free_run()`.
+
 ## Multi-trigger / continuous mode: the real architecture (found in source, 2026-08-29)
 
 We initially tried to brute-force multi-trigger bursts by trial and error

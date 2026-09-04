@@ -36,6 +36,14 @@ PALETTE = ["#ffffff", "#ff4040", "#40ff40", "#4080ff", "#ffff40", "#ff40ff", "#4
            "#c0c0c0", "#d080ff", "#80d0ff", "#a0ffa0", "#ffd0d0"]
 
 
+def tick_decimals(span: float) -> int:
+    """Decimal places that keep neighbouring axis labels distinct. A 0.3 V
+    span at "%.1f" printed 0.2, 0.2, 0.1, 0.1, 0.0, -0.0 -- useless."""
+    if not np.isfinite(span) or span <= 0:
+        return 2
+    return int(max(0, min(5, 2 - np.floor(np.log10(span)))))
+
+
 def envelope(y: np.ndarray, columns: int) -> tuple[np.ndarray, np.ndarray]:
     """Per-pixel-column min/max of a 1-D signal: (mins, maxs), each of
     length ``columns`` (or len(y) when y is shorter than that)."""
@@ -60,7 +68,7 @@ def envelope(y: np.ndarray, columns: int) -> tuple[np.ndarray, np.ndarray]:
 class ScopeTraceWidget(QWidget):
     """The graph: black, dotted teal grid, Volts vs Time (s)."""
 
-    LEFT, RIGHT, TOP, BOTTOM = 52, 12, 10, 34
+    LEFT, RIGHT, TOP, BOTTOM = 64, 12, 10, 34
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -122,15 +130,18 @@ class ScopeTraceWidget(QWidget):
         # axes text
         p.setPen(QColor(20, 20, 20))
         font = QFont(); font.setPointSize(8); p.setFont(font)
+        vdec = tick_decimals(y1 - y0)
+        tdec = tick_decimals(span_s)
         for j in range(0, 15, 2):
             frac = j / 14
             v = y1 - (y1 - y0) * frac
             y = plot.top() + plot.height() * frac
-            p.drawText(QRectF(0, y - 8, self.LEFT - 6, 16), Qt.AlignRight | Qt.AlignVCenter, f"{v:.1f}")
+            p.drawText(QRectF(0, y - 8, self.LEFT - 6, 16), Qt.AlignRight | Qt.AlignVCenter, f"{v:.{vdec}f}")
         for i in range(0, 11, 2):
             frac = i / 10
             x = plot.left() + plot.width() * frac
-            p.drawText(QRectF(x - 40, plot.bottom() + 2, 80, 14), Qt.AlignHCenter | Qt.AlignTop, f"{t_start + span_s * frac:.2f}")
+            p.drawText(QRectF(x - 40, plot.bottom() + 2, 80, 14), Qt.AlignHCenter | Qt.AlignTop,
+                       f"{t_start + span_s * frac:.{tdec}f}")
         p.drawText(QRectF(plot.left(), h - 16, plot.width(), 14), Qt.AlignHCenter, "Time (s)")
         p.save()
         p.translate(12, plot.center().y())

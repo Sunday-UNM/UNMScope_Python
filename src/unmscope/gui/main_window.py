@@ -179,6 +179,11 @@ class FpgaSignals(QObject):
 
 
 class MainWindow(QMainWindow):
+    #: The class used by "FPGA Connect". Tests swap in
+    #: unmscope.hardware.fake_fpga.FakeFpgaTriggerController to run the
+    #: whole acquisition flow with no hardware.
+    fpga_controller_factory = FpgaTriggerController
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("UNMScope -- LouisXIV (Python)")
@@ -1136,7 +1141,7 @@ class MainWindow(QMainWindow):
     # -- FPGA actions --------------------------------------------------------
     def on_fpga_connect_clicked(self):
         self._log("Connecting FPGA...")
-        ctrl = FpgaTriggerController()
+        ctrl = self.fpga_controller_factory()
         try:
             ctrl.connect()
         except Exception as e:

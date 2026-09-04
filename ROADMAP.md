@@ -332,3 +332,16 @@ Int-Sync pulse drops, so `Trigger up` now covers the block. Details:
 `docs/wvfrm2_packing.md`. Under the default simulate-on-FPGA clamp (0) the
 AO columns read 0 whatever the waveform says; the Waveforms tab has a
 "Scope test clamp" (mV) to see the shape with nothing connected.
+
+### Hardware-free regression tests (2026-09-04)
+
+`src/unmscope/hardware/fake_fpga.py` emulates the measured bitfile
+behaviour (reset-on-enable counter, bounded stop, count reset on disarm,
+AO engine consuming two words per point with the AO limits applied, the
+AI stream with Int Sync / DIO4 / AO columns while armed) behind the same
+nifpga-shaped session, so `FpgaTriggerController`, `FpgaScope` and the
+whole GUI flow run unchanged on it. `MainWindow.fpga_controller_factory`
+is the injection point. `tests/test_gui_flow_fake_fpga.py` runs Z stack /
+Continuous / Z stack in both trigger modes plus simulate-on-FPGA and an
+arm-failure path, offscreen, in seconds. The hardware spikes remain the
+truth; the fake is for not breaking what they proved.

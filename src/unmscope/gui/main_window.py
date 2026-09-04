@@ -57,10 +57,9 @@ from unmscope.hardware.fpga_trigger import FpgaTriggerController, TICKS_PER_S, f
 
 MODE_CONTINUOUS = "Continuous Scan"
 MODE_ZSTACK = "Z stack"
-#: Added to exposure + camera readout for the FPGA trigger period. MEASURED
-#: 2026-09-03 on the Orca: at exactly exposure + ReadoutTime every second
-#: trigger was dropped; at +0.5 ms none were (spikes/19_free_run_trigger.py).
-TRIGGER_PERIOD_MARGIN_MS = 0.5
+# Trigger-period margins live on the Camera classes
+# (Camera.EDGE_PERIOD_MARGIN_MS / SYNCREADOUT_PERIOD_MARGIN_MS), measured
+# on the Orca 2026-09-03 -- see Camera.trigger_period_ms().
 
 # -- LouisXIV-style palette (sampled from the real front panel) ------------
 PANEL_BG = "#e8e8f8"       # light lavender window/tab background
@@ -195,6 +194,15 @@ class MainWindow(QMainWindow):
         self._arm_time = 0.0           # perf_counter() when the FPGA was armed
         self._finishing = False        # Z-stack: all triggers fired, waiting for frames
         self._stale_discarded = 0
+        self._run_closing = 0          # extra closing triggers this run (1 in SYNCREADOUT)
+        self._warmup_remaining = 0     # leading frames to discard this run
+        self._warmup_discarded = 0
+        # SYNCREADOUT bookkeeping: True when the camera holds an exposure
+        # that the next trigger will read out as a garbage frame -- after
+        # any sync run (its last edge opened one) or an FPGA reset while
+        # the camera is connected (the reset puts an edge on DIO4). False
+        # only for a freshly connected camera. Measured, spikes/24.
+        self._sync_exposure_open = False
         self._last_status_log_t = 0.0
         self._last_fpga_status = None
 
@@ -660,6 +668,15 @@ class MainWindow(QMainWindow):
         self.exposure_spin.setValue(100.0)
         self.exposure_spin.valueChanged.connect(self.on_exposure_changed)
         form.addRow("Exposure:", self.exposure_spin)
+        # LouisXIV runs this Orca in DCAM SYNCREADOUT trigger mode
+        # (SPIMProject.ini [Cam1.Camera Settings] Sync Readout = TRUE): the
+        # FPGA trigger interval IS the exposure, so the frame time equals
+        # the exposure instead of exposure + 33 ms readout. Applied at
+        # Acquire (_start_acquisition); the first frame of every run is a
+        # warm-up frame of undefined exposure and is discarded.
+        self.sync_readout_chk = QCheckBox("Sync readout (frame time = exposure)")
+        self.sync_readout_chk.setChecked(True)
+        form.addRow("Trigger mode:", self.sync_readout_chk)
 
         lay.addWidget(settings_box)
         lay.addStretch(1)
@@ -1065,6 +1082,7 @@ class MainWindow(QMainWindow):
 
         self.frame_count = 0
         self.frame_counter_label.setText("0")
+        self._sync_exposure_open = False   # fresh device: nothing exposing
         info = self.camera.info
         self.status_label.setText(f"Connected: {info.name} (S/N {info.serial}), {info.width}x{info.height}")
         self.status_label.setStyleSheet("font-weight: bold; color: green;")
@@ -1087,6 +1105,7 @@ class MainWindow(QMainWindow):
             self.on_acquire_clicked()  # stop first
         if self.camera is not None:
             try:
+                self.camera.set_trigger_active(self.camera.TRIGGER_EDGE)
                 self.camera.set_trigger_source("INTERNAL")
             except Exception:
                 pass
@@ -1119,6 +1138,11 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "FPGA connection failed", str(e))
             return
         self.fpga = ctrl
+        if self.camera is not None and self.camera.is_sequence_running():
+            # connect() did reset()+run(): that puts an edge on DIO4. A
+            # camera that is armed (sequence running) in SYNCREADOUT now
+            # holds an open exposure; one that is not capturing ignores it.
+            self._sync_exposure_open = True
         self.fpga_status_label.setText("Connected, safe state")
         self.fpga_status_label.setStyleSheet("font-weight: bold; color: green;")
         self._log("FPGA connected and in safe state.")
@@ -1164,21 +1188,26 @@ class MainWindow(QMainWindow):
         try:
             self.camera.set_trigger_source("EXTERNAL")
             self.camera.set_trigger_polarity("POSITIVE")
-            # Push the exposure every start, AFTER the trigger mode. Seen
-            # 2026-09-03: after a Z-stack (sequence + stop + back to
-            # INTERNAL) the Orca reported exposure 0.0 ms on the next
-            # EXTERNAL run and really did run at ~0 ms. The spin box is
-            # the source of truth, exactly like LabVIEW pushes settings at
-            # scan start.
-            self.camera.set_exposure_ms(self.exposure_spin.value())
-            if self.camera.repair_exposure_if_lost():
-                self._log("Camera had lost its exposure after the previous sequence stop "
-                          "(Micro-Manager Hamamatsu adapter quirk, docs/known_issues.md); "
-                          "re-initialised the camera in place and re-applied settings.")
-            got = self.camera.get_exposure_ms()
-            if abs(got - self.exposure_spin.value()) > 0.01 * self.exposure_spin.value():
-                self._log(f"WARNING: camera exposure reads {got:.3f} ms after setting "
-                          f"{self.exposure_spin.value():.3f} ms.")
+            self.camera.set_trigger_active(
+                self.camera.TRIGGER_SYNCREADOUT if self.sync_readout_chk.isChecked()
+                else self.camera.TRIGGER_EDGE)
+            if self.camera.trigger_active == self.camera.TRIGGER_EDGE:
+                # Push the exposure every start, AFTER the trigger mode. Seen
+                # 2026-09-03: after a Z-stack (sequence + stop + back to
+                # INTERNAL) the Orca reported exposure 0.0 ms on the next
+                # EXTERNAL run and really did run at ~0 ms. The spin box is
+                # the source of truth, exactly like LabVIEW pushes settings
+                # at scan start. (SYNCREADOUT ignores the exposure setting:
+                # the trigger interval is the exposure.)
+                self.camera.set_exposure_ms(self.exposure_spin.value())
+                if self.camera.repair_exposure_if_lost():
+                    self._log("Camera had lost its exposure after the previous sequence stop "
+                              "(Micro-Manager Hamamatsu adapter quirk, docs/known_issues.md); "
+                              "re-initialised the camera in place and re-applied settings.")
+                got = self.camera.get_exposure_ms()
+                if abs(got - self.exposure_spin.value()) > 0.01 * self.exposure_spin.value():
+                    self._log(f"WARNING: camera exposure reads {got:.3f} ms after setting "
+                              f"{self.exposure_spin.value():.3f} ms.")
         except Exception as e:
             self._log(f"Failed to set external trigger: {type(e).__name__}: {e}")
             QMessageBox.warning(self, "Error", f"Failed to set external trigger:\n{e}")
@@ -1195,17 +1224,28 @@ class MainWindow(QMainWindow):
         else:
             self.z_target_frames = 0  # unbounded
             self._log("Continuous: arming camera.")
-        # The camera sequence is started ONCE and left running until
-        # Disconnect. Stopping it is what loses the exposure (see
-        # Camera.repair_exposure_if_lost), the FPGA gates every frame so an
-        # idle armed camera produces nothing, and the FPGA bounds a Z-stack
-        # by itself so the sequence never needs an exact count.
-        if not self.camera.is_sequence_running():
-            self.camera.start_sequence(None)
+        # The camera sequence is started once and left running until
+        # Disconnect: stopping it is what loses the exposure (see
+        # Camera.repair_exposure_if_lost) and, in SYNCREADOUT, does not even
+        # clear an open exposure. The FPGA gates every frame and bounds a
+        # Z-stack by itself, so the sequence never needs an exact count.
+        sync = self.camera.trigger_active == self.camera.TRIGGER_SYNCREADOUT
+        was_running = self.camera.is_sequence_running()
+        self._warmup_remaining = self.camera.prepare_sequence()
+        if not was_running:
             self._log("Camera sequence started (stays armed until Disconnect).")
+        if sync and self._sync_exposure_open:
+            # The first edge will read out the exposure left open by the
+            # previous run's last edge (or by an FPGA reset): undefined
+            # exposure, not a slice. Measured, spikes/24 E4/E3.
+            self._warmup_remaining += 1
+        self._warmup_discarded = 0
         stale = self.camera.discard_buffered_frames()
         if stale:
             self._log(f"Discarded {stale} leftover frame(s) from the camera buffer before arming.")
+        if self._warmup_remaining:
+            self._log(f"SYNCREADOUT: an exposure is already open; the first {self._warmup_remaining} "
+                      "frame(s) will be discarded as warm-up.")
 
         self.acquiring = True
         self.acquire_btn.setText("Stop")
@@ -1227,24 +1267,39 @@ class MainWindow(QMainWindow):
         # exposing/reading out. readout_ms() is the camera's own figure
         # (33.3 ms on this Orca -- not the 9.7 ms datasheet value that used
         # to be hard-coded, which made it drop every second trigger).
-        exposure_s = self.camera.get_exposure_ms() / 1000.0
-        period_s = (self.camera.min_frame_period_ms() + TRIGGER_PERIOD_MARGIN_MS) / 1000.0
+        exposure_ms = self.exposure_spin.value()
+        period_ms = self.camera.trigger_period_ms(exposure_ms)
+        period_s = period_ms / 1000.0
+        sync = self.camera.trigger_active == self.camera.TRIGGER_SYNCREADOUT
+        # free_run_timing() only needs exposure <= period; in SYNCREADOUT the
+        # interval itself is the exposure.
+        exposure_s = min(exposure_ms, period_ms) / 1000.0
         self._trigger_period_s = period_s
         self._triggers_fired = 0
         self._finishing = False
         self._stale_discarded = 0
+        self._run_closing = self.camera.closing_triggers()
         self._last_status_log_t = 0.0
-        self._log(f"Trigger period {period_s * 1000:.1f} ms "
-                  f"({1.0 / period_s:.2f} Hz) = exposure "
-                  f"{self.camera.get_exposure_ms():.1f} ms + readout "
-                  f"{self.camera.readout_ms():.1f} ms + margin {TRIGGER_PERIOD_MARGIN_MS:.1f} ms")
+        if sync:
+            self._log(f"SYNCREADOUT: trigger period {period_ms:.2f} ms ({1000.0 / period_ms:.2f} Hz) "
+                      f"= actual exposure (requested {exposure_ms:.2f} ms; camera floor "
+                      f"{self.camera.readout_ms():.1f} ms readout + "
+                      f"{self.camera.syncreadout_margin_ms():.2f} ms)"
+                      + ("  <-- requested exposure is below the floor and was lengthened"
+                         if period_ms > exposure_ms + 1e-6 else ""))
+        else:
+            self._log(f"EDGE: trigger period {period_ms:.2f} ms ({1000.0 / period_ms:.2f} Hz) = exposure "
+                      f"{exposure_ms:.2f} ms + readout {self.camera.readout_ms():.1f} ms + margin "
+                      f"{self.camera.edge_margin_ms():.2f} ms")
 
         # FPGA-timed free run: arm ONCE and let the FPGA's 40 MHz counter
         # time every pulse (LabVIEW's own scheme; docs/trigger_free_run_plan.md).
         # Bounded for a Z-stack (the FPGA stops itself after n), continuous
         # otherwise. Callbacks arrive on the controller's monitor thread and
         # are marshalled to the GUI thread through fpga_signals.
-        n_triggers = self.z_target_frames or None
+        # Bounded: the FPGA fires exactly frames + closing triggers
+        # (SYNCREADOUT needs one more edge to read out the last frame).
+        n_triggers = (self.z_target_frames + self._run_closing) if self.z_target_frames else None
         self._arm_time = time.perf_counter()
         armed = self.fpga.start_free_run(
             period_s, exposure_s, n_triggers=n_triggers,
@@ -1270,6 +1325,10 @@ class MainWindow(QMainWindow):
             if self.fpga.free_run_active:
                 final = self.fpga.stop_free_run()
                 self._triggers_fired = final
+                if self._run_closing and final > 0:
+                    # SYNCREADOUT: the last edge started an exposure nobody
+                    # will read out until the next run's first edge.
+                    self._sync_exposure_open = True
                 self._log(f"FPGA disarmed (final accepted-trigger count {final}, "
                           f"frames received {self.frame_count}).")
             else:
@@ -1325,16 +1384,18 @@ class MainWindow(QMainWindow):
         self._triggers_fired = count
         self._log(f"FPGA fired trigger #{count}.")
         if self.z_target_frames:
-            pct = min(100, int(round(100 * count / self.z_target_frames)))
+            total = self.z_target_frames + self._run_closing
+            pct = min(100, int(round(100 * count / total)))
             self.acq_progress.setValue(pct)
             self.overall_progress.setValue(pct)
-            if count >= self.z_target_frames and not self._finishing:
+            if count >= total and not self._finishing:
                 # The FPGA has stopped itself (bounded mode). The last
                 # frame is still exposing/reading out -- stopping the
                 # camera now would lose it, so wait for the frames.
                 self._finishing = True
-                self._log(f"Z-stack: all {self.z_target_frames} triggers fired; "
-                          "waiting for the last frame(s) to land.")
+                self._log(f"Z-stack: all {total} triggers fired"
+                          + (f" ({self._run_closing} closing)" if self._run_closing else "")
+                          + "; waiting for the last frame(s) to land.")
                 QTimer.singleShot(int(3 * self._trigger_period_s * 1000) + 500,
                                   self._finish_if_still_waiting)
 
@@ -1342,7 +1403,9 @@ class MainWindow(QMainWindow):
         if self.acquiring:
             return  # a new acquisition started meanwhile and owns the timer
         self.camera_poll_timer.stop()
-        self._log(f"Final: {self.frame_count} frames from {self._triggers_fired} triggers.")
+        self._log(f"Final: {self.frame_count} frames from {self._triggers_fired} triggers"
+                  + (f" ({self._warmup_discarded} warm-up frame discarded)" if self._warmup_discarded else "")
+                  + ".")
 
     def _finish_if_still_waiting(self):
         if self.acquiring and self._finishing:
@@ -1393,6 +1456,13 @@ class MainWindow(QMainWindow):
                     # Counting it put every frame count off by one.
                     self._stale_discarded += 1
                     self._log("Discarded a stale pre-trigger frame from the camera buffer.")
+                    continue
+                if self._warmup_remaining > 0:
+                    # Leading frame the camera backend told us to drop
+                    # (Camera.prepare_sequence) -- undefined exposure.
+                    self._warmup_remaining -= 1
+                    self._warmup_discarded += 1
+                    self._log("Discarded a leading warm-up frame (undefined exposure).")
                     continue
                 frame = img
                 drained += 1

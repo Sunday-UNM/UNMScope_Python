@@ -365,3 +365,60 @@ means the first edge is immediate but not instantaneous.
 - Real waveform content in the `Wvfrm2` words (still all zeros); the I64
   packing is 4×I16 per word on the FPGA side (`Split I64 into 4xI16.vi`),
   ~1 word per AO point in the deployed build by the consumption numbers.
+
+---
+
+## SYNCREADOUT trigger mode (2026-09-03, later) — what LouisXIV actually uses
+
+`SPIMProject.ini` has `Sync Readout = TRUE` for Cam1, and
+`DCAM - Set Trigger.vi`'s "External (Sync)" case sets polarity POSITIVE,
+legacy trigger mode EDGE, then `TRIGGER ACTIVE = SYNCREADOUT` (value 3).
+In this mode every trigger edge ENDS the running exposure, starts its
+readout and immediately starts the next exposure: the trigger interval is
+the exposure, the exposure setting is ignored, and the frame time equals
+the period instead of exposure + 33 ms. Ported as `Camera.set_trigger_active()`
++ the GUI's "Sync readout" checkbox (default on, like the ini).
+
+### Period floor — the manual's formulas, confirmed by measurement
+
+| Mode | Manual / LabVIEW VI | Measured on the Orca (ReadoutTime 33.3 ms, 1H = 32.5 µs) |
+|---|---|---|
+| EDGE | exposure + Vn/2·1H + 10·1H (`Orca4.0 - Calculate EdgeTrigger Exposure Time.vi`) | +0 ms dropped every 2nd trigger, +0.5 ms none (formula +0.33) |
+| SYNCREADOUT | max(exposure, Vn/2·1H + 18·1H) (`Orca4.0 - Calculate SyncReadout Exposure Time.vi`) | readout+0.5 ms dropped 7/20, +0.7 ms none (formula +0.59) |
+
+`Camera.trigger_period_ms()` implements exactly these with 1H derived from
+ReadoutTime/(height/2) plus a 0.2 ms safety term, so binning/ROI changes
+scale automatically. At 100 ms exposure the frame time is now 100.0 ms
+(10 Hz) instead of 133.8 ms; the fastest frame time is 34.1 ms (29 fps).
+
+### Frame accounting — measured with `spikes/24_syncreadout_first_frame.py`
+
+- From a freshly CONNECTED camera, T triggers give **T−1 frames**, no
+  garbage, however long the sequence sat armed (5 → 4 at 0.05/0.3/1.0 s).
+  The first edge only starts an exposure; frame n comes out on edge n+1.
+  So a bounded stack of N frames fires N+1 triggers (`closing_triggers()`).
+- If an exposure is already OPEN when the first edge lands, that edge
+  reads it out as a frame of undefined exposure. That happens after any
+  sync run (its last edge opened one) and after an FPGA `reset()` while
+  the camera is armed — **the reset puts an edge on DIO4** (E3: 5 → 5).
+- Stopping and restarting the MMCore sequence does NOT clear the open
+  exposure, and once left the camera free-running at ~30 fps with no
+  triggers. DCAM also refuses to change `TRIGGER ACTIVE` while capturing.
+  So the GUI never restarts in normal operation; it tracks
+  `_sync_exposure_open` (False at camera connect, True after a sync run or
+  an FPGA connect while the camera is armed) and discards exactly one
+  leading frame when set. `OrcaFlash4Camera.start_sequence()` re-asserts
+  the trigger settings right before capture as insurance.
+
+### Results (real Orca + FPGA)
+
+| Test | Result |
+|---|---|
+| `spikes/19 --sync-readout --count 20 --exposure 0.1` | 20 triggers → 19 frames, exact |
+| `spikes/19 --sync-readout --count 20 --exposure 0.01` (floor) | period 34.09 ms, 20 → 19, exact |
+| `spikes/19 --sync-readout --seconds 5 --exposure 0.05` | 101 triggers → 100 frames |
+| GUI headless, sync: Z stack, Continuous 5 s, Z stack | 10/11, 50/51 (1 warm-up discarded), 10/11 (1 warm-up discarded) |
+| GUI headless, `--edge` (regression) | 10/10, 39/39, 10/10 |
+
+Not measured: the real exposure of a sync-readout frame (period minus
+roughly 18 line times, per the manual) — needs a light source.

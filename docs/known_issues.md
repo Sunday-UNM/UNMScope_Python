@@ -121,3 +121,27 @@ If the FPGA is connected (reset/run) while the Orca is already armed, one
 frame lands ~10 ms after the FPGA is armed — no real exposure can do that.
 The GUI flushes the buffer before arming and discards anything arriving
 within half a trigger period of the arm.
+
+## FPGA `session.reset()` + `run()` puts an edge on DIO4
+
+Measured 2026-09-03 (`spikes/24`, E3): a camera armed in SYNCREADOUT
+before `FpgaTriggerController.connect()` afterwards holds an open
+exposure; in EDGE mode the same edge showed up as the "stale frame" ~10 ms
+after arming (2026-09-03, earlier). Connect the FPGA BEFORE arming the
+camera (the GUI's normal order); if the FPGA is (re)connected while the
+camera sequence runs, the GUI marks the exposure as open and discards one
+leading frame in sync mode.
+
+## `TRIGGER ACTIVE` cannot be changed while the camera sequence runs
+
+DCAM raises `Cannot set property "TRIGGER ACTIVE"` while capturing.
+`OrcaFlash4Camera.set_trigger_active()` stops the sequence first when the
+mode really changes; the GUI's `prepare_sequence()` restarts it.
+
+## Restarting the sequence in SYNCREADOUT can leave the camera free-running
+
+Seen once (headless GUI run, third acquisition after two stop/start
+cycles): frames arrived at ~30 fps with no triggers. A stop/start also
+does NOT clear an open exposure. The GUI therefore never restarts the
+sequence between acquisitions, and `start_sequence()` re-asserts
+TRIGGER SOURCE / polarity / TRIGGER ACTIVE right before capture starts.

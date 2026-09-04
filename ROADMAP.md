@@ -189,3 +189,92 @@ Next candidates: SYNCREADOUT trigger mode (what LouisXIV uses, per
 `SPIMProject.ini`), real waveform content on the galvo/piezo channels
 (the `Wvfrm2` packing is 4×I16 per I64), the camera driver in a subprocess
 (two native AVs seen so far, one at connect, one at disconnect).
+
+## Status update (2026-09-03, later) — SYNCREADOUT trigger mode is in
+
+The camera now runs in DCAM SYNCREADOUT trigger mode by default (the mode
+LouisXIV uses per `SPIMProject.ini`): the FPGA trigger interval is the
+exposure, so a 100 ms exposure gives 10 fps instead of 7.5, and the floor
+is 34.1 ms (29 fps). Period formulas are the Orca manual's line-time ones
+(matched by measurement), bounded stacks fire N+1 triggers, and the one
+garbage frame the camera hands back when an exposure was left open is
+tracked and discarded deterministically. EDGE mode stays available via
+the "Sync readout" checkbox. Details: `docs/trigger_free_run_plan.md`,
+"SYNCREADOUT trigger mode".
+
+---
+
+## NEXT PHASE (planned 2026-09-03): FPGA-only — "Simulate on FPGA" mode + FPGA Scope
+
+**Hard constraint (user):** the ONLY hardware in the loop is the NI
+PCIe-7852R FPGA. No camera, no galvos/piezos, no other devices. Every AO
+output stays clamped; nothing may move.
+
+### A. FPGA Scope — an internal digital oscilloscope
+
+LouisXIV's `HHMI - AI buffer.vi` reads the FPGA's `AI data` DMA FIFO
+(I16, FPGA→host), which carries the real analog inputs AI0–7 packed
+together with internal digital signals — DIO4 `D4 Cam Ext Trig Out`
+itself, `Int Cycle Trigger`, AOTF states. The user has seen it show a
+clean, synchronised trigger + galvo trace. Reading and decoding that
+stream in Python gives a software oscilloscope with the FPGA's own sample
+clock, and replaces the physical scope for all timing verification.
+
+**Reference signal for decoding:** the free-run trigger — the one signal
+we can generate deterministically with the FPGA alone. Known period
+(`Cycle(Ticks)`), known width (4000 ticks = 100 µs), known count.
+
+Steps:
+1. Read the FPGA AI VIs (`HHMI - FPGA AI Loop`, `HHMI - Send AI data to
+   DMA`) and the host side (`HHMI - AI buffer`, `Setup AI DMA buffer`,
+   `HHMI - FPGA AI buffer settings functional global`) for the packing
+   HYPOTHESIS — the deployed bitfile differs from the source, so the
+   hypothesis is tested, never trusted. Known lead: `Active Channels`
+   read live from LabVIEW = (8, 14, 15, 16, 17, 9, 10, 11).
+2. Spike: write `AI # of channels`, `AI loop period (ticks)`, `Free run`
+   (the AI flag), start the `AI data` FIFO, run the free-run trigger at
+   10 Hz with all AO at zero, capture a few seconds, and do a bit-plane /
+   interleave-slot analysis: the slot+bit that toggles once per
+   `Cycle(Ticks)` with a 100 µs high time is DIO4; the once-per-cycle bit
+   is `Int Cycle Trigger`; slots with noise around zero are AI0–7.
+   Also check `AI Error` (I/O, Buffer Underflow, DMA Timeout) and the
+   sustainable sample rate (default `AI loop period` = 100 ticks =
+   400 kS/s × channels — probably too much for the host; find the rate).
+3. Verify: the decoded DIO4 edge spacing must equal `Cycle(Ticks)+1`
+   ticks to within one AI sample period — the software-scope version of
+   the oscilloscope check, and the jitter measurement the user asked for
+   originally.
+4. `src/unmscope/hardware/fpga_scope.py`: `FpgaScope` — start/stop the
+   AI stream on the existing `nifpga` session, decode into named channels
+   (pinout names from `docs/fpga_io_map.md`), ring buffer, thread-safe
+   snapshot for a GUI. Unit tests on synthetic packed buffers.
+5. GUI: the Waveforms tab (still a placeholder) gets the live traces,
+   modelled on LouisXIV's X Waveform / Full Waveform plots.
+
+### B. "Simulate on FPGA" mode
+
+The GUI's Simulated camera + the REAL FPGA: the FPGA free-runs the
+trigger train; the simulated camera emits one synthetic frame per FPGA
+trigger (fed from the controller's `# of triggers read` callback, with
+the EDGE / SYNCREADOUT accounting), so the whole acquisition flow runs on
+real hardware timing without a camera. AO outputs are clamped by writing
+`AO Limit Max/Min (counts)` to 0 for every channel at arm (the FPGA
+range-checks every DMA point against them — `Range Check A0 Values.vi`)
+on top of the all-zero waveform, so nothing can move even when waveform
+content is added later. The FPGA Scope is the observer.
+
+Steps:
+1. `SimulatedCamera.external_trigger(n)` / trigger-source EXTERNAL:
+   frames only when triggered; GUI feeds `on_trigger_count` into it.
+2. The existing "Simulation" checkbox (switches the backend) + FPGA
+   connected = simulate-on-FPGA mode; log it clearly in the status bar.
+3. AO clamp policy in `FpgaTriggerController.start_free_run()`
+   (`clamp_ao=True`), written every arm, verified by reading back.
+4. Headless test on the FPGA only: Z stack + Continuous with the
+   simulated camera; counts exact; FPGA Scope shows the trigger train.
+
+### C. After that
+
+Real waveform content (X galvo sweep, Z step) generated into `Wvfrm2`
+words (4×I16 per I64), first observed on the FPGA Scope with AO clamped,
+before any galvo is ever connected.

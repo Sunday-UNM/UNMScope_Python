@@ -32,9 +32,17 @@ def pump(app, seconds, until=None):
 
 
 def main() -> int:
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--edge", action="store_true", help="uncheck 'Sync readout' (EDGE trigger mode)")
+    args = ap.parse_args()
+
     app = QApplication([])
     w = mw.MainWindow()
     w._log = lambda msg: print("   LOG:", msg, flush=True)
+    w.sync_readout_chk.setChecked(not args.edge)
+    warmup = 0 if args.edge else 1          # SYNCREADOUT discards one warm-up frame
+    print(f"trigger mode: {'EDGE' if args.edge else 'SYNCREADOUT'}  (expect {10 + warmup} triggers per 10-slice stack)")
 
     w.backend_combo.setCurrentText("Orca Flash 4.0 (real)")
     w.on_connect_clicked()
@@ -60,8 +68,9 @@ def main() -> int:
     done = pump(app, 20.0, until=lambda: not w.acquiring)
     pump(app, 0.3)
     print(f"Z-STACK RESULT: finished_on_its_own={done} frames={w.frame_count} "
-          f"triggers={w._triggers_fired} stale_discarded={w._stale_discarded}", flush=True)
-    zs_ok = done and w.frame_count == 10 and w._triggers_fired == 10
+          f"triggers={w._triggers_fired} stale_discarded={w._stale_discarded} "
+          f"warmup_discarded={w._warmup_discarded}", flush=True)
+    zs_ok = done and w.frame_count == 10 and w._triggers_fired == 10 + warmup
     if w.acquiring:
         w.on_acquire_clicked()
         pump(app, 0.5)
@@ -79,8 +88,10 @@ def main() -> int:
     print(f"CONTINUOUS RESULT: frames={w.frame_count} final_triggers={trig} "
           f"stale_discarded={w._stale_discarded} acquiring={w.acquiring}", flush=True)
     # With the stop grace period the in-flight frames are collected; the
-    # very last trigger's frame may still be lost at disarm -> allow 1.
-    cont_ok = (not w.acquiring) and trig >= 30 and 0 <= trig - w.frame_count <= 1
+    # very last trigger's frame may still be lost at disarm -> allow 1. In
+    # SYNCREADOUT the warm-up frame is discarded and the final exposure is
+    # never read out -> one more.
+    cont_ok = (not w.acquiring) and trig >= 30 and 0 <= trig - w.frame_count <= 1 + warmup
 
     # ---------------- Z stack again: repeatability with the sequence kept running ----------------
     print("\n=== Z STACK #2 (10 slices) ===", flush=True)
@@ -91,8 +102,9 @@ def main() -> int:
     done2 = pump(app, 20.0, until=lambda: not w.acquiring)
     pump(app, 1.0)
     print(f"Z-STACK #2 RESULT: finished_on_its_own={done2} frames={w.frame_count} "
-          f"triggers={w._triggers_fired} stale_discarded={w._stale_discarded}", flush=True)
-    zs_ok = zs_ok and done2 and w.frame_count == 10 and w._triggers_fired == 10
+          f"triggers={w._triggers_fired} stale_discarded={w._stale_discarded} "
+          f"warmup_discarded={w._warmup_discarded}", flush=True)
+    zs_ok = zs_ok and done2 and w.frame_count == 10 and w._triggers_fired == 10 + warmup
 
     w.on_disconnect_clicked()
     w.on_fpga_disconnect_clicked()

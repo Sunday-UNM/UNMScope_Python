@@ -62,7 +62,18 @@ def main() -> int:
     ap.add_argument("--no-pb", action="store_true", help="do NOT mirror the AO timing into the '... PB' registers")
     ap.add_argument("--blast", type=str, default="1,0", help="'Trigger blast #s' as '# on,# off' (default 1,0)")
     ap.add_argument("--dma-timeout", type=int, default=100, help="'AO DMA Timeout (ticks per read)' (LabVIEW 100; bitfile default 40)")
+    ap.add_argument("--sync-readout", action="store_true",
+                    help="camera TRIGGER ACTIVE = SYNCREADOUT (LabVIEW's mode for this Orca): the trigger "
+                         "interval IS the exposure; default period = max(exposure, readout + margin). "
+                         "MEASURED floor ~33.9 ms (33.8 dropped 7/20, 34.0 dropped none) -> use --margin 1")
     args = ap.parse_args()
+
+    # FPGA FIRST: connect() does reset()+run(), which puts an edge on DIO4.
+    # Done before the camera is armed so that edge cannot start a stray
+    # exposure (SYNCREADOUT) or frame (EDGE) -- measured, spikes/24 E3.
+    print("Connecting FPGA (reset+run, safe state)...")
+    ctrl = FpgaTriggerController()
+    ctrl.connect()
 
     cam = None
     # Fallback when no camera is attached (camera.py's constant); with
@@ -79,24 +90,33 @@ def main() -> int:
         cam.set_exposure_ms(args.exposure * 1e3)
         cam.set_trigger_source("EXTERNAL")
         cam.set_trigger_polarity("POSITIVE")
+        cam.set_trigger_active(cam.TRIGGER_SYNCREADOUT if args.sync_readout else cam.TRIGGER_EDGE)
         readout_ms = cam.readout_ms()
         print(f"  {cam.info}  exposure {cam.get_exposure_ms():.3f} ms  "
-              f"TRIGGER SOURCE={cam.get_property('TRIGGER SOURCE')} TriggerPolarity={cam.get_property('TriggerPolarity')}")
-        print(f"  camera ReadoutTime {readout_ms:.2f} ms -> min EDGE-trigger period {cam.min_frame_period_ms():.2f} ms")
-        cam.start_sequence(100000)
+              f"TRIGGER SOURCE={cam.get_property('TRIGGER SOURCE')} TriggerPolarity={cam.get_property('TriggerPolarity')} "
+              f"TRIGGER ACTIVE={cam.get_property('TRIGGER ACTIVE')}")
+        print(f"  camera ReadoutTime {readout_ms:.2f} ms -> min period in this mode {cam.min_frame_period_ms():.2f} ms; "
+              f"Camera.trigger_period_ms({args.exposure*1e3:.1f}) = {cam.trigger_period_ms(args.exposure*1e3):.2f} ms; "
+              f"closing triggers {cam.closing_triggers()}")
+        cam.start_sequence(None)
 
-    period = args.period if args.period is not None else args.exposure + (readout_ms + args.margin) / 1000.0
-    cycle, up = free_run_timing(period, args.exposure)
+    if args.period is not None:
+        period = args.period
+    elif cam is not None:
+        # The production formula (Orca manual line-time margins + safety).
+        period = cam.trigger_period_ms(args.exposure * 1e3) / 1e3
+    elif args.sync_readout:
+        period = max(args.exposure, (readout_ms + args.margin) / 1000.0)
+    else:
+        period = args.exposure + (readout_ms + args.margin) / 1000.0
+    cycle, up = free_run_timing(period, min(args.exposure, period))
     expected_hz = 1.0 / period
     print(f"period {period*1e3:.3f} ms ({expected_hz:.3f} Hz)  exposure {args.exposure*1e3:.1f} ms  "
-          f"(readout {readout_ms:.2f} ms + margin {args.margin:.2f} ms)")
+          f"(readout {readout_ms:.2f} ms + margin {args.margin:.2f} ms)"
+          + ("   [SYNCREADOUT: exposure is set by the trigger interval]" if args.sync_readout else ""))
     print(f"Cycle(Ticks) = {cycle}  ({cycle/TICKS_PER_S*1e3:.3f} ms)   Trigger up (ticks) = {up}  ({up/TICKS_PER_S*1e3:.3f} ms)")
     print(f"mode: {'BOUNDED, ' + str(args.count) + ' triggers' if args.count else 'CONTINUOUS, ' + str(args.seconds) + ' s'}"
           f"   camera: {'ON' if args.camera else 'off'}   AO points/trigger {args.ao_points} @ {args.ao_ticks} ticks\n")
-
-    print("Connecting FPGA (reset+run, safe state)...")
-    ctrl = FpgaTriggerController()
-    ctrl.connect()
 
     lock = threading.Lock()
     count_samples: list[tuple[float, int]] = []   # (t since arm, triggers read) at each change
@@ -141,10 +161,9 @@ def main() -> int:
     t_stop = None
     try:
         if cam is not None:
-            # The Orca hands over one stale frame right after the sequence
-            # starts in EXTERNAL mode (seen arriving ~10 ms after arm --
-            # impossible for a 100 ms exposure). Flush it BEFORE arming so
-            # frames == triggers is a real check.
+            # Flush anything already buffered so frames vs triggers is a
+            # real check (the FPGA was connected BEFORE the camera was
+            # armed, so nothing should be here).
             time.sleep(max(0.5, 2 * period))
             drain()
             pre = len(frame_times)
@@ -205,8 +224,14 @@ def main() -> int:
             time.sleep(max(0.3, 2 * period))   # let the last exposure+readout finish and land
             drain()
             overflow = cam.is_buffer_overflowed()
+            try:
+                print(f"Camera exposure readback after the run: {cam.get_exposure_ms():.3f} ms "
+                      f"(prop Exposure={cam.get_property('Exposure')})")
+            except Exception:
+                pass
             cam.stop_sequence()
             try:
+                cam.set_trigger_active(cam.TRIGGER_EDGE)
                 cam.set_trigger_source("INTERNAL")
             except Exception:
                 pass
@@ -264,7 +289,15 @@ def main() -> int:
         nf = len(frame_times)
         print(f"\n  CAMERA: {nf} frames received vs {final} FPGA triggers -> "
               + ("MATCH" if nf == final else f"DIFF {nf - final:+d}"))
-        frames_ok = nf >= final          # extras are investigated below; DROPS fail
+        if args.sync_readout:
+            # Fresh (restarted) sequence: edge k reads out the exposure that
+            # edge k-1 started, so T triggers -> T-1 frames and the last
+            # exposure is never read out. T frames would mean an exposure
+            # was already open at trigger 1 (a garbage first frame).
+            frames_ok = nf >= final - 1
+            print(f"  (SYNCREADOUT: expected {final - 1} = triggers - 1; {final} would mean a garbage first frame)")
+        else:
+            frames_ok = nf >= final      # extras are investigated below; DROPS fail
         rel = [(t - ctrl._free_run_t0) * 1e3 for t in frame_times]
         if rel:
             head = ", ".join(f"{x:.1f}" for x in rel[:3])

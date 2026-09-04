@@ -75,10 +75,88 @@ class Camera(abc.ABC):
         class constant."""
         return self.READOUT_MS
 
+    # -- External-trigger "active" mode ------------------------------------
+    # EDGE: each rising edge starts one exposure of the SET exposure time;
+    #       the camera is busy for exposure + readout, so a trigger that
+    #       lands sooner is silently ignored.
+    # SYNCREADOUT (what LouisXIV uses for this Orca -- SPIMProject.ini
+    #       'Sync Readout = TRUE'): each edge ENDS the running exposure,
+    #       starts its readout and immediately starts the next exposure. The
+    #       trigger interval IS the exposure; the exposure setting is ignored;
+    #       frame time = period; and the FIRST trigger reads out whatever had
+    #       been exposing since the sequence started -- a warm-up frame of
+    #       undefined exposure that must be discarded.
+    TRIGGER_EDGE = "EDGE"
+    TRIGGER_SYNCREADOUT = "SYNCREADOUT"
+    #: Orca Flash 4.0 manual (external trigger, standard scan): EDGE needs
+    #: exposure + Vn/2*1H + 10*1H between triggers; SYNCREADOUT needs
+    #: Vn/2*1H + 18*1H. LabVIEW's 'Orca4.0 - Calculate EdgeTrigger /
+    #: SyncReadout Exposure Time.vi' use exactly these. Vn/2*1H is what the
+    #: camera reports as ReadoutTime, so 1H = readout / (height/2).
+    #: MEASURED 2026-09-03 (spikes/19): EDGE at +0 ms dropped every second
+    #: trigger, +0.5 ms none (formula: +0.33); SYNCREADOUT at readout+0.5 ms
+    #: dropped 7/20, +0.7 ms none (formula: +0.59). SAFETY_MARGIN_MS sits on
+    #: top of the formula so both land above the values measured to work.
+    EDGE_EXTRA_LINES = 10
+    SYNCREADOUT_EXTRA_LINES = 18
+    SAFETY_MARGIN_MS = 0.2
+
+    def line_time_ms(self) -> float:
+        """One sensor line time (1H). ReadoutTime covers height/2 lines
+        (two readout ports, centre-out)."""
+        info = self.info
+        h = info.height if info is not None else 2048
+        return self.readout_ms() / max(1, h // 2)
+
+    def edge_margin_ms(self) -> float:
+        return self.EDGE_EXTRA_LINES * self.line_time_ms() + self.SAFETY_MARGIN_MS
+
+    def syncreadout_margin_ms(self) -> float:
+        return self.SYNCREADOUT_EXTRA_LINES * self.line_time_ms() + self.SAFETY_MARGIN_MS
+
+    def set_trigger_active(self, mode: str) -> None:
+        """'EDGE' or 'SYNCREADOUT' (only meaningful with an EXTERNAL source)."""
+        if mode not in (self.TRIGGER_EDGE, self.TRIGGER_SYNCREADOUT):
+            raise ValueError(f"unknown trigger active mode {mode!r}")
+        self._trigger_active = mode
+
+    @property
+    def trigger_active(self) -> str:
+        return getattr(self, "_trigger_active", self.TRIGGER_EDGE)
+
     def min_frame_period_ms(self) -> float:
-        """Shortest usable trigger-to-trigger period at the current
-        exposure. Triggers fired faster than this get dropped."""
+        """Shortest usable trigger-to-trigger period for the CURRENT mode
+        and set exposure, without margin. EDGE: exposure + readout.
+        SYNCREADOUT: readout (the interval sets the exposure)."""
+        if self.trigger_active == self.TRIGGER_SYNCREADOUT:
+            return self.readout_ms()
         return self.get_exposure_ms() + self.readout_ms()
+
+    def trigger_period_ms(self, exposure_ms: float) -> float:
+        """The FPGA trigger period to use for a desired exposure, in the
+        current mode, margin included. In SYNCREADOUT a requested exposure
+        below the floor is silently lengthened to the floor -- the actual
+        exposure is whatever this returns."""
+        if self.trigger_active == self.TRIGGER_SYNCREADOUT:
+            return max(exposure_ms, self.readout_ms() + self.syncreadout_margin_ms())
+        return exposure_ms + self.readout_ms() + self.edge_margin_ms()
+
+    def closing_triggers(self) -> int:
+        """Extra triggers a bounded acquisition of n frames needs on top
+        of n. SYNCREADOUT: 1 -- each edge reads out the exposure the
+        PREVIOUS edge started, so frame n only comes out on edge n+1
+        (MEASURED, spikes/24: 5 triggers -> 4 frames from a fresh
+        sequence). EDGE: 0."""
+        return 1 if self.trigger_active == self.TRIGGER_SYNCREADOUT else 0
+
+    def prepare_sequence(self) -> int:
+        """Put the camera sequence into the state acquisition assumes and
+        return how many LEADING frames the caller must discard. The base
+        version just makes sure a sequence is running (0 to discard);
+        backends override where the hardware needs more."""
+        if not self.is_sequence_running():
+            self.start_sequence(None)
+        return 0
 
     def discard_buffered_frames(self) -> int:
         """Pop and drop everything currently buffered. Returns the count.
@@ -257,6 +335,7 @@ class OrcaFlash4Camera(Camera):
         self._exposure_requested_ms: float | None = None
         self._trigger_source_requested = "INTERNAL"
         self._trigger_polarity_requested = "NEGATIVE"
+        self._trigger_active = self.TRIGGER_EDGE
 
     def connect(self) -> None:
         from pymmcore_plus import CMMCorePlus, find_micromanager
@@ -341,6 +420,10 @@ class OrcaFlash4Camera(Camera):
         want = self._exposure_requested_ms
         if self._mmc is None or want is None:
             return False
+        if self._trigger_active == self.TRIGGER_SYNCREADOUT:
+            # The interval sets the exposure; the setting is ignored and
+            # may legitimately read back stale. Nothing to repair.
+            return False
         got = self.get_exposure_ms()
         if abs(got - want) <= tolerance * want:
             return False
@@ -354,6 +437,7 @@ class OrcaFlash4Camera(Camera):
         self._mmc.setExposure(want)
         self._mmc.setProperty(self.DEVICE_LABEL, "TRIGGER SOURCE", self._trigger_source_requested)
         self._mmc.setProperty(self.DEVICE_LABEL, "TriggerPolarity", self._trigger_polarity_requested)
+        self._mmc.setProperty(self.DEVICE_LABEL, "TRIGGER ACTIVE", self._trigger_active)
         return True
 
     def snap(self) -> np.ndarray:
@@ -383,6 +467,35 @@ class OrcaFlash4Camera(Camera):
         self._trigger_polarity_requested = polarity
         self._mmc.setProperty(self.DEVICE_LABEL, "TriggerPolarity", polarity)
 
+    def set_trigger_active(self, mode: str) -> None:
+        """DCAM 'TRIGGER ACTIVE': 'EDGE' or 'SYNCREADOUT' (adapter also
+        offers 'LEVEL', not used). Matches LabVIEW's DCAM - Set Trigger.vi
+        "External (Sync)" case: polarity POSITIVE, then TRIGGER ACTIVE =
+        SYNCREADOUT (DCAMPROP_TRIGGERACTIVE__SYNCREADOUT = 3)."""
+        if self._mmc is None:
+            raise CameraError("Camera not connected")
+        current = self._mmc.getProperty(self.DEVICE_LABEL, "TRIGGER ACTIVE")
+        if current != mode and self._mmc.isSequenceRunning():
+            # DCAM refuses to change TRIGGER ACTIVE while capturing
+            # ("Cannot set property", spikes/24 E5). The caller's
+            # prepare_sequence() restarts the sequence afterwards.
+            self.stop_sequence()
+        super().set_trigger_active(mode)
+        if current != mode:
+            self._mmc.setProperty(self.DEVICE_LABEL, "TRIGGER ACTIVE", mode)
+
+    # NOTE on SYNCREADOUT and "warm-up" frames (MEASURED, spikes/24 + GUI):
+    # each edge reads out the exposure the previous edge started. From a
+    # freshly CONNECTED camera the first trigger only starts an exposure
+    # (T triggers -> T-1 frames, no garbage). But an exposure left open by
+    # a previous run's last trigger -- or by the DIO4 edge an FPGA reset()
+    # produces while the camera is armed -- is handed back by the first
+    # trigger as a frame of undefined exposure. Stopping and restarting the
+    # sequence does NOT clear it (and once left the camera free-running),
+    # so the caller tracks "an exposure is open" itself and discards one
+    # leading frame when it is. prepare_sequence() therefore only makes
+    # sure the sequence runs (base-class behaviour).
+
     def get_property(self, name: str) -> str:
         if self._mmc is None:
             raise CameraError("Camera not connected")
@@ -403,6 +516,12 @@ class OrcaFlash4Camera(Camera):
         repair_exposure_if_lost()."""
         if self._mmc is None:
             raise CameraError("Camera not connected")
+        # Re-assert the requested trigger settings right before capture
+        # starts: after a stop/start the adapter has been seen to leave the
+        # camera free-running (2026-09-03, SYNCREADOUT, GUI run 3).
+        self._mmc.setProperty(self.DEVICE_LABEL, "TRIGGER SOURCE", self._trigger_source_requested)
+        self._mmc.setProperty(self.DEVICE_LABEL, "TriggerPolarity", self._trigger_polarity_requested)
+        self._mmc.setProperty(self.DEVICE_LABEL, "TRIGGER ACTIVE", self._trigger_active)
         if n_images is None:
             self._mmc.startContinuousSequenceAcquisition(0)
         else:

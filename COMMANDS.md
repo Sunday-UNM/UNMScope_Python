@@ -160,3 +160,19 @@ Bisects an arm failure (`AO wvfrm ready` never True) one change at a time.
 python -u spikes/18_probe_dcam_isolated.py
 ```
 Camera open + snap, step by step, in its own process (crash isolation).
+
+```bash
+python -u spikes/19_free_run_trigger.py --camera --sync-readout --count 20 --exposure 0.1
+```
+Same check in SYNCREADOUT mode (LouisXIV's mode): expects triggers − 1 frames.
+
+```bash
+python -u spikes/20_gui_free_run_headless.py --edge
+```
+The headless GUI run with the "Sync readout" box unchecked (EDGE mode).
+
+```bash
+python -u spikes/24_syncreadout_first_frame.py
+```
+When does the first sync-readout trigger hand back a frame? (fresh camera
+vs kept sequence vs FPGA reset while armed).

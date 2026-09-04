@@ -1,5 +1,31 @@
 # FPGA I/O map (PCIe-7852R breakout box)
 
+> ## ⚠ CORRECTIONS — read `trigger_free_run_plan.md` first (2026-09-03)
+>
+> Three things in this file are now known to be wrong or incomplete.
+> `docs/trigger_free_run_plan.md` supersedes this file on all of them:
+>
+> 1. **`Free run` has nothing to do with trigger repetition.** It drives
+>    the global `AI Free run` — an *analog input* flag.
+> 2. **`Trigger up (ticks)` is NOT a holdoff/deadtime.** It is the
+>    Int-Sync pulse HIGH time. `HHMI - Generate trigger settings for
+>    FPGA.vi` sets it to `(cycle - exposure)/2`. (The "THE BUG" section
+>    below is still correct that setting it equal to `Cycle(Ticks)` breaks
+>    things — but for a different reason: it makes `Sync out` low for one
+>    25 ns tick per cycle, too narrow for the edge detector.)
+> 3. **The deployed bitfile is a DIFFERENT BUILD from the checked-out FPGA
+>    source.** Different signature, different register set. The deployed
+>    one (`bin\data\`) exposes `Added time (Ticks)`, `Frame index to add
+>    time to`, `Int Cycle+Added Trigger`, `Trigger skips` and `Trigger Look
+>    for Arm?`, none of which appear anywhere in the source tree. **Every
+>    diagram in `VI_Diagrams\` therefore describes a build we do not run.**
+>    Treat FPGA-source conclusions — including this file's — as strong
+>    hypotheses, not ground truth.
+>
+> Also superseded: the 2026-08-29 "native bursts are unreliable" verdict
+> below was premature. See `trigger_free_run_plan.md` for why every symptom
+> is explainable without a hardware fault.
+
 Extracted directly from `UNMScope_Source\FPGA code\Reto FPGA Project.lvproj`'s
 FPGA-target I/O binding table (not inferred from names) — see that file's
 `Item Name="SPIM FPGA 0"` target property block if you need to re-derive
@@ -49,8 +75,8 @@ being relied on for real acquisition.
 | `Set F.P. (T)` | Boolean, control | apply the values above (note the space before "(T)") |
 | `# of triggers` | U32, control | trigger count for a run |
 | `Continuous Mode` | Boolean, control | |
-| `Free run` | Boolean, control | |
-| `Trigger up (ticks)` | U32, control | trigger pulse width, in FPGA clock ticks |
+| `Free run` | Boolean, control | **analog-input flag** (drives global `AI Free run`) — NOT trigger repetition |
+| `Trigger up (ticks)` | U32, control | Int-Sync pulse **HIGH time**; LabVIEW sets `(cycle - exposure)/2` |
 | `Cam Trigger delay (ticks)` | U32, control | delay before camera trigger fires |
 | `Trigger Enable?` | Boolean, control | arms triggering — write last |
 | `Stop` | Boolean, control | |
@@ -191,8 +217,12 @@ Trigger.vi`, `HHMI - Trigger count.vi`, `HHMI - Camera Trigger Module.vi`.
   `Cycle(Ticks)` directly) -- this is the real repeat-rate control, one
   trigger event per `Cycle(Ticks)` period. Our original instinct that
   `Cycle(Ticks)` sets the repeat rate was actually correct.
-- **`Trigger up (ticks)` is a holdoff/deadtime**, not a pulse width and not
-  the cycle period -- `Trigger Manager.vi`'s own top-of-diagram comment:
+- ~~**`Trigger up (ticks)` is a holdoff/deadtime**~~ **CORRECTED 2026-09-03:
+  it is the Int-Sync pulse HIGH time.** From `HHMI - Internal Trigger
+  Sync.vi`: `Sync out = cond AND (cnt < Trigger up (ticks))`. LabVIEW sets
+  it to `(cycle - exposure)/2` in `HHMI - Generate trigger settings for
+  FPGA.vi`. The `Trigger Manager.vi` comment quoted below describes the
+  edge detector's own behaviour, not this register's meaning:
   *"Once triggered, don't look for next trigger until Trigger up (ticks)
   have elapsed."*
 - **THE BUG**: every one of our earlier attempts set `Cycle(Ticks)` and

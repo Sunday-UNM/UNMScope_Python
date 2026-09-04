@@ -50,6 +50,7 @@ from PySide6.QtWidgets import (
     QTextEdit, QMessageBox, QSizePolicy, QCheckBox, QTabWidget, QSlider,
     QLineEdit, QTableWidget, QTableWidgetItem, QHeaderView, QProgressBar,
     QSplitter, QRadioButton, QButtonGroup, QToolButton, QScrollArea, QFrame,
+    QApplication,
 )
 
 from unmscope.hardware.camera import Camera, OrcaFlash4Camera, SimulatedCamera, other_camera_holders
@@ -219,6 +220,15 @@ class MainWindow(QMainWindow):
         self._sync_exposure_open = False
         self._last_status_log_t = 0.0
         self._last_fpga_status = None
+        # Name of the blocking driver call that owns this thread, or None.
+        # See _begin_blocking() for what it is guarding against.
+        self._blocking_op: str | None = None
+        # True while _stop_acquisition() is unwinding a run. Separate from
+        # _blocking_op because a stop also runs from inside a blocking call.
+        self._stopping = False
+        # Set when a close arrives while a blocking call owns the thread;
+        # _end_blocking re-issues it once the call has unwound.
+        self._close_when_idle = False
 
         self.camera_poll_timer = QTimer(self)
         self.camera_poll_timer.timeout.connect(self._poll_camera_for_frame)
@@ -1046,8 +1056,11 @@ class MainWindow(QMainWindow):
             w.setVisible(z_stack)
 
     def _on_simulation_toggled(self, checked: bool):
-        if self.camera is not None:
-            return  # don't yank the backend out from under a live connection
+        if self._blocking_op is not None or self.camera is not None:
+            # Not just a live connection: self.camera is None for the whole
+            # of a blocking open now, so the flag is what stops a pumped
+            # toggle from swapping the backend underneath one.
+            return
         self.backend_combo.setCurrentText("Simulated" if checked else "Orca Flash 4.0 (real)")
 
     def _clear_image_to_black(self):
@@ -1070,10 +1083,117 @@ class MainWindow(QMainWindow):
         n = max(1, int(round(abs(end - start) / interval)) + 1)
         self.slice_count_field.setText(str(n))
 
+    # -- Blocking driver calls: the re-entrancy guard -----------------------
+    #
+    # Connect and Disconnect call into drivers that block this thread for
+    # seconds (a cold Orca spends ~10 s inside DCAM's initializeDevice).
+    # Windows drivers pump the native message queue while they block, so Qt
+    # goes on delivering clicks that land in that window -- including a
+    # second click on a button that still looks live. That is what killed
+    # the 2026-09-04 05:47 run: the second click re-entered
+    # on_connect_clicked() from inside the first, opened a second DCAM
+    # session, rebound self.camera, and the access violation fired when
+    # control unwound back into the half-initialised first open. See
+    # docs/known_issues.md.
+    #
+    # The flag, not the disabled button, is the fix. Disabling a QPushButton
+    # stops that button's own click; the flag makes re-entry a no-op from
+    # every other path too (the other three buttons, a queued event, a
+    # window close, a script calling the handler directly).
+    def _begin_blocking(self, name: str) -> bool:
+        """Claim the GUI thread for a blocking driver call.
+
+        False means one is already running, and the caller must return at
+        once without touching any hardware.
+        """
+        if self._blocking_op is not None:
+            self._log(f"{name} ignored: {self._blocking_op} is still in progress "
+                      "-- wait for it to finish.")
+            return False
+        self._blocking_op = name
+        try:
+            self._grey_out_for_blocking_call()
+        except Exception:
+            # A wedged flag would make every button a silent no-op AND, via
+            # closeEvent, make the window unclosable with the hardware live.
+            self._blocking_op = None
+            raise
+        return True
+
+    def _grey_out_for_blocking_call(self):
+        for w in (self.connect_btn, self.disconnect_btn, self.backend_combo,
+                  self.fpga_connect_btn, self.fpga_disconnect_btn, self.acquire_btn):
+            w.setEnabled(False)
+        self.scope_panel.set_interactive(False)
+        # The driver is about to block the event loop, so paint the greyed
+        # buttons and the wait cursor now -- otherwise the user stares at a
+        # live-looking button for ten seconds, which is why they click twice.
+        # repaint() paints synchronously without dispatching input events;
+        # processEvents() here would re-deliver the very click we are guarding.
+        for w in (self.connect_btn, self.disconnect_btn,
+                  self.fpga_connect_btn, self.fpga_disconnect_btn):
+            w.repaint()
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+
+    def _end_blocking(self):
+        # Flag first: if anything below raises, the GUI must not be left
+        # wedged in a state where every button is a silent no-op.
+        self._blocking_op = None
+        QApplication.restoreOverrideCursor()
+        self._update_connection_buttons()
+        if self._close_when_idle:
+            # The user pressed X (or EXIT) during the call and closeEvent had
+            # to refuse it. Honour it now, once this call has unwound.
+            self._close_when_idle = False
+            QTimer.singleShot(0, self.close)
+
+    def _update_connection_buttons(self):
+        """Put every connection control back in step with the real state.
+
+        Called on the way out of every blocking call, so a failed connect
+        re-enables its button without each error path remembering to.
+        """
+        if self._blocking_op is not None:
+            # A call is still in flight -- an inner _stop_acquisition() must
+            # not flicker the controls back to life mid-flight. _end_blocking
+            # clears the flag first, then calls this, so nothing is lost.
+            return
+        self.scope_panel.set_interactive(True)
+        if self.acquiring:
+            # _start_acquisition greys all four for a reason: disconnecting
+            # the camera or the FPGA out from under a run would leave the
+            # galvos driven and the AOTF open. Only Stop stays live.
+            for b in (self.connect_btn, self.disconnect_btn,
+                      self.fpga_connect_btn, self.fpga_disconnect_btn):
+                b.setEnabled(False)
+            self.backend_combo.setEnabled(False)
+            self.acquire_btn.setEnabled(True)
+            return
+        cam = self.camera is not None
+        self.connect_btn.setEnabled(not cam)
+        self.disconnect_btn.setEnabled(cam)
+        self.backend_combo.setEnabled(not cam)
+        fpga = self.fpga is not None
+        self.fpga_connect_btn.setEnabled(not fpga)
+        self.fpga_disconnect_btn.setEnabled(fpga)
+        self._update_acquire_enabled()
+
     # -- Camera actions ----------------------------------------------------
     def on_connect_clicked(self):
+        if not self._begin_blocking("Camera connect"):
+            return
+        try:
+            self._connect_camera()
+        finally:
+            self._end_blocking()
+
+    def _connect_camera(self):
         backend = self.backend_combo.currentText()
-        self.camera = OrcaFlash4Camera() if backend.startswith("Orca") else SimulatedCamera()
+        # Built locally and published to self.camera only once it is open:
+        # anything that runs while connect() blocks (a poll timer, a
+        # re-entered handler) then finds either no camera or a working one,
+        # never a half-initialised one.
+        camera = OrcaFlash4Camera() if backend.startswith("Orca") else SimulatedCamera()
         if backend.startswith("Orca"):
             holders = other_camera_holders()
             if holders:
@@ -1085,12 +1205,16 @@ class MainWindow(QMainWindow):
                           "connecting here can crash the DCAM driver (docs/known_issues.md).")
         self._log(f"Connecting camera ({backend})...")
         try:
-            self.camera.connect()
+            camera.connect()
         except Exception as e:
             self._log(f"Camera connect FAILED: {type(e).__name__}: {e}")
+            try:
+                camera.disconnect()      # drop a half-opened handle before a retry
+            except Exception:
+                pass
             QMessageBox.warning(self, "Connection failed", str(e))
-            self.camera = None
             return
+        self.camera = camera
 
         self.frame_count = 0
         self.frame_counter_label.setText("0")
@@ -1103,35 +1227,46 @@ class MainWindow(QMainWindow):
         try:
             self.exposure_spin.blockSignals(True)
             self.exposure_spin.setValue(self.camera.get_exposure_ms())
-            self.exposure_spin.blockSignals(False)
         except Exception:
             pass
-
-        self.connect_btn.setEnabled(False)
-        self.disconnect_btn.setEnabled(True)
-        self.backend_combo.setEnabled(False)
-        self._update_acquire_enabled()
+        finally:
+            self.exposure_spin.blockSignals(False)
 
     def on_disconnect_clicked(self):
+        if not self._begin_blocking("Camera disconnect"):
+            return
+        try:
+            self._disconnect_camera()
+        finally:
+            self._end_blocking()
+
+    def _disconnect_camera(self):
         if self.acquiring:
-            self.on_acquire_clicked()  # stop first
-        if self.camera is not None:
+            self._stop_acquisition()
+        # Un-published and the poll timer stopped BEFORE the blocking close,
+        # the mirror of publishing only after a successful open. _stop_acquisition
+        # deliberately leaves camera_poll_timer running for a grace window to
+        # count in-flight frames, and camera.disconnect() pumps the native
+        # queue -- so without this the 30 ms tick fires into a half-closed
+        # device that still reports is_connected. That is the most likely
+        # mechanism for the one-off "access violation right after Disconnect"
+        # already recorded in docs/known_issues.md.
+        self.camera_poll_timer.stop()
+        camera, self.camera = self.camera, None
+        if camera is not None:
             try:
-                self.camera.set_trigger_active(self.camera.TRIGGER_EDGE)
-                self.camera.set_trigger_source("INTERNAL")
+                camera.set_trigger_active(camera.TRIGGER_EDGE)
+                camera.set_trigger_source("INTERNAL")
             except Exception:
                 pass
-            self.camera.disconnect()
+            camera.disconnect()
             self._log("Camera disconnected.")
-        self.camera = None
         self.status_label.setText("Not connected")
         self.status_label.setStyleSheet("font-weight: bold;")
-        self.connect_btn.setEnabled(True)
-        self.disconnect_btn.setEnabled(False)
-        self.backend_combo.setEnabled(True)
-        self._update_acquire_enabled()
 
     def on_exposure_changed(self, value: float):
+        if self._blocking_op is not None:
+            return  # a pumped spin-box event during a blocking driver call
         if self.camera is None or not self.camera.is_connected:
             return
         try:
@@ -1141,6 +1276,14 @@ class MainWindow(QMainWindow):
 
     # -- FPGA actions --------------------------------------------------------
     def on_fpga_connect_clicked(self):
+        if not self._begin_blocking("FPGA connect"):
+            return
+        try:
+            self._connect_fpga()
+        finally:
+            self._end_blocking()
+
+    def _connect_fpga(self):
         self._log("Connecting FPGA...")
         ctrl = self.fpga_controller_factory()
         try:
@@ -1174,13 +1317,18 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.scope = None
             self._log(f"FPGA Scope could not start: {type(e).__name__}: {e}")
-        self.fpga_connect_btn.setEnabled(False)
-        self.fpga_disconnect_btn.setEnabled(True)
-        self._update_acquire_enabled()
 
     def on_fpga_disconnect_clicked(self):
+        if not self._begin_blocking("FPGA disconnect"):
+            return
+        try:
+            self._disconnect_fpga()
+        finally:
+            self._end_blocking()
+
+    def _disconnect_fpga(self):
         if self.acquiring:
-            self.on_acquire_clicked()  # stop first
+            self._stop_acquisition()
         if self.scope is not None:
             self.scope_panel.set_scope(None)
             try:
@@ -1194,16 +1342,26 @@ class MainWindow(QMainWindow):
         self.fpga = None
         self.fpga_status_label.setText("Not connected")
         self.fpga_status_label.setStyleSheet("font-weight: bold;")
-        self.fpga_connect_btn.setEnabled(True)
-        self.fpga_disconnect_btn.setEnabled(False)
-        self._update_acquire_enabled()
 
     # -- Acquire / Stop ----------------------------------------------------
     def on_acquire_clicked(self):
-        if self.acquiring:
-            self._stop_acquisition()
-        else:
-            self._start_acquisition()
+        # The same guard as Connect, for the same reason. _start_acquisition
+        # makes a long chain of blocking DCAM calls -- set_trigger_source,
+        # set_exposure_ms, repair_exposure_if_lost (which re-initialises the
+        # device in place: the very call that faulted) and prepare_sequence --
+        # and only sets self.acquiring at the very end. Without this, a second
+        # click during the arm re-entered _start_acquisition and armed twice.
+        # The QMessageBox warnings in that path each run a nested event loop,
+        # which is a re-entry vector on its own, slow driver or not.
+        if not self._begin_blocking("Stop" if self.acquiring else "Acquire"):
+            return
+        try:
+            if self.acquiring:
+                self._stop_acquisition()
+            else:
+                self._start_acquisition()
+        finally:
+            self._end_blocking()
 
     def _start_acquisition(self):
         if self.camera is None or self.fpga is None:
@@ -1427,6 +1585,20 @@ class MainWindow(QMainWindow):
                       f"(fed from '# of triggers read'); AO clamp verified = {self.fpga.ao_clamped}.")
 
     def _stop_acquisition(self):
+        # Reached from the Stop click, the FPGA error signal, the camera poll
+        # timer's buffer-state check, both disconnect paths and closeEvent --
+        # and a native driver pump can deliver any of those from inside
+        # another. Stopping twice would disarm an already-disarmed FPGA and
+        # re-run the whole teardown, so a nested stop is a no-op.
+        if self._stopping:
+            return
+        self._stopping = True
+        try:
+            self._stop_acquisition_body()
+        finally:
+            self._stopping = False
+
+    def _stop_acquisition_body(self):
         self._log("Stopping acquisition.")
         self._finishing = False
         self._arm_time = 0.0
@@ -1460,10 +1632,7 @@ class MainWindow(QMainWindow):
         )
         self.acq_progress.setValue(0)
         self.mode_combo.setEnabled(True)
-        self.connect_btn.setEnabled(self.camera is None)
-        self.disconnect_btn.setEnabled(self.camera is not None)
-        self.fpga_connect_btn.setEnabled(self.fpga is None)
-        self.fpga_disconnect_btn.setEnabled(self.fpga is not None)
+        self._update_connection_buttons()
         self._clear_image_to_black()
         self._log("Acquisition stopped, back to IDLE.")
 
@@ -1560,6 +1729,11 @@ class MainWindow(QMainWindow):
         Counting every frame but rendering only the last one decouples
         the drain rate from the (expensive) display cost.
         """
+        if self._blocking_op is not None:
+            # A blocking driver call owns this thread and its native message
+            # pump is what delivered this tick. Draining frames now would
+            # re-enter MMCore from inside camera.disconnect().
+            return
         if self.camera is None or not self.camera.is_connected:
             return
 
@@ -1631,6 +1805,16 @@ class MainWindow(QMainWindow):
             self._log(f"Buffer-state check failed: {type(e).__name__}: {e}")
 
     def closeEvent(self, event):
+        # A close can arrive from the native message pump while a driver
+        # call is still blocking this thread. Tearing the hardware down from
+        # inside that call is the same nested-driver fault the guard exists
+        # to prevent, so refuse the close and let the call finish.
+        if self._blocking_op is not None:
+            self._log(f"Close deferred: {self._blocking_op} is still in progress; "
+                      "the window will close as soon as it finishes.")
+            self._close_when_idle = True
+            event.ignore()
+            return
         if self.acquiring:
             self._stop_acquisition()
         if self.camera is not None:

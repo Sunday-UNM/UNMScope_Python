@@ -375,3 +375,42 @@ of the AOTF pins (meter or loopback into AI0), the per-channel power
 calibration table, file saving, the Phase 1 core skeleton, motion stages,
 adaptive optics, the camera driver in a subprocess, pixel-matching the
 Waveforms tab.
+
+### Connect re-entrancy guard (2026-09-04)
+
+The one known crasher is fixed. A second Connect click delivered by the
+DCAM driver's own message pump, while the first open still blocked the
+GUI thread, used to re-enter the handler and fault inside the
+half-initialised first open. A single `_blocking_op` flag now owns the
+GUI thread for the duration of any blocking driver call: all four
+connect/disconnect handlers refuse re-entry, every connection control is
+greyed and repainted before the call, the camera is published to
+`self.camera` only once it is open, and `closeEvent` refuses a close
+while a call is in flight. Seven regression tests inject the re-entrant
+click from inside `connect()` -- all of them fail against the previous
+code, one by unbounded recursion.
+
+Acquire had the same hole and now takes the same flag: `_start_acquisition`
+blocks in DCAM (including `repair_exposure_if_lost`, which re-initialises
+the device) and set `self.acquiring` only at the end, and its modal
+warnings run nested event loops. `_stop_acquisition` gained its own
+`_stopping` flag because it is reachable from five async paths as well as
+the Stop click. Before the fix, an Acquire click during a Disconnect
+restarted the run mid-teardown.
+`tests/test_connect_reentrancy.py`, `docs/known_issues.md`.
+
+An adversarial review of the guard then found six more holes of the same
+class, all now fixed with tests: the camera poll timer still firing inside
+`camera.disconnect()` (very likely the cause of the one-off post-Disconnect
+access violation); a refused window close being lost instead of re-issued;
+`_update_connection_buttons` re-enabling the Disconnect buttons during a
+run, so the hardware could be yanked out from under moving galvos; a raise
+in `_begin_blocking` wedging the GUI unclosable; and pumped events reaching
+the driver through the exposure spin box, the Simulation checkbox and the
+Waveforms tab's streaming checkbox.
+
+Still open: the connect is still ON the GUI thread, so a cold Orca open
+freezes the window for ~10 s (safely now, not fatally); moving the driver
+into a worker thread or a subprocess is the real cure. Plus the AOTF
+items above, file saving, the Phase 1 core skeleton, motion stages,
+adaptive optics, pixel-matching the Waveforms tab.

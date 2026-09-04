@@ -297,6 +297,15 @@ class FpgaScopePanel(QWidget):
             self._scope.clear()
         self.trace.set_data(None, 0.0)
 
+    def set_interactive(self, on: bool) -> None:
+        """Freeze the controls that reach the FPGA scope while the GUI thread
+        is inside a blocking driver call. A native driver's message pump keeps
+        delivering clicks, so a live checkbox here could start or stop the
+        scope thread from inside camera.disconnect() (MainWindow._begin_blocking).
+        """
+        self.stream_chk.setEnabled(on)
+        self.clear_btn.setEnabled(on)
+
     def _on_stream_toggled(self, on: bool):
         if self._scope is None:
             return

@@ -87,7 +87,8 @@ sees `LouisXIV.exe` running at connect time.
 
 ## Camera Connect crash: a second click during a slow DCAM open (2026-09-04)
 
-**Status: cause found from the log order; guard not yet in the repo.**
+**Status: FIXED in the repo 2026-09-04. Regression tests:
+`tests/test_connect_reentrancy.py`.**
 
 The 2026-09-03 "dcamapi.dll access violation on Connect" happened again,
 and this time the log shows how: the first Connect click blocked the GUI
@@ -98,11 +99,87 @@ queued click); the nested open finished and logged "Camera connected",
 control returned into the first, half-trampled initialisation, and the
 process died there (`camera.py connect()` / `initializeDevice`).
 
-Fix to port into `MainWindow.on_connect_clicked()`: refuse re-entry while
-a connect is in progress and disable the Connect button (with a busy
-cursor) BEFORE the blocking call, re-enabling it only if the connect
-fails; or move the connect off the GUI thread. A scratch launcher with
-exactly that guard ran a clean real-camera connect in 2 s the same day.
+**The guard** (`MainWindow._begin_blocking` / `_end_blocking`). One
+`self._blocking_op` flag names the blocking driver call that owns the GUI
+thread, or None. All four handlers -- camera and FPGA, Connect and
+Disconnect -- claim it first and return immediately (with a log line) if
+it is already held, so a re-entered call never reaches any hardware. The
+flag, not the greyed button, is what closes the hole: disabling a
+`QPushButton` stops that button's own click, but the flag also covers the
+other three buttons, a queued event, a window close, and a script calling
+a handler directly. Alongside it:
+
+- every connection control is disabled and repainted, and the wait cursor
+  set, BEFORE the blocking call -- a live-looking button for ten seconds
+  is what makes people click twice;
+- the camera object is built locally and published to `self.camera` only
+  after `connect()` returns, so nothing re-entrant can ever find a
+  half-initialised one on the window;
+- `_end_blocking()` runs in a `finally` and restores every button from the
+  real state, so a failed connect re-enables itself;
+- `closeEvent` refuses a close while a blocking call is in flight --
+  tearing the hardware down from inside a nested driver call is the same
+  fault.
+
+`repaint()` is used rather than `processEvents()` on purpose: it paints
+synchronously without dispatching input, so it cannot re-deliver the very
+click being guarded.
+
+**The same guard on Acquire/Stop.** `_start_acquisition` runs its own
+chain of blocking DCAM calls -- `set_trigger_source`, `set_exposure_ms`,
+`repair_exposure_if_lost` (which re-initialises the device in place: the
+very call that faults) and `prepare_sequence` -- and only sets
+`self.acquiring` at the very end, so a second click during the arm used
+to re-enter it and arm the camera and the FPGA twice. The two
+`QMessageBox.warning` calls in that path each run a nested event loop,
+which is a re-entry vector on its own. `on_acquire_clicked` now takes the
+same flag.
+
+`_stop_acquisition` needed a second, separate flag (`_stopping`). It is
+reachable from the Stop click, the FPGA error signal, the camera poll
+timer's buffer-state check, both disconnect paths and `closeEvent` -- and
+a driver pump can deliver any of those from inside another. A nested stop
+would disarm an already-disarmed FPGA and re-run the whole teardown, so
+it is now a no-op. Measured before the fix: an Acquire click delivered
+during a camera Disconnect restarted the run mid-teardown and left
+`acquiring` True with `self.camera` set to None.
+
+**What an adversarial review of the guard then turned up** (all fixed, all
+with tests):
+
+- **The camera poll timer was still live inside `camera.disconnect()`.**
+  `_stop_acquisition` deliberately leaves `camera_poll_timer` running for a
+  `2*period + 200 ms` grace window to count in-flight frames, and
+  `disconnect()` pumps the native queue -- so the 30 ms tick fired into a
+  half-closed device that still reported `is_connected`. This is the most
+  likely mechanism for the one-off "access violation right after camera
+  Disconnect" recorded below. Fixed on both sides: `_poll_camera_for_frame`
+  returns early while `_blocking_op` is set, and `_disconnect_camera` stops
+  the timer and un-publishes `self.camera` *before* the blocking close --
+  the mirror of publishing only after a successful open.
+- **A refused close was lost forever.** Nothing re-issued it, so the user's
+  X did nothing and they would force-kill the process mid-driver. The
+  request is now remembered and re-issued from `_end_blocking`.
+- **`_update_connection_buttons` ignored `self.acquiring`**, so the Acquire
+  guard's own `_end_blocking` re-enabled the Disconnect buttons that
+  `_start_acquisition` had greyed -- letting the camera or the FPGA be
+  yanked out from under moving galvos and an open AOTF. All four now stay
+  dead for the whole run; only Stop stays live.
+- **A raise inside `_begin_blocking` wedged the flag permanently**, which
+  with the `closeEvent` guard also made the window unclosable with the
+  hardware live. The setup is now `try`/`except`, clearing the flag before
+  re-raising.
+- **Pumped events reached the driver from other widgets**:
+  `on_exposure_changed` (a wheel or arrow on the still-enabled spin box
+  wrote to a device being unloaded), `_on_simulation_toggled` (which only
+  checked `self.camera is not None`, now always None during an open), and
+  the Waveforms tab's "Scope streaming" checkbox (`ScopePanel.set_interactive`).
+- A failed open dropped a half-opened handle without closing it, and
+  `blockSignals(True)` leaked if `get_exposure_ms()` raised.
+
+Not done: moving the connect off the GUI thread entirely. The window is
+still frozen for the ~10 s of a cold DCAM open; it is now merely frozen
+safely, with a wait cursor and dead buttons instead of a crash.
 
 ## Orca exposure silently lost after stopSequenceAcquisition (adapter quirk)
 

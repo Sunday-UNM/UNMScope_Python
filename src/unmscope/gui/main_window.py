@@ -54,6 +54,8 @@ from PySide6.QtWidgets import (
 
 from unmscope.hardware.camera import Camera, OrcaFlash4Camera, SimulatedCamera, other_camera_holders
 from unmscope.hardware.fpga_trigger import FpgaTriggerController, TICKS_PER_S, free_run_timing
+from unmscope.hardware.fpga_scope import FpgaScope
+from unmscope.gui.scope_view import FpgaScopePanel
 
 MODE_CONTINUOUS = "Continuous Scan"
 MODE_ZSTACK = "Z stack"
@@ -185,6 +187,7 @@ class MainWindow(QMainWindow):
 
         self.camera: Camera | None = None
         self.fpga: FpgaTriggerController | None = None
+        self.scope: FpgaScope | None = None      # FPGA Scope, streams while the FPGA is connected
         self.fpga_signals = FpgaSignals()
         self.fpga_signals.frame_fired.connect(self._on_fpga_frame_fired)
         self.fpga_signals.status.connect(self._on_fpga_status)
@@ -694,13 +697,10 @@ class MainWindow(QMainWindow):
         splitter = QSplitter(Qt.Vertical)
 
         top_tabs = QTabWidget()
-        top_tabs.addTab(_placeholder_tab(
-            "X Waveform / Full Waveform",
-            "Real-time waveform display (X Galvo, AOTF Ch0-4, Z Galvo, Z "
-            "Piezo, Sample Piezo, Tile) not yet implemented -- see "
-            "'HHMI - AI buffer.vi' in fpga_io_map.md for the internal "
-            "software-scope path this would read from.",
-        ), "Waveforms")
+        # The FPGA Scope (LouisXIV's 'HHMI - AI buffer.vi' front panel):
+        # live traces from the FPGA's 'AI data' stream -- docs/fpga_scope.md.
+        self.scope_panel = FpgaScopePanel()
+        top_tabs.addTab(self.scope_panel, "Waveforms")
         top_tabs.addTab(self._build_images_tab(), "Images")
         top_tabs.addTab(_placeholder_tab("Background"), "Bckgrd")
         top_tabs.addTab(_placeholder_tab("Blank"), "Blank")
@@ -1153,6 +1153,16 @@ class MainWindow(QMainWindow):
         self.fpga_status_label.setText("Connected, safe state")
         self.fpga_status_label.setStyleSheet("font-weight: bold; color: green;")
         self._log("FPGA connected and in safe state.")
+        # Start the FPGA Scope on the same session (the Waveforms tab).
+        try:
+            self.scope = FpgaScope(ctrl)
+            self.scope.start()
+            self.scope_panel.set_scope(self.scope)
+            self._log(f"FPGA Scope streaming {self.scope.channels} channels at {self.scope.fs_hz:,.0f} S/s "
+                      "(Waveforms tab).")
+        except Exception as e:
+            self.scope = None
+            self._log(f"FPGA Scope could not start: {type(e).__name__}: {e}")
         self.fpga_connect_btn.setEnabled(False)
         self.fpga_disconnect_btn.setEnabled(True)
         self._update_acquire_enabled()
@@ -1160,6 +1170,13 @@ class MainWindow(QMainWindow):
     def on_fpga_disconnect_clicked(self):
         if self.acquiring:
             self.on_acquire_clicked()  # stop first
+        if self.scope is not None:
+            self.scope_panel.set_scope(None)
+            try:
+                self.scope.stop()
+            except Exception:
+                pass
+            self.scope = None
         if self.fpga is not None:
             self.fpga.close()
             self._log("FPGA disconnected (safe state restored).")
@@ -1387,7 +1404,9 @@ class MainWindow(QMainWindow):
         want = 1.0 / self._trigger_period_s if self._trigger_period_s else 0.0
         hz = st.achieved_hz
         note = ""
-        if want and hz and abs(hz - want) / want > 0.05:
+        # The estimate is quantised by the 50 ms monitor sampling, so only
+        # flag a deviation once enough periods have accumulated.
+        if want and hz and st.triggers_read >= 20 and abs(hz - want) / want > 0.05:
             note = f"  <-- OFF by {(hz - want) / want * 100:+.1f}%"
         self._log(f"FPGA free-run: {st.triggers_read} triggers, {hz:.3f} Hz achieved vs "
                   f"{want:.3f} Hz requested{note}; frames {self.frame_count}; "

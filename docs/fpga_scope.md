@@ -85,11 +85,31 @@ repetition) and must be True for the stream to flow outside a scan.
 `start_free_run()` writes all three from the controller's `ai_*`
 attributes, so arming never silently switches a running scope off.
 
+## GUI: the Waveforms tab (`src/unmscope/gui/scope_view.py`)
+
+Modelled on LouisXIV's FPGA Scope (the `HHMI - AI buffer.vi` front
+panel): black graph with the dotted grid, Volts against Time (s), a legend
+of per-channel checkboxes with colour swatches (LouisXIV's default
+`Active Channels` pre-selected), "# of seconds to buff", "Clear",
+"# points acq", plus a status line with the DIO4 period/jitter from the
+FPGA's clock and the stream health. Every column is drawn in volts
+(counts × 10/32768), so the digital flags show as 1.25 V steps exactly as
+in LabVIEW. Long windows are decimated per pixel column with a min/max
+envelope, so a 100 µs pulse stays visible in a 5 s window.
+
+The scope starts when the FPGA connects and stops when it disconnects;
+"Scope streaming" pauses it. Verified headlessly on the FPGA alone with a
+10 Hz train (`spikes/27_gui_waveforms_scope_headless.py`); the rendered tab
+is `docs/waveforms_tab_fpga_scope.png`. Pixel-matching this tab against the
+live LabVIEW panel (the standard in `CLAUDE.md`) has NOT been done — the
+reference VI was not running; it is modelled on the exported panel image.
+
 ## Not done yet
 
-- GUI: the Waveforms tab is still a placeholder; the plan is LouisXIV's
-  X Waveform / Full Waveform traces fed from `FpgaScope.snapshot()`.
 - Real waveform content on the AO columns (8–13) — they will show the
-  galvo/piezo commands once the `Wvfrm2` words carry something.
+  galvo/piezo commands once the `Wvfrm2` words carry something. Note the
+  AI loop samples `AO DMA` AFTER the range check, so with the "simulate on
+  FPGA" clamp at 0 the columns read 0 whatever the words say; verifying
+  waveform content on the scope needs a small non-zero clamp.
 - Analog inputs: the eight AI channels are wired in the pinout but have
   no friendly names in the LabVIEW source; volts = counts × 10 / 32768.

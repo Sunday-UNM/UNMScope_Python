@@ -333,6 +333,11 @@ class FpgaScope:
                 except Exception:
                     pass
 
+    def clear(self) -> None:
+        """Drop everything buffered (the reader keeps streaming into the
+        new ring; swapping the attribute is atomic for the reader)."""
+        self.ring = FrameRing(self.ring.capacity, self.channels)
+
     # -- data access -----------------------------------------------------------
     def snapshot(self, seconds: float | None = None) -> ScopeSnapshot:
         n = None if seconds is None else int(seconds * self.fs_hz)

@@ -300,3 +300,20 @@ clamp does not take). Headless GUI on the FPGA alone: sync 10/11, 65/66,
 10/11; edge 10/10, 62/62, 10/10; limits read 0 throughout. Details:
 `docs/simulate_on_fpga.md`. Remaining in this phase: A step 5, the
 Waveforms tab fed by `FpgaScope`.
+
+### Status (2026-09-03, night): A step 5 DONE — the phase is complete
+
+The Waveforms tab is LouisXIV's FPGA Scope fed by `FpgaScope`: black grid
+graph in volts vs time, per-channel legend, seconds-to-buffer, Clear,
+points counter, DIO4 period/jitter status line. Starts with the FPGA
+connection, verified headlessly on the FPGA alone
+(`spikes/27_gui_waveforms_scope_headless.py`, rendered tab in
+`docs/waveforms_tab_fpga_scope.png`). Not pixel-matched to the live
+LabVIEW panel (reference not running).
+
+**Next: C — real waveform content, FPGA only.** Generate the AO words
+(4×I16 per I64, X galvo sweep / Z step) into `Wvfrm2`, observe them on the
+FPGA Scope's AO columns. Caveat found while planning: the AI loop samples
+`AO DMA` after the range check, so under the 0-count clamp the columns
+read 0 regardless — verification needs an explicit small clamp (e.g.
+±100 mV) with nothing connected to the AO BNCs, kept OFF by default.

@@ -224,6 +224,8 @@ class SimulatedCamera(Camera):
         # SYNCREADOUT open-exposure state, mirroring the measured Orca.
         self._ext_pending = 0
         self._exposure_open = False
+        self._base: np.ndarray | None = None
+        self._frame_index = 0
 
     def connect(self) -> None:
         self._connected = True
@@ -252,8 +254,15 @@ class SimulatedCamera(Camera):
     def snap(self) -> np.ndarray:
         if not self._connected:
             raise CameraError("Camera not connected")
-        base = self._rng.poisson(lam=200, size=(self._height, self._width)).astype(np.uint16)
-        return base
+        # Cheap synthetic frame: a Poisson-noise base computed ONCE per
+        # size plus a per-frame offset. A fresh 2048x2048 Poisson draw per
+        # frame cost ~150 ms and, at 10-30 fps in "simulate on FPGA" mode,
+        # starved the GUI thread and the FPGA Scope reader of the GIL.
+        shape = (self._height, self._width)
+        if self._base is None or self._base.shape != shape:
+            self._base = self._rng.poisson(lam=200, size=shape).astype(np.uint16)
+        self._frame_index += 1
+        return self._base + np.uint16(self._frame_index % 64)
 
     # -- Trigger handling. INTERNAL: frames free-run at the exposure pace
     # (GUI/dev work with no FPGA). EXTERNAL: frames appear ONLY when

@@ -204,3 +204,10 @@ python -u spikes/26_gui_simulate_on_fpga_headless.py
 from the FPGA trigger counter, AO clamped and verified. `--edge` for EDGE
 accounting. In the GUI itself the mode is simply backend = Simulated with
 the FPGA connected.
+
+```bash
+python -u spikes/27_gui_waveforms_scope_headless.py
+```
+The Waveforms tab (FPGA Scope view) through the real GUI, FPGA only: runs
+a 10 Hz train, asserts the DIO4 statistics in the panel, and renders the
+tab to `docs/waveforms_tab_fpga_scope.png`.

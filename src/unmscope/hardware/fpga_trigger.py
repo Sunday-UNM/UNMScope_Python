@@ -235,6 +235,10 @@ class FpgaTriggerController:
         #: Whether we successfully raised this process's timer resolution
         #: (set in connect()). False means pulse timing will be coarser.
         self.high_res_timers = False
+        # -- AI stream (FPGA Scope) settings, written at every arm --
+        self.ai_channels = 0
+        self.ai_period_ticks = AO_TICKS_BETWEEN_POINTS
+        self.ai_free_run = False
         # -- free-run state --
         self._free_run_active = False
         self._free_run_t0 = 0.0
@@ -476,7 +480,9 @@ class FpgaTriggerController:
                        ao_ticks_between_points: int = AO_TICKS_BETWEEN_POINTS,
                        write_pb_registers: bool = True,
                        trigger_blast: dict | None = None,
-                       ao_dma_timeout_ticks: int = AO_DMA_TIMEOUT_TICKS) -> bool:
+                       ao_dma_timeout_ticks: int = AO_DMA_TIMEOUT_TICKS,
+                       ai_channels: int | None = None, ai_period_ticks: int | None = None,
+                       ai_free_run: bool | None = None) -> bool:
         """Arm the FPGA once and let it free-run DIO4 at ``period_s``.
 
         n_triggers=None -> Continuous Mode (until stop_free_run()).
@@ -507,9 +513,19 @@ class FpgaTriggerController:
         regs["Cycle(Ticks)"].write(cycle)
         regs["Trigger up (ticks)"].write(up)
         regs["AO Trigger delay (ticks)"].write(0)
-        regs["Free run"].write(False)            # the AI flag, unrelated to triggers
-        regs["AI # of channels"].write(0)
-        regs["AI loop period (ticks)"].write(AO_TICKS_BETWEEN_POINTS)
+        # AI (FPGA Scope) stream settings. 'Free run' is the AI flag,
+        # unrelated to trigger repetition. Defaults come from the
+        # controller's ai_* attributes, which FpgaScope.start() sets, so an
+        # arm never silently switches a running scope off.
+        if ai_channels is None:
+            ai_channels = self.ai_channels
+        if ai_period_ticks is None:
+            ai_period_ticks = self.ai_period_ticks
+        if ai_free_run is None:
+            ai_free_run = self.ai_free_run
+        regs["Free run"].write(bool(ai_free_run))
+        regs["AI # of channels"].write(int(ai_channels))
+        regs["AI loop period (ticks)"].write(int(ai_period_ticks))
         regs["AO # of points per trigger"].write(int(ao_points_per_trigger))
         regs["AO ticks between points"].write(int(ao_ticks_between_points))
         if write_pb_registers:

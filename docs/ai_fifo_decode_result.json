@@ -1,0 +1,28 @@
+{
+  "channels": 16,
+  "period_ticks": 200,
+  "binary_cols": {
+    "14": {
+      "lo": 0,
+      "hi": 4096,
+      "period_ms": 100.00026315789474,
+      "period_sd_ms": 0.0011164843913461647,
+      "high_ms": 10.0,
+      "edges": 20
+    },
+    "15": {
+      "lo": 0,
+      "hi": 4096,
+      "period_ms": 100.00026315789474,
+      "period_sd_ms": 0.0011164843913461647,
+      "high_ms": 0.1,
+      "edges": 20
+    }
+  },
+  "dio4_candidates": [
+    15
+  ],
+  "sync_candidates": [
+    14
+  ]
+}

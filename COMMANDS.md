@@ -176,3 +176,23 @@ python -u spikes/24_syncreadout_first_frame.py
 ```
 When does the first sync-readout trigger hand back a frame? (fresh camera
 vs kept sequence vs FPGA reset while armed).
+
+---
+
+## FPGA Scope (FPGA only — no camera, no galvo)
+
+```bash
+python tools/fpga_scope_monitor.py --seconds 10
+```
+The software oscilloscope: free-runs the trigger at 10 Hz and prints, once
+a second, the DIO4 period/jitter measured on the FPGA's own 100 kS/s
+sample clock, the Int Sync high time, AI0–7 in mV and the stream health.
+`--no-trigger` just watches the inputs; `--trigger-period 0.05` etc.
+
+```bash
+python -u spikes/25_ai_fifo_decode.py --seconds 3
+```
+The decode run: captures the `AI data` FIFO and reports every column's
+statistics, which columns pulse at the trigger period, and the measured
+period. `-n 40` probes beyond the 29-element array, `--period-ticks 400`
+runs at 100 kS/s.

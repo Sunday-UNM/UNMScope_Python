@@ -278,3 +278,14 @@ Steps:
 Real waveform content (X galvo sweep, Z step) generated into `Wvfrm2`
 words (4×I16 per I64), first observed on the FPGA Scope with AO clamped,
 before any galvo is ever connected.
+
+### Status (2026-09-03, evening): A steps 1–4 DONE — the FPGA Scope works
+
+The `AI data` stream decoded on the first capture, exactly as the source
+diagrams predict: 29 I16 columns per sample (AI0–7, the six AO values,
+`Int Sync`, DIO4 read back, thirteen digital flags), digital signals as
+0/4096. At 100 kS/s the DIO4 trigger period reads 100.0000 ms with zero
+spread — the trigger is locked to the FPGA clock. `FpgaScope` (ring
+buffer, reader thread, shared session, `trigger_stats()`),
+`tools/fpga_scope_monitor.py`, unit tests. Details: `docs/fpga_scope.md`.
+Step 5 (Waveforms tab) is still open; B (simulate on FPGA) is next.

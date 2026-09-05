@@ -58,7 +58,8 @@ from PySide6.QtWidgets import (
 from unmscope.hardware.camera import Camera, OrcaFlash4Camera, SimulatedCamera, other_camera_holders
 from unmscope.hardware.fpga_trigger import FpgaTriggerController, TICKS_PER_S, free_run_timing
 from unmscope.hardware.fpga_scope import FpgaScope
-from unmscope.hardware.waveform import build_scan_waveform, COUNTS_PER_VOLT
+from unmscope.hardware.waveform import COUNTS_PER_VOLT
+from unmscope.hardware.louisxiv_waveform import build_louisxiv_waveform
 from unmscope.config.calibration import load_calibration
 from unmscope.analysis.projections import DEFAULT_STAGE_ANGLE_DEG, stack_projections
 from unmscope.fileio.tiff_stack import save_tiff_stack, stack_path, write_acq_info
@@ -1755,23 +1756,41 @@ class MainWindow(QMainWindow):
         zg_dir = 1.0 if self.zg_end.value() >= self.zg_start.value() else -1.0
         zg_step_v = cal.z_galvo.um_to_v(self.zg_interval.value()) * zg_dir if n_slices > 1 else 0.0
         dither_range_v = cal.dither_galvo.um_to_v(self.dg_range.value())
-        # Low-Level Waveform Config (Utilities): the fields the builder honours.
+        # LouisXIV's "Calculate Waveforms" (hardware/louisxiv_waveform.py): one
+        # fast-axis line per trigger -- cubic accel, linear sweep, cubic decel,
+        # flyback -- at the AO rate LouisXIV computes from exposure + cycle
+        # time; slow axes stepped with an S-curve. Knobs from the Low-Level
+        # Waveform Config (Utilities).
         wcfg = self.utilities_tab.waveform_panel.config()
         zg_moves, zp_moves = wcfg.z_axes_moving()
-        wf = build_scan_waveform(exposure_s, x_range_v, n_slices=n_slices,
-                                 z_galvo_start_v=zg_start_v, z_galvo_step_v=zg_step_v if zg_moves else 0.0,
-                                 z_piezo_start_v=zp_start_v, z_piezo_step_v=zp_step_v if zp_moves else 0.0,
-                                 x_offset_v=x_offset_v, period_s=period_s,
-                                 flyback_fraction=wcfg.fractional_flyback,
-                                 dither_range_v=dither_range_v, dither_pulses=wcfg.dither_triangle_pulses,
-                                 dither_flyback_fraction=wcfg.dither_fract_flyback)
+        try:
+            lx = build_louisxiv_waveform(
+                exposure_s=exposure_s, cycle_s=period_s, x_range_v=x_range_v, x_offset_v=x_offset_v,
+                x_pixels=self.xg_pixels.value(), update_rate=wcfg.updates_per_pix,
+                fractional_smoothing=wcfg.fract_smoothing, fractional_flyback=wcfg.fractional_flyback,
+                x_bidirectional=not wcfg.x_single_direction, n_slices=n_slices,
+                z_galvo_start_v=zg_start_v, z_galvo_step_v=zg_step_v if zg_moves else 0.0,
+                z_piezo_start_v=zp_start_v, z_piezo_step_v=zp_step_v if zp_moves else 0.0,
+                dither_range_v=dither_range_v, dither_pulses=wcfg.dither_triangle_pulses,
+                dither_flyback_fraction=wcfg.dither_fract_flyback,
+                cycle_margin_s=0.0)        # LouisXIV's rule: the block fills the cycle (measured OK on the card)
+        except ValueError as e:
+            self._log(f"Waveform calculation failed: {e}")
+            QMessageBox.warning(self, "Waveform", str(e))
+            return
+        wf = lx.scan
         self.last_waveform = wf
-        # Indicators on the cluster panel: Cam exp, Cycle time, Pixel/ms = AO
-        # rate (kHz) / Updates per Pixel (Compute AO rate from Cycle Time.vi),
-        # and the axes as Scan Setup has them.
+        self.last_louisxiv_waveform = lx
+        self._log(f"LouisXIV ramp: {lx.line.total_points} pts/line = accel {lx.line.tau_elem} + linear "
+                  f"{lx.line.linear_points} + decel {lx.line.tau_elem} + return {lx.line.return_points}; "
+                  f"AO rate {lx.rate.ao_rate_hz / 1e3:.3f} kHz (exposure rule {lx.rate.rate_for_exposure_hz:.0f}, "
+                  f"flyback rule {lx.rate.rate_for_flyback_hz:.0f} pts/s, option {lx.rate.option}); "
+                  f"Pix/ms {lx.rate.pixel_per_ms:.3f}; S-curve {lx.s_curve_points} pts."
+                  + ("".join(" NOTE: " + n for n in lx.notes)))
+        # Indicators on the cluster panel: Cam exp, Cycle time, Pixel/ms (Compute
+        # AO rate from Cycle Time.vi) and the axes as Scan Setup has them.
         self.utilities_tab.waveform_panel.set_indicators(
-            cam_exp_s=exposure_s, cycle_time_s=period_s,
-            pixel_per_ms=(TICKS_PER_S / wf.ticks_between_points / 1000.0) / max(1, wcfg.updates_per_pix),
+            cam_exp_s=exposure_s, cycle_time_s=period_s, pixel_per_ms=lx.rate.pixel_per_ms,
             axes={"x": AxisSettings(0, self.xg_offset.value(), self.xg_interval.value(), self.xg_pixels.value()),
                   "xwvfrm": AxisSettings(0, self.xg_offset.value(), self.xg_interval.value(), self.xg_pixels.value()),
                   "z": AxisSettings(0, self.zg_start.value(), self.zg_interval.value(), n_slices),

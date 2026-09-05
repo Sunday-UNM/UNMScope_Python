@@ -515,9 +515,12 @@ invent them. Foundation landed first: a Z-stack is now retained in memory
    `~/.unmscope/waveform_config.json`), under Utilities. Live: Fractional Flyback,
    Dither Triangle Pulses, Dither Fract. Flyback (in step with the Scan Setup
    Dither box); indicators: Pixel/ms, Cam exp, Cycle time, the axes. The rest is
-   greyed until "Calculate Waveforms" is ported -- LouisXIV COMPUTES the AO rate
-   from exposure + cycle time (`Compute AO rate from Cycle Time.vi`, `Min AO rate
-   needed.vi`), our builder fixes it; see `docs/utilities_and_waveform_config.md`.
+   greyed. **"Calculate Waveforms" PORTED 2026-09-05** (`hardware/louisxiv_waveform.py`,
+   VI-for-VI from the hidden-frames export of `DAQ/Waveform/*`): cubic-accel /
+   linear / cubic-decel fast-axis line + flyback, AO rate computed from exposure
+   + cycle time and capped at 1000 kHz, DMA tick rounding, S-curve slow-axis
+   steps. The scan now uses it; Updates/Pix, Fract. Smoothing and X Single
+   Direction are live too. See `docs/utilities_and_waveform_config.md`.
 5. **Utilities tab** -- "most of" LouisXIV's 18 launcher tools; which subset is
    the user's call. Mapped: Align Laser; View TIF stack (pairs with 3); Image
    Reviewer; **um per V calibration** (the per-channel calibration the user wants

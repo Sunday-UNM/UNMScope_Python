@@ -9,8 +9,9 @@ sub-cluster frames), expressed relative to the cluster frame's top-left
 cluster (204,204,204), sub-clusters (170,170,170), greyed block
 (221,221,221), fields white, pressed toggles (204,204,255).
 
-Live (editable, honoured by unmscope.hardware.waveform.build_scan_waveform):
-Fractional Flyback, Dither Triangle Pulses, Dither Fract. Flyback. Indicators
+Live (editable, honoured by unmscope.hardware.louisxiv_waveform): Updates/Pix,
+Fractional Flyback, Fract. Smoothing, X Single Direction, Dither Triangle
+Pulses, Dither Fract. Flyback. Indicators
 (read-only, refreshed by the window): Pixel/ms, Cam exp, Cycle time, the axis
 sub-clusters. Everything else is shown with its LouisXIV default and greyed
 until the corresponding part of "Calculate Waveforms" is ported (see
@@ -45,7 +46,8 @@ def _r(x, y, w, h):
 class WaveformConfigPanel(QWidget):
     changed = Signal(object)          # WaveformConfig, after any live edit
 
-    LIVE = ("fractional_flyback", "dither_triangle_pulses", "dither_fract_flyback")
+    LIVE = ("fractional_flyback", "fract_smoothing", "updates_per_pix", "x_single_direction",
+            "dither_triangle_pulses", "dither_fract_flyback")
 
     def __init__(self, cfg: WaveformConfig | None = None, parent=None):
         super().__init__(parent)
@@ -139,9 +141,11 @@ class WaveformConfigPanel(QWidget):
         self._frame((FRAME_X, FRAME_Y, FRAME_W, FRAME_H), CLUSTER_BG, "cluster")
         self.waveform = self._combo(_r(106, 4, 83, 19), WAVEFORM_TYPES); self._rlabel("Waveform", _r(106, 4, 83, 19))
         self.x_single_direction = self._toggle(_r(194, 6, 30, 14), "→", True)
+        self.x_single_direction.setEnabled(True)
+        self.x_single_direction.toggled.connect(self._on_edit)
         self._label("X Single Direction", _r(228, 4, 120, 18))
         self.pixel_per_ms = self._ro(_r(106, 26, 38, 18)); self._rlabel("Pixel / ms", _r(106, 26, 38, 18))
-        self.updates_per_pix = self._ispin(_r(93, 49, 52, 18), 1, 100); self._rlabel("Updates/Pix", _r(93, 49, 52, 18))
+        self.updates_per_pix = self._ispin(_r(93, 49, 52, 18), 1, 100, live=True); self._rlabel("Updates/Pix", _r(93, 49, 52, 18))
         # Excitations + X (greyed block, as on the panel)
         self._frame(_r(147, 51, 203, 97), GREYED_BG, "excitations")
         self._label("Excitations", _r(175, 50, 80, 14))
@@ -159,7 +163,7 @@ class WaveformConfigPanel(QWidget):
         }
         self.fractional_flyback = self._dspin(_r(107, 91, 38, 18), 0, 1, 3, live=True)
         self._rlabel("Fractional Flyback", _r(107, 91, 38, 18))
-        self.fract_smoothing = self._dspin(_r(107, 110, 38, 18), 0, 100, 2)
+        self.fract_smoothing = self._dspin(_r(107, 110, 38, 18), 0, 100, 2, live=True)
         self._rlabel("Fract. Smoothing", _r(107, 110, 38, 18))
         rows = [("aotf_delay_us", "AOTF delay (us)", 185), ("x_galvo_delay_us", "X galvo delay (us)", 204),
                 ("z_galvo_delay_us", "Z galvo delay (us)", 223), ("z_piezo_delay_us", "Z piezo delay (us)", 242),
@@ -244,6 +248,9 @@ class WaveformConfigPanel(QWidget):
         """The configuration with the live fields read from the widgets."""
         return replace(self._cfg,
                        fractional_flyback=self.fractional_flyback.value(),
+                       fract_smoothing=self.fract_smoothing.value(),
+                       updates_per_pix=self.updates_per_pix.value(),
+                       x_single_direction=self.x_single_direction.isChecked(),
                        dither_triangle_pulses=self.dither_triangle_pulses.value(),
                        dither_fract_flyback=self.dither_fract_flyback.value())
 

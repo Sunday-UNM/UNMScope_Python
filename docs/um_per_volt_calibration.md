@@ -7,12 +7,13 @@ cluster). Tests: `tests/test_um_per_volt.py`, `tests/test_calibration_tab.py`.
 
 LouisXIV opens this as an independent window from SPIM MAIN.vi's Utilities
 button "Edit um/V Cal" (event case [31], `SPIM MAINd139.png`, an async launch
-with nothing passed in). The user wants it as its **own tab** in the main
-window's left tab widget, next to Scan Setup / Camera / Utilities; the
-integrator adds `CalibrationTab(log=...)` there (wrapped in a `QScrollArea`
-like the Camera tab -- the panel is 466 px wide, the tab column 406) and
-connects `saved` (see below). The Utilities grid button "um per V
-calibration" can simply switch to that tab.
+with nothing passed in). A left tab next to Scan Setup / Camera / Utilities
+was tried first; the user's 2026-09-05 call was to open it the way LouisXIV
+does instead -- its own non-modal window (`MainWindow.calibration_window`, a
+`QWidget(self, Qt.Window)` sized to `CalibrationTab.minimumSize()`), raised
+by the Utilities grid's "um per V calibration" button
+(`_show_calibration_tab`). `saved` (see below) is connected the same way
+either hosting choice would need it.
 
 ## What each element does, and which VI it comes from
 

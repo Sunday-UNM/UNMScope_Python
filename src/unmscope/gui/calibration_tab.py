@@ -1,10 +1,9 @@
-"""The um/V calibration tab -- LouisXIV's ``GUI/Microns per Volt Settings
+"""The um/V calibration panel -- LouisXIV's ``GUI/Microns per Volt Settings
 GUI.vi`` (SPIM MAIN.vi Utilities button "Edit um/V Cal", event case [31],
-which launches that VI as an independent window). The user wants it as its
-own tab in the main window's left tab widget, so it is a plain ``QWidget``
-the window hosts in its own non-modal window opened from the Utilities grid; the
-host is expected to wrap it in a ``QScrollArea`` like the Camera tab (the
-panel is 466 px wide, the tab column 406).
+which launches that VI as an independent window). It is a plain ``QWidget``
+the main window hosts in its own non-modal ``QWidget(Qt.Window)``, sized to
+the panel's own ``minimumSize()`` and opened from the Utilities grid (a
+left tab was tried first and dropped on the user's 2026-09-05 call).
 
 Behaviour, frame for frame (hidden-frame renders of the VI's state machine):
 - "Initialize Variables": read the cluster from the constants VI (the ini)

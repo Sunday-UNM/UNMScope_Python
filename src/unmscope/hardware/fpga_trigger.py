@@ -48,10 +48,11 @@ primitive, once per frame -- less elegant than a hardware-native burst,
 but only uses the mechanism we actually trust. Revisit the native burst
 mechanism later if throughput becomes a real constraint.
 
-Z Galvo/Z Piezo/X Galvo etc. are still held at a fixed all-zero value --
-real per-slice waveform content (actual Z stepping, beam sweep) is
-separate, not-yet-implemented future work. This module only proves the
-trigger-count/continuous mechanism.
+This module only proves the trigger-count/continuous mechanism; it does not
+build the AO waveform content itself (X galvo sweep, Z galvo/Z piezo
+stepping, the dither triangle) -- that is
+``hardware.louisxiv_waveform.build_louisxiv_waveform``, which
+``start_free_run(ao_words=...)`` plays out on the FPGA.
 """
 from __future__ import annotations
 

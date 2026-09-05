@@ -6,35 +6,44 @@ Layout modeled directly on
 `VI_Diagrams/SPIM/SPIM LV8.6 VIs/SPIM MAIN/SPIM MAINp.png` (the real
 front-panel screenshot): lavender top bar (Acquire, mode dropdown,
 Simulation checkbox, Status pill + progress bars, Exit), a tabbed left
-panel (Scan Setup / Camera / Utilities / Preferences / Adv Setup), and a
-tabbed right side (Waveforms / Images / Bckgrd / Blank on top, a second
-tab row -- Image Profile / Stack Profile / Stack Projections / Row
-Profile / Timing / Diagnostics -- on the bottom).
+panel (Scan Setup / Camera / Utilities), and a tabbed right side
+(Waveforms / Images on top, Stack Projections / Diagnostics on the
+bottom). LouisXIV's other tabs (Preferences, Adv Setup, Bckgrd, Blank,
+Image Profile, Stack Profile, Row Profile, Timing) were dropped on the
+user's 2026-09-05 cleanup call -- see CLAUDE.md "Cleanup decisions".
 
-IMPORTANT -- honesty about what's real: most of the real panel's controls
-(Excitation/AOTF sliders, X galvo, Z Galvo, Cycle lasers, Timepoints,
-Multi-location, Perfusion, the Waveforms/Bckgrd/Blank/Stack-Profile tabs)
-are laid out here to match the real software's look, but are NOT wired to
-hardware -- the deployed FPGA bitfile only exposes a single overall
-"AOTF on?" bit (not per-channel control) and no galvo-stepping logic has
-been validated yet (see fpga_io_map.md). Those controls are left disabled
-(greyed out) so the window looks right without claiming functionality
-that hasn't been hardware-validated. The controls that ARE real: Camera
-connect/exposure, FPGA connect, Z Piezo Interval/Start/End/Slices (drives
-the Z-stack trigger count), Acquire/Stop, and the live image feed --
-exactly the same hardware path as before this restyle.
+IMPORTANT -- honesty about what's real: controls laid out to match the
+real panel but not wired to anything real are left disabled (greyed out)
+so the window looks right without claiming functionality it doesn't have.
+Wired to hardware today: Camera connect/exposure/ROI/sensor mode (Camera
+tab); FPGA connect; Scan Setup's Excitation (the one checked row sets its
+AOTF channel level -- see docs/aotf.md; LouisXIV's "one laser at a time"
+gate is enforced), X galvo, Z galvo, Z piezo and Dither galvo (all feed
+hardware.louisxiv_waveform.build_louisxiv_waveform, the words the FPGA
+plays); Acquire/Stop and the live image display pipeline (gui/display.py:
+Scale mapping, palette, Frames to Avg, Zoom to fit); the Waveforms tab
+(FpgaScopePanel fed by FpgaScope); Stack Projections Calc/Save; and six of
+the Utilities tools (um per V calibration, Sample Stage Control, Camera
+Debug Panel, FPGA Scope, Reset HW, HW Config). Left greyed: the Timepoints
+and Multi-location boxes (kept for later), the Cycle lasers combo, the
+Images tab's drawing tools and camera selectors, and the five Utilities
+tools not yet ported (View Z Lookup Table, X&Z Galvo offsets per AOTF ch,
+FPGA Monitor, X Galvo Z Corrections, Imagine Optics).
 
 Threading design (IMPORTANT -- see hardware/fpga_trigger.py and the
 session's crash history): Camera is touched ONLY from the GUI thread via
-QTimer polling (the same pattern validated in the round-trip test).
-FpgaTriggerController's continuous-firing loop runs on ITS OWN internal
-thread (see start_continuous()); it never touches Qt widgets directly --
-its on_frame callback only emits a thread-safe Qt Signal, which Qt safely
-queues onto the GUI thread. Z-stack mode reuses the exact same continuous-
-firing mechanism, just with a target frame count checked on the GUI-thread
-side of that signal (never self-joins the firing thread from within
-itself). This keeps each hardware resource touched by exactly one thread,
-matching the discipline that avoided further native-layer crashes.
+QTimer polling (camera_poll_timer). FpgaTriggerController.start_free_run()
+arms the FPGA once and lets it time the whole trigger train; the
+controller's own background threads (the Wvfrm2 refill thread and the
+monitor thread that reads the FPGA's trigger counter) never touch Qt
+widgets -- their on_trigger_count/on_status/on_error callbacks only emit
+thread-safe FpgaSignals, which Qt queues onto the GUI thread. Z-stack mode
+uses the same free run with a bounded trigger count (the FPGA stops itself
+when it is reached); the target is checked on the GUI thread in
+_on_fpga_frame_fired, never by joining a controller thread from within a
+callback. This keeps each hardware resource touched by exactly one
+thread, matching the discipline that avoided further native-layer
+crashes.
 """
 from __future__ import annotations
 
@@ -175,7 +184,7 @@ class MainWindow(QMainWindow):
             self.calibration = load_calibration()
             print(f"um/V calibration copy unavailable ({e}); using LouisXIV's ini read-only")
         # LouisXIV's 'Waveform' cluster (Low-Level Waveform Config), persisted
-        # per user; the live fields feed build_scan_waveform at scan start.
+        # per user; the live fields feed build_louisxiv_waveform at scan start.
         self.waveform_config = WaveformConfig.load()
         self.last_waveform = None                # ScanWaveform of the current/last acquisition
         self.fpga_signals = FpgaSignals()
@@ -330,7 +339,7 @@ class MainWindow(QMainWindow):
     #    on both being connected, and burying that behind a tab click made
     #    the whole app look broken/"lost functionality" when it was really
     #    just Connect never having been clicked) sitting above the tabbed
-    #    Scan Setup / Camera / Utilities / Preferences / Adv Setup panel.
+    #    Scan Setup / Camera / Utilities panel.
     def _build_left_tabs(self) -> QWidget:
         container = QWidget()
         lay = QVBoxLayout(container)
@@ -417,9 +426,10 @@ class MainWindow(QMainWindow):
 
         # Real panel is genuinely two side-by-side columns, not one column
         # with a single split top row -- confirmed from both of the user's
-        # screenshots: LEFT = Excitation/Cycle lasers/Timepoints/Stack
-        # time/Multi-location/Perfusion; RIGHT = X galvo/Z Galvo/Linked+Rel
-        # Offset/Z Piezo/Dither Galvo.
+        # screenshots: LEFT = Excitation/Cycle lasers/Timepoints/Multi-
+        # location (LouisXIV also has Stack time and Perfusion here;
+        # dropped on the user's cleanup call); RIGHT = X galvo/Z Galvo/
+        # Linked+Rel Offset/Z Piezo/Dither Galvo.
         columns = QHBoxLayout()
         outer.addLayout(columns, stretch=1)
 
@@ -707,8 +717,8 @@ class MainWindow(QMainWindow):
         scroll.setFrameShape(QFrame.NoFrame)
         return scroll
 
-    # -- Right side: top tab row (Waveforms/Images/Bckgrd/Blank) over a
-    #    bottom tab row (Image Profile/Stack Profile/.../Diagnostics) -----
+    # -- Right side: top tab row (Waveforms/Images) over a
+    #    bottom tab row (Stack Projections/Diagnostics) -----
     def _build_right_side(self) -> QSplitter:
         splitter = QSplitter(Qt.Vertical)
 
@@ -1004,9 +1014,9 @@ class MainWindow(QMainWindow):
         return scroll
 
     def _build_stack_projections_tab(self) -> QWidget:
-        # Visual-only, matching SPIM MAINp.png's Stack Projections panel --
-        # not wired to any real projection computation yet. Box size
-        # (245x196) and gaps (~30px) measured off the live front panel.
+        # Layout matches SPIM MAINp.png's Stack Projections panel (box size
+        # 245x196, gaps ~30px, measured off the live front panel); Calc/
+        # DeSkew/Save are wired, see _on_calc_projections / _save_projection.
         tab = QWidget()
         outer = QHBoxLayout(tab)
         outer.setSpacing(8)

@@ -75,9 +75,9 @@ waveform, Z Piezo Selector, Linked / XZcrrct.
 
 11 of LouisXIV's 18 tools, in its reading order; the user dropped Align
 Laser, Image Reviewer, Calculate PSF, Auto Background, View TIF stack,
-Resave OME-XML TIFs and Shift Vslit calibration (2026-09-05). Wired: **um per V calibration** (switches to the um/V Cal tab),
+Resave OME-XML TIFs and Shift Vslit calibration (2026-09-05). Wired: **um per V calibration** (opens its own window, LouisXIV's "Microns per Volt Settings", `docs/um_per_volt_calibration.md`),
 **Sample Stage Control** (simulated MP-285 panel, `docs/sample_stage.md`),
-**Camera Debug Panel** (`docs/camera_debug_panel.md` / the module docstring),
+**Camera Debug Panel** (the `gui/camera_debug_panel.py` module docstring),
 **FPGA Scope** (the Waveforms tab), **Reset HW** (LouisXIV's [69] handler
 sends the engine to its "Reset HW" state -- reset the DAQ boards, reinitialise
 everything; ours stops a run, closes and re-opens the FPGA and the camera
@@ -92,8 +92,10 @@ FPGA Monitor, X Galvo Z Corrections, Imagine Optics. Their SPIM MAIN event cases
 
 Rendered reference vs ours rendered offscreen, scanned the same way.
 
-Tools grid: 2 columns x 9 rows, 152 x 56 px buttons at page x = 13 / 193,
-y = 37 + 72 k -- ours 0 px off on all 18.
+Tools grid: measured 2 columns x 9 rows (18 buttons), 152 x 56 px at page
+x = 13 / 193, y = 37 + 72 k, 0 px off on all 18; after the user's 2026-09-05
+removals the grid holds 11 of those 18 (2 columns x 6 rows), same cell size
+and pitch, gaps closed.
 
 Waveform cluster (360 x 588 frame, sub-cluster frames (170,170,170), fields
 white, relative to the frame's top-left):

@@ -90,10 +90,14 @@ The port is a cleanup, not a 1:1 copy: LouisXIV accumulated junk over the
 years. The user decided, tab by tab:
 
 - Removed: the empty tabs Preferences, Adv Setup, Bckgrd, Blank, Image
-  Profile, Stack Profile, Row Profile, Timing; the Images tab's unwired tool
-  strip, Max Counts and display-option panels (Save Image stays under the
-  canvas); Scan Setup's Perfusion box; the Camera tab's SubROIs / Dual View /
-  Split pix #.
+  Profile, Stack Profile, Row Profile, Timing; Scan Setup's Perfusion box;
+  the Camera tab's SubROIs / Dual View / Split pix #.
+- The Images tab's tool strip, Max Counts and Display Options panels were
+  removed and then RESTORED + WIRED (user's call): the tool strip's drawing
+  buttons and camera selectors stay greyed, but the Scale mapping (Autoscale
+  Z / Scale to Counts / neither), palette (Gray/Gradient/Rainbow), Frames to
+  Avg, Zoom to fit, Scalebar and Text Info Overlay are all live -- see
+  gui/display.py and MainWindow._render/_display_frame.
 - Kept although unwired: Scan Setup's Timepoints and Multi-location boxes
   (wanted later).
 - Utilities grid: 11 of the 18 tools; Align Laser, Image Reviewer, Calculate

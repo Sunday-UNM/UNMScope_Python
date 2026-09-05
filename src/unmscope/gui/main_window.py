@@ -64,6 +64,9 @@ from unmscope.analysis.projections import DEFAULT_STAGE_ANGLE_DEG, stack_project
 from unmscope.fileio.tiff_stack import save_tiff_stack, stack_path, write_acq_info
 from unmscope.gui.scope_view import FpgaScopePanel
 from unmscope.gui.camera_tab import CameraTab
+from unmscope.gui.utilities_tab import UtilitiesTab
+from unmscope.config.waveform_config import AxisSettings, WaveformConfig
+from unmscope.fileio.tiff_stack import read_tiff_stack
 
 MODE_CONTINUOUS = "Continuous Scan"
 MODE_ZSTACK = "Z stack"
@@ -203,6 +206,9 @@ class MainWindow(QMainWindow):
         self.scope: FpgaScope | None = None      # FPGA Scope, streams while the FPGA is connected
         # LouisXIV's um/V calibrations + voltage limits (SPIMProject.ini).
         self.calibration = load_calibration()
+        # LouisXIV's 'Waveform' cluster (Low-Level Waveform Config), persisted
+        # per user; the live fields feed build_scan_waveform at scan start.
+        self.waveform_config = WaveformConfig.load()
         self.last_waveform = None                # ScanWaveform of the current/last acquisition
         self.fpga_signals = FpgaSignals()
         self.fpga_signals.frame_fired.connect(self._on_fpga_frame_fired)
@@ -370,7 +376,15 @@ class MainWindow(QMainWindow):
         # panel's size; nothing is normally cut off at the target size.
         tabs.addTab(scan_setup_scroll, "Scan Setup")
         tabs.addTab(self._build_camera_tab(), "Camera")
-        tabs.addTab(_placeholder_tab("Utilities"), "Utilities")
+        self.utilities_tab = UtilitiesTab(view_tif=self.load_stack_from_file, fpga_scope=self._show_fpga_scope,
+                                          waveform_config=self.waveform_config)
+        self.utilities_tab.waveform_panel.changed.connect(self._on_waveform_config_changed)
+        # The Scan Setup Dither box's sweeps / flyback ARE the cluster's Dither
+        # Triangle Pulses / Dither Fract. Flyback: keep the two views in step.
+        self.dg_sweeps.valueChanged.connect(self.utilities_tab.waveform_panel.dither_triangle_pulses.setValue)
+        self.dg_flyback.valueChanged.connect(self.utilities_tab.waveform_panel.dither_fract_flyback.setValue)
+        self._sync_dither_spins(self.waveform_config)
+        tabs.addTab(self.utilities_tab, "Utilities")
         tabs.addTab(_placeholder_tab("Preferences"), "Preferences")
         tabs.addTab(self._build_adv_setup_tab(), "Adv Setup")
         lay.addWidget(tabs, stretch=1)
@@ -729,7 +743,7 @@ class MainWindow(QMainWindow):
     def _build_right_side(self) -> QSplitter:
         splitter = QSplitter(Qt.Vertical)
 
-        top_tabs = QTabWidget()
+        self.top_tabs = top_tabs = QTabWidget()
         # The FPGA Scope (LouisXIV's 'HHMI - AI buffer.vi' front panel):
         # live traces from the FPGA's 'AI data' stream -- docs/fpga_scope.md.
         self.scope_panel = FpgaScopePanel()
@@ -1531,6 +1545,53 @@ class MainWindow(QMainWindow):
         finally:
             self._end_blocking()
 
+    # -- Utilities tab ---------------------------------------------------------
+    def _show_fpga_scope(self):
+        """Utilities > FPGA Scope: the Waveforms tab is the FPGA scope."""
+        self.top_tabs.setCurrentWidget(self.scope_panel)
+
+    def _sync_dither_spins(self, cfg: WaveformConfig) -> None:
+        for spin, val in ((self.dg_sweeps, cfg.dither_triangle_pulses), (self.dg_flyback, cfg.dither_fract_flyback)):
+            spin.blockSignals(True)
+            try:
+                spin.setValue(val)
+            finally:
+                spin.blockSignals(False)
+
+    def _on_waveform_config_changed(self, cfg: WaveformConfig) -> None:
+        self.waveform_config = cfg
+        self._sync_dither_spins(cfg)
+        try:
+            cfg.save()
+        except OSError as e:
+            self._log(f"Could not save the waveform config: {e}")
+
+    def load_stack_from_file(self, path: str) -> bool:
+        """Utilities > View TIF stack: load a saved stack and hold it as the
+        retained stack, so the Images view shows it and Calc / Save work on
+        it exactly as after an acquisition."""
+        if self.acquiring:
+            self._log("View TIF stack: stop the acquisition first.")
+            return False
+        try:
+            stack = read_tiff_stack(path)
+        except Exception as e:
+            self._log(f"View TIF stack FAILED: {type(e).__name__}: {e}")
+            QMessageBox.warning(self, "View TIF stack", f"Could not read {path}:\n{e}")
+            return False
+        self._stack_frames = [np.ascontiguousarray(f) for f in stack]
+        n = len(self._stack_frames)
+        self.z_target_frames = n
+        self.frame_count = n
+        self._last_frame = self._stack_frames[-1]
+        pix = frame_to_qpixmap(self._stack_frames[0], label_text=f"{Path(path).name} [1/{n}]")
+        self.image_label.setPixmap(pix.scaled(self.image_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        self.frame_counter_label.setText(f"{n}  (loaded {Path(path).name})")
+        self.calc_projections_btn.setEnabled(True)
+        self.deskew_check.setEnabled(True)
+        self._log(f"Loaded {n} x {stack.shape[1]}x{stack.shape[2]} from {path}.")
+        return True
+
     def _start_acquisition(self):
         if self.camera is None or self.fpga is None:
             return
@@ -1694,13 +1755,28 @@ class MainWindow(QMainWindow):
         zg_dir = 1.0 if self.zg_end.value() >= self.zg_start.value() else -1.0
         zg_step_v = cal.z_galvo.um_to_v(self.zg_interval.value()) * zg_dir if n_slices > 1 else 0.0
         dither_range_v = cal.dither_galvo.um_to_v(self.dg_range.value())
+        # Low-Level Waveform Config (Utilities): the fields the builder honours.
+        wcfg = self.utilities_tab.waveform_panel.config()
+        zg_moves, zp_moves = wcfg.z_axes_moving()
         wf = build_scan_waveform(exposure_s, x_range_v, n_slices=n_slices,
-                                 z_galvo_start_v=zg_start_v, z_galvo_step_v=zg_step_v,
-                                 z_piezo_start_v=zp_start_v, z_piezo_step_v=zp_step_v,
+                                 z_galvo_start_v=zg_start_v, z_galvo_step_v=zg_step_v if zg_moves else 0.0,
+                                 z_piezo_start_v=zp_start_v, z_piezo_step_v=zp_step_v if zp_moves else 0.0,
                                  x_offset_v=x_offset_v, period_s=period_s,
-                                 dither_range_v=dither_range_v, dither_pulses=self.dg_sweeps.value(),
-                                 dither_flyback_fraction=self.dg_flyback.value())
+                                 flyback_fraction=wcfg.fractional_flyback,
+                                 dither_range_v=dither_range_v, dither_pulses=wcfg.dither_triangle_pulses,
+                                 dither_flyback_fraction=wcfg.dither_fract_flyback)
         self.last_waveform = wf
+        # Indicators on the cluster panel: Cam exp, Cycle time, Pixel/ms = AO
+        # rate (kHz) / Updates per Pixel (Compute AO rate from Cycle Time.vi),
+        # and the axes as Scan Setup has them.
+        self.utilities_tab.waveform_panel.set_indicators(
+            cam_exp_s=exposure_s, cycle_time_s=period_s,
+            pixel_per_ms=(TICKS_PER_S / wf.ticks_between_points / 1000.0) / max(1, wcfg.updates_per_pix),
+            axes={"x": AxisSettings(0, self.xg_offset.value(), self.xg_interval.value(), self.xg_pixels.value()),
+                  "xwvfrm": AxisSettings(0, self.xg_offset.value(), self.xg_interval.value(), self.xg_pixels.value()),
+                  "z": AxisSettings(0, self.zg_start.value(), self.zg_interval.value(), n_slices),
+                  "zpiezo": AxisSettings(0, self.z_start_spin.value(), self.z_interval_spin.value(), n_slices),
+                  "dither": AxisSettings(0, 0.0, self.dg_range.value(), 1)})
         block_ticks = wf.points_per_trigger * wf.ticks_between_points
         # The Int-Sync high time must cover the block or the FPGA aborts the
         # block after the last trigger of a bounded run (spikes/29b, 29c).

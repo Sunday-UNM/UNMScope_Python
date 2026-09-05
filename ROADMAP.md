@@ -510,6 +510,14 @@ invent them. Foundation landed first: a Z-stack is now retained in memory
    # integrations, cam exp, cycle time, Z motion, DOE beams, X wave, Z
    bidirectional, virtual confocal, custom cycle time, Z piezo selector, AOTF
    cycle / sweep mode / pulse width / pulse duty, dither triangle pulses, etc.
+   **Panel DONE 2026-09-05, functionality partial** -- `gui/waveform_config_panel.py`
+   + `config/waveform_config.py` (the cluster 1:1, LouisXIV defaults, persisted in
+   `~/.unmscope/waveform_config.json`), under Utilities. Live: Fractional Flyback,
+   Dither Triangle Pulses, Dither Fract. Flyback (in step with the Scan Setup
+   Dither box); indicators: Pixel/ms, Cam exp, Cycle time, the axes. The rest is
+   greyed until "Calculate Waveforms" is ported -- LouisXIV COMPUTES the AO rate
+   from exposure + cycle time (`Compute AO rate from Cycle Time.vi`, `Min AO rate
+   needed.vi`), our builder fixes it; see `docs/utilities_and_waveform_config.md`.
 5. **Utilities tab** -- "most of" LouisXIV's 18 launcher tools; which subset is
    the user's call. Mapped: Align Laser; View TIF stack (pairs with 3); Image
    Reviewer; **um per V calibration** (the per-channel calibration the user wants
@@ -521,6 +529,10 @@ invent them. Foundation landed first: a Z-stack is now retained in memory
    Waveforms tab)**; Auto Background (greyed in LouisXIV too); FPGA Monitor;
    Reset HW (= safe_state/reset); X Galvo Z Corrections (`Calibration/X Galvo/`);
    HW Config (`GUI/HW Configuration GUI.vi`); Imagine Optics (adaptive optics).
+   **Grid DONE 2026-09-05** (`gui/utilities_tab.py`, 18 buttons measured 0 px off
+   the rendered panel); wired: View TIF stack (loads a stack as if acquired),
+   FPGA Scope. The other 16 are greyed; their SPIM MAIN event cases are indexed
+   in `VI_Diagrams/.../SPIM MAIN/hidden_frames` for whichever the user picks.
 
 Scale note: items 1, 4 and 5 are a multi-week surface (each Utilities tool is
 its own sub-GUI). The one-laser-at-a-time rule stays as LouisXIV has it.

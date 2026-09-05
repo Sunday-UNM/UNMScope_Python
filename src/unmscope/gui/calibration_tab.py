@@ -2,7 +2,7 @@
 GUI.vi`` (SPIM MAIN.vi Utilities button "Edit um/V Cal", event case [31],
 which launches that VI as an independent window). The user wants it as its
 own tab in the main window's left tab widget, so it is a plain ``QWidget``
-the window adds with ``tabs.addTab(CalibrationTab(...), "um/V Cal")``; the
+the window hosts in its own non-modal window opened from the Utilities grid; the
 host is expected to wrap it in a ``QScrollArea`` like the Camera tab (the
 panel is 466 px wide, the tab column 406).
 

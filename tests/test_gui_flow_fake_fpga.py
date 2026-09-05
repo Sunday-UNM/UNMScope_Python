@@ -158,3 +158,35 @@ def test_real_camera_run_drives_selected_aotf_channel(app, window):
     w.on_acquire_clicked()
     pump(app, 0.4)
     assert regs["AOTF ch (V)"].read()["AOTF ch 2"] == 0    # off at Stop
+
+
+def test_zstack_is_retained_and_continuous_is_not(app, window):
+    """Item 3/2 foundation: a Z-stack must be kept in memory (for TIFF save
+    and Calc projections); Continuous scan is unbounded and must retain
+    nothing. Warm-up/stale frames are dropped before retention."""
+    import numpy as np
+    w = window
+
+    # Z stack: exactly the accepted slices are retained, oldest first.
+    w.mode_combo.setCurrentText(mw.MODE_ZSTACK)
+    pump(app, 0.05)
+    assert w.slice_count_field.text() == "10"
+    w.on_acquire_clicked()
+    assert pump(app, 10.0, until=lambda: not w.acquiring), "Z stack did not finish"
+    pump(app, 0.3)
+    stack = w.acquired_stack()
+    assert stack is not None
+    assert stack.shape[0] == w.frame_count == 10
+    assert stack.ndim == 3 and stack.shape[1] > 0 and stack.shape[2] > 0
+    assert stack.dtype == np.uint16 or np.issubdtype(stack.dtype, np.integer)
+
+    # Continuous: retains nothing, no matter how many frames stream.
+    w.mode_combo.setCurrentText(mw.MODE_CONTINUOUS)
+    pump(app, 0.05)
+    w.on_acquire_clicked()
+    assert w.acquiring
+    pump(app, 0.4)
+    assert w.frame_count > 3
+    assert w._stack_frames is None and w.acquired_stack() is None
+    w.on_acquire_clicked()
+    pump(app, 0.3)

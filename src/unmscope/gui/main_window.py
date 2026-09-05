@@ -235,6 +235,12 @@ class MainWindow(QMainWindow):
 
         self.frame_count = 0
         self.z_target_frames = 0
+        # Frames kept in memory for the whole of a Z-stack, so the stack can
+        # be saved (TIFF) or projected (Calc) after it finishes. None when not
+        # retaining -- Continuous scan is unbounded and must never retain.
+        # One entry per accepted slice, oldest first; warm-up/stale frames are
+        # dropped before they reach here (see _poll_camera_for_frame).
+        self._stack_frames: list | None = None
         self.acquiring = False
 
         self._build_ui()
@@ -1025,6 +1031,13 @@ class MainWindow(QMainWindow):
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         self.log.append(f"[{ts}] {msg}")
 
+    def acquired_stack(self):
+        """The last retained Z-stack as an (n, H, W) array, or None if there
+        is no stack in memory (never acquired, or Continuous mode)."""
+        if not self._stack_frames:
+            return None
+        return np.stack(self._stack_frames)
+
     def _update_acquire_enabled(self):
         ok = (
             self.camera is not None and self.camera.is_connected
@@ -1413,9 +1426,11 @@ class MainWindow(QMainWindow):
         if mode == MODE_ZSTACK:
             n = int(self.slice_count_field.text()) if self.slice_count_field.text().isdigit() else 1
             self.z_target_frames = n
+            self._stack_frames = []          # retain this stack for save / Calc
             self._log(f"Z-stack: arming camera; the FPGA will fire exactly {n} triggers.")
         else:
             self.z_target_frames = 0  # unbounded
+            self._stack_frames = None        # Continuous: unbounded, do not retain
             self._log("Continuous: arming camera.")
         # The camera sequence is started once and left running until
         # Disconnect: stopping it is what loses the exposure (see
@@ -1760,6 +1775,11 @@ class MainWindow(QMainWindow):
                 frame = img
                 drained += 1
                 self.frame_count += 1
+                if self._stack_frames is not None:
+                    # Copy: pop_image may hand back a reused backing buffer.
+                    # Bounded by the FPGA's exact trigger count, so this holds
+                    # one full stack and no more.
+                    self._stack_frames.append(np.ascontiguousarray(img).copy())
         except Exception as e:
             self._log(f"Camera poll FAILED: {type(e).__name__}: {e}")
             return

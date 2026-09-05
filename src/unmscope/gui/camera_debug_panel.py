@@ -106,7 +106,8 @@ class CameraDebugPanel(QWidget):
 
     def _build(self):
         for c, (name, x) in enumerate(zip(COLUMNS, COLUMN_X)):
-            self._label(name, (x - 8, 2, 78, 15), align=Qt.AlignHCenter | Qt.AlignVCenter)
+            # headers centred on the 58 px column; 96 px so this font does not clip them
+            self._label(name, (x - 19, 2, 96, 15), align=Qt.AlignHCenter | Qt.AlignVCenter)
             self._bevel((x, ROW_Y0, 58, 128))
             cells = []
             for r in range(N_ROWS):

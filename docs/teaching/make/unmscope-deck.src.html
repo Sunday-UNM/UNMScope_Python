@@ -1,0 +1,634 @@
+<title>How UNMScope Is Put Together</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@300;400;500;600&family=Newsreader:opsz,wght@6..72,300;6..72,400;6..72,500;6..72,600&display=swap">
+
+<style>
+/* A deliberately single-world deck: dark like an unexposed camera frame,
+   accents taken from this microscope's own laser lines. Every colour is
+   painted explicitly so it holds on any host background. */
+:root {
+  --ground:   #0A0D12;
+  --panel:    #131922;
+  --panel-2:  #1A222D;
+  --ink:      #EAEFF6;
+  --ink-soft: #9AA6B6;
+  --ink-dim:  #67738A;
+  --rule:     #222B37;
+  --rule-lit: #33404F;
+
+  --l488: #45C9D6;   /* the workhorse line — the deck's accent */
+  --l405: #8E82F2;
+  --l561: #BCD452;
+  --l637: #EC6A52;
+
+  --slide-pad: clamp(30px, 5vw, 80px);
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  background: var(--ground);
+  color: var(--ink);
+  font-family: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
+  font-size: 16px; line-height: 1.6; -webkit-font-smoothing: antialiased;
+}
+
+.rail { position: fixed; top: 0; left: 0; right: 0; height: 3px; background: var(--rule); z-index: 20; }
+.rail .fill { height: 100%; background: var(--l488); width: 0%; transition: width .32s cubic-bezier(.4,0,.2,1); }
+
+.deck { min-height: 100vh; display: flex; flex-direction: column; }
+.slide {
+  flex: 1; padding: calc(var(--slide-pad) + 20px) var(--slide-pad) 104px;
+  max-width: 1180px; margin: 0 auto; width: 100%;
+  display: flex; flex-direction: column; justify-content: center;
+  animation: rise .34s cubic-bezier(.2,.7,.3,1) both;
+}
+@keyframes rise { from { opacity: .55; transform: translateY(9px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .slide { animation: none; } .rail .fill { transition: none; } }
+
+.eyebrow { font-family: "IBM Plex Mono", monospace; font-size: .74rem; letter-spacing: .18em; text-transform: uppercase; color: var(--l488); margin: 0 0 16px; font-weight: 500; }
+h1 { font-family: "Newsreader", Georgia, serif; font-weight: 500; font-size: clamp(2.2rem, 5.4vw, 4.2rem); line-height: 1.05; letter-spacing: -.018em; margin: 0 0 20px; text-wrap: balance; }
+h2 { font-family: "Newsreader", Georgia, serif; font-weight: 500; font-size: clamp(1.8rem, 3.7vw, 2.9rem); line-height: 1.1; letter-spacing: -.014em; margin: 0 0 18px; text-wrap: balance; }
+h2 em { font-style: italic; color: var(--l488); }
+.sub { font-size: clamp(1rem, 1.6vw, 1.22rem); color: var(--ink-soft); max-width: 64ch; margin: 0 0 10px; font-weight: 300; }
+.sub strong { color: var(--ink); font-weight: 500; }
+p { margin: 0 0 15px; }
+.body { max-width: 62ch; }
+.body p { font-size: clamp(.98rem, 1.5vw, 1.12rem); color: var(--ink-soft); font-weight: 300; }
+.body p strong { color: var(--ink); font-weight: 500; }
+code { font-family: "IBM Plex Mono", monospace; font-size: .88em; color: var(--l488); background: var(--panel); padding: .1em .38em; border-radius: 3px; }
+
+.spectrum { display: flex; gap: 5px; margin-bottom: 28px; }
+.spectrum i { display: block; height: 4px; width: 54px; border-radius: 2px; }
+.title-meta { display: flex; flex-wrap: wrap; gap: 8px 26px; margin-top: 32px; padding-top: 20px; border-top: 1px solid var(--rule); font-family: "IBM Plex Mono", monospace; font-size: .8rem; color: var(--ink-dim); }
+
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: clamp(20px, 3.2vw, 46px); align-items: start; }
+.two.wide-left { grid-template-columns: 1.25fr 1fr; }
+@media (max-width: 880px) { .two, .two.wide-left { grid-template-columns: 1fr; } }
+
+.panel { background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; padding: 20px 22px; }
+.panel h3 { font-family: "IBM Plex Sans", sans-serif; font-size: .95rem; font-weight: 600; margin: 0 0 7px; color: var(--ink); }
+.panel p { font-size: .96rem; color: var(--ink-soft); margin: 0; font-weight: 300; }
+.panel + .panel { margin-top: 13px; }
+
+/* file tree */
+pre.tree {
+  font-family: "IBM Plex Mono", monospace; font-size: clamp(.72rem, 1.05vw, .87rem); line-height: 1.85;
+  background: var(--panel); border: 1px solid var(--rule); border-radius: 8px;
+  padding: 20px 22px; overflow-x: auto; margin: 6px 0 0; color: var(--ink-dim);
+}
+pre.tree b { color: var(--ink); font-weight: 500; }
+pre.tree u { color: var(--l488); text-decoration: none; }
+pre.tree i { color: var(--ink-soft); font-style: normal; }
+
+/* labelled rows */
+.rows { display: flex; flex-direction: column; gap: 0; margin-top: 4px; }
+.row { display: grid; grid-template-columns: 210px 1fr; gap: 22px; align-items: baseline; padding: 13px 0; border-bottom: 1px solid var(--rule); }
+.row:last-child { border-bottom: 0; }
+.row .k { font-family: "IBM Plex Mono", monospace; font-size: .88rem; color: var(--l488); }
+.row .v { color: var(--ink-soft); font-weight: 300; font-size: 1rem; }
+.row .v b { color: var(--ink); font-weight: 500; }
+@media (max-width: 720px) { .row { grid-template-columns: 1fr; gap: 3px; } }
+
+/* layer stack */
+.layers { display: flex; flex-direction: column; gap: 7px; margin-top: 4px; }
+.lyr { display: grid; grid-template-columns: 168px 1fr 74px; gap: 18px; align-items: baseline; background: var(--panel); border: 1px solid var(--rule); border-radius: 7px; padding: 13px 18px; }
+.lyr .nm { font-family: "IBM Plex Mono", monospace; font-weight: 500; font-size: .92rem; color: var(--l488); }
+.lyr .ds { color: var(--ink-soft); font-weight: 300; font-size: .97rem; }
+.lyr .ds b { color: var(--ink); font-weight: 500; }
+.lyr .ct { font-family: "IBM Plex Mono", monospace; font-size: .76rem; color: var(--ink-dim); text-align: right; font-variant-numeric: tabular-nums; }
+.lyr.top { border-color: var(--rule-lit); background: var(--panel-2); }
+@media (max-width: 780px) { .lyr { grid-template-columns: 1fr; gap: 3px; } .lyr .ct { text-align: left; } }
+
+/* annotated code block */
+.anat { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 4px; align-items: start; }
+@media (max-width: 880px) { .anat { grid-template-columns: 1fr; } }
+pre.src {
+  font-family: "IBM Plex Mono", monospace; font-size: clamp(.68rem, .95vw, .8rem); line-height: 1.75;
+  background: var(--panel); border: 1px solid var(--rule); border-radius: 8px;
+  padding: 18px 20px; overflow-x: auto; margin: 0; color: var(--ink-soft);
+}
+pre.src .c { color: var(--l561); }
+pre.src .k { color: var(--l405); }
+pre.src .s { color: var(--ink-dim); }
+pre.src b { color: var(--ink); font-weight: 500; }
+.anat ol { list-style: none; counter-reset: a; padding: 0; margin: 0; display: flex; flex-direction: column; }
+.anat ol li { counter-increment: a; display: grid; grid-template-columns: 30px 1fr; gap: 14px; padding: 11px 0; border-bottom: 1px solid var(--rule); align-items: baseline; }
+.anat ol li:last-child { border-bottom: 0; }
+.anat ol li::before { content: counter(a); font-family: "IBM Plex Mono", monospace; font-size: .78rem; color: var(--l488); }
+.anat ol b { color: var(--ink); font-weight: 500; display: block; font-size: .98rem; }
+.anat ol span { color: var(--ink-soft); font-weight: 300; font-size: .94rem; }
+
+/* chain */
+.chain { display: flex; flex-direction: column; gap: 0; margin-top: 6px; }
+.link { display: grid; grid-template-columns: 240px 1fr; gap: 20px; align-items: baseline; padding: 12px 0; }
+.link .f { font-family: "IBM Plex Mono", monospace; font-size: .87rem; color: var(--ink); }
+.link .d { color: var(--ink-soft); font-weight: 300; font-size: .97rem; }
+.arrow { color: var(--ink-dim); font-family: "IBM Plex Mono", monospace; font-size: .8rem; padding-left: 10px; }
+@media (max-width: 720px) { .link { grid-template-columns: 1fr; gap: 2px; } }
+
+ul.plain { list-style: none; padding: 0; margin: 4px 0 0; display: flex; flex-direction: column; gap: 12px; }
+ul.plain li { display: grid; grid-template-columns: 15px 1fr; gap: 13px; align-items: baseline; color: var(--ink-soft); font-weight: 300; font-size: clamp(.98rem, 1.45vw, 1.08rem); }
+ul.plain li::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--l488); transform: translateY(-2px); }
+ul.plain li b { color: var(--ink); font-weight: 500; }
+
+.pull { font-family: "Newsreader", Georgia, serif; font-size: clamp(1.3rem, 2.5vw, 1.95rem); line-height: 1.32; color: var(--ink); font-weight: 400; font-style: italic; border-left: 3px solid var(--l488); padding: 4px 0 4px 24px; margin: 4px 0 20px; max-width: 30ch; }
+
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(215px, 1fr)); gap: 13px; margin-top: 6px; }
+.card { background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; padding: 19px; display: flex; flex-direction: column; gap: 6px; }
+.card .lab { font-family: "IBM Plex Mono", monospace; font-size: .71rem; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-dim); }
+.card h3 { font-family: "IBM Plex Mono", monospace; font-size: .98rem; font-weight: 500; margin: 0; color: var(--ink); }
+.card p { font-size: .93rem; color: var(--ink-soft); margin: 0; font-weight: 300; }
+.card.lit { border-color: var(--rule-lit); }
+.card.lit h3 { color: var(--l488); }
+
+.nav { position: fixed; bottom: 0; left: 0; right: 0; z-index: 20; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px clamp(18px, 4vw, 40px); background: linear-gradient(to top, var(--ground) 62%, transparent); }
+.nav .where { font-family: "IBM Plex Mono", monospace; font-size: .78rem; color: var(--ink-dim); font-variant-numeric: tabular-nums; }
+.nav .where b { color: var(--ink-soft); font-weight: 500; }
+.btns { display: flex; gap: 8px; }
+button { font-family: "IBM Plex Sans", sans-serif; font-size: .86rem; font-weight: 500; color: var(--ink-soft); background: var(--panel); border: 1px solid var(--rule-lit); border-radius: 6px; padding: 8px 16px; cursor: pointer; }
+button:hover:not(:disabled) { color: var(--ink); border-color: var(--l488); }
+button:disabled { opacity: .38; cursor: default; }
+button:focus-visible { outline: 2px solid var(--l488); outline-offset: 2px; }
+.hint { font-family: "IBM Plex Mono", monospace; font-size: .72rem; color: var(--ink-dim); }
+@media (max-width: 620px) { .hint { display: none; } }
+</style>
+
+<div class="rail"><div class="fill" id="fill"></div></div>
+
+<div class="deck">
+
+<!-- 1 -->
+<section class="slide" data-slide>
+  <div class="spectrum">
+    <i style="background:var(--l405)"></i><i style="background:var(--l488)"></i>
+    <i style="background:var(--l561)"></i><i style="background:var(--l637)"></i>
+  </div>
+  <p class="eyebrow">UNMScope · a tour of the code</p>
+  <h1>How the software<br>is put together</h1>
+  <p class="sub">
+    Not what the microscope does — <strong>where the code lives, how the folders are arranged,
+    what is in each file, and how to find the piece you care about</strong>. Written for people
+    who use code as a tool rather than write it for a living.
+  </p>
+  <div class="title-meta">
+    <span>36 code files · 28 test files · 38 scripts</span>
+    <span>≈ 20,000 lines total</span>
+    <span>Use ← → to move</span>
+  </div>
+</section>
+
+<!-- 2 -->
+<section class="slide" data-slide hidden>
+  <p class="eyebrow">Before anything else</p>
+  <h2>A program is just <em>text files in folders</em></h2>
+  <div class="two">
+    <div class="body">
+      <p>There is nothing hidden or compiled here. Every part of this software is a plain text
+      file you can open in Notepad. The folder names and file names <strong>are</strong> the
+      organisation — there is no database, no project file that secretly ties it together.</p>
+      <p>So learning your way around is exactly like learning your way around someone's filing
+      cabinet. Once you know what each drawer is for, you can find anything.</p>
+      <p>Two words worth knowing, because they appear everywhere:</p>
+    </div>
+    <div>
+      <div class="panel">
+        <h3>A "module" is one file</h3>
+        <p>One <code>.py</code> file holding related code. <code>camera.py</code> is the camera
+        module. When someone says "it's in the camera module", they mean open that file.</p>
+      </div>
+      <div class="panel">
+        <h3>A "package" is one folder of them</h3>
+        <p>A folder of modules that ships and installs as a unit. Ours is called
+        <code>unmscope</code>. Everything the program needs to run lives inside it.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 3 -->
+<section class="slide" data-slide hidden>
+  <p class="eyebrow">The widest view</p>
+  <h2>Three folders side by side</h2>
+  <p class="sub">All under <code>H:\UNM_Lightsheet\</code>. They are deliberately siblings — none is
+  inside another — so it is always obvious which world a file belongs to.</p>
+  <div class="cards">
+    <div class="card">
+      <span class="lab">the original</span>
+      <h3>UNMScope_Source\</h3>
+      <p>The LabVIEW program that runs the microscope today, plus this rig's calibration file.
+      We read from it constantly and <b>never write to it</b>.</p>
+    </div>
+    <div class="card">
+      <span class="lab">a readable copy</span>
+      <h3>VI_Diagrams\</h3>
+      <p>A picture of every page of that program, in the same folder shape. This is what we
+      actually read, because LabVIEW files are drawings, not text.</p>
+    </div>
+    <div class="card lit">
+      <span class="lab">the new program</span>
+      <h3>UNMScope_Python\</h3>
+      <p>Everything we write. The rest of this talk is inside this one folder.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 4 -->
+<section class="slide" data-slide hidden>
+  <p class="eyebrow">One level down</p>
+  <h2>Opening the project folder</h2>
+  <p class="sub">Five folders and five files. Every one has a single job, and nothing lives outside
+  them.</p>
+  <pre class="tree"><b>UNMScope_Python\</b>
+│
+├── <u>src\</u>          <i>the actual program — the only part that gets installed</i>
+├── <u>tests\</u>        <i>automatic checks that prove the program still works</i>
+├── <u>spikes\</u>       <i>throwaway-looking scripts that talk to the real hardware</i>
+├── <u>tools\</u>        <i>small utilities for us, not for the microscope operator</i>
+├── <u>docs\</u>         <i>written record of what was measured and why</i>
+│
+├── <b>README.md</b>       <i>what this project is, in a paragraph</i>
+├── <b>ROADMAP.md</b>      <i>what is done, what is next, what is still undecided</i>
+├── <b>CLAUDE.md</b>       <i>the house rules everyone working here must follow</i>
+├── <b>COMMANDS.md</b>     <i>copy-paste cheat sheet for running things</i>
+└── <b>pyproject.toml</b>  <i>the packing list: what this needs installed to run</i></pre>
+</section>
+
+<!-- 5 -->
+<section class="slide" data-slide hidden>
+  <p class="eyebrow">The five files at the top</p>
+  <h2>Where the project explains itself</h2>
+  <div class="rows">
+    <div class="row"><span class="k">README.md</span><span class="v">The front door. What this
+    project is and how to install it. <b>Read first, once.</b></span></div>
+    <div class="row"><span class="k">ROADMAP.md</span><span class="v">The living plan. Which
+    features are finished, which are half-done, and a list of open questions waiting on a decision
+    or a measurement. <b>The most useful file in the repository.</b></span></div>
+    <div class="row"><span class="k">CLAUDE.md</span><span class="v">The house rules — for example
+    "never state a size from looking at a screenshot, measure it", and "controls that do nothing
+    must look disabled". <b>Rules we kept breaking until we wrote them down.</b></span></div>
+    <div class="row"><span class="k">COMMANDS.md</span><span class="v">A cheat sheet of the exact
+    commands to run the program, the tests, and the comparison tools. So nobody has to remember
+    them.</span></div>
+    <div class="row"><span class="k">pyproject.toml</span><span class="v">A packing list. It names
+    the outside pieces this program needs — the window toolkit, the camera library, the card
+    library — so one command installs all of them.</span></div>
+  </div>
+</section>
+
+<!-- 6 -->
+<section class="slide" data-slide hidden>
+  <p class="eyebrow">Inside src\</p>
+  <h2>Five drawers, stacked in order</h2>
+  <p class="sub">The program proper is <code>src\unmscope\</code>, split into five folders. The rule:
+  each may use the ones below it, <strong>never the ones above</strong>. That is what stops the
+  hardware code from depending on the window.</p>
+  <div class="layers">
+    <div class="lyr top">
+      <span class="nm">gui\</span>
+      <span class="ds"><b>The window.</b> One file per panel — main window, camera settings, the
+      signal viewer, the utilities grid, four dialogs.</span>
+      <span class="ct">12 files<br>6,254 ln</span>
+    </div>
+    <div class="lyr">
+      <span class="nm">analysis\</span>
+      <span class="ds"><b>Image maths.</b> Flattening a stack into views and correcting the tilt
+      from scanning at an angle.</span>
+      <span class="ct">2 files<br>189 ln</span>
+    </div>
+    <div class="lyr">
+      <span class="nm">fileio\</span>
+      <span class="ds"><b>Reading and writing files.</b> Image stacks, and the stage's saved
+      position lists.</span>
+      <span class="ct">3 files<br>386 ln</span>
+    </div>
+    <div class="lyr">
+      <span class="nm">hardware\</span>
+      <span class="ds"><b>The instrument.</b> Timing card, camera, stage, and the maths that decides
+      what voltage each mirror gets.</span>
+      <span class="ct">9 files<br>3,649 ln</span>
+    </div>
+    <div class="lyr">
+      <span class="nm">config\</span>
+      <span class="ds"><b>Numbers describing this rig.</b> Calibrations and file locations —
+      the part that differs between microscopes.</span>
+      <span class="ct">7 files<br>1,332 ln</span>
+    </div>
+  </div>
+</section>
+
+<!-- 7 -->
+<section class="slide" data-slide hidden>
+  <p class="eyebrow">The files themselves</p>
+  <h2>Names you will meet</h2>
+  <div class="two">
+    <div>
+      <div class="panel">
+        <h3>hardware\</h3>
+        <p><code>fpga_trigger</code> · <code>fpga_scope</code> · <code>fake_fpga</code> ·
+        <code>camera</code> · <code>stage</code> · <code>roi</code> · <code>waveform</code> ·
+        <code>louisxiv_waveform</code></p>
+      </div>
+      <div class="panel">
+        <h3>config\</h3>
+        <p><code>calibration</code> · <code>um_per_volt</code> · <code>hw_config</code> ·
+        <code>spim_ini</code> · <code>waveform_config</code> · <code>paths</code></p>
+      </div>
+    </div>
+    <div>
+      <div class="panel">
+        <h3>gui\</h3>
+        <p><code>main_window</code> · <code>scope_view</code> · <code>camera_tab</code> ·
+        <code>utilities_tab</code> · <code>display</code> · <code>calibration_tab</code> ·
+        <code>hw_config_dialog</code> · <code>sample_stage_dialog</code> ·
+        <code>camera_debug_panel</code></p>
+      </div>
+      <div class="panel">
+        <h3>fileio\ and analysis\</h3>
+        <p><code>tiff_stack</code> · <code>stage_locations</code> · <code>projections</code></p>
+      </div>
+    </div>
+  </div>
+  <p class="sub" style="margin-top:22px">Names are meant to be boring and literal. If you want the
+  camera's settings panel, it is in <code>gui\camera_tab.py</code>. Nothing clever.</p>
+</section>
+
+<!-- 8 -->
+<section class="slide" data-slide hidden>
+  <p class="eyebrow">Inside one file</p>
+  <h2>Every file has the same shape</h2>
+  <div class="anat">
+    <pre class="src"><span class="c">"""Camera ROI arithmetic ported from LouisXIV
+(block diagrams in VI_Diagrams, Image Acq/DCAM).
+ROIs are 1-based, all-inclusive, exactly as the
+LabVIEW panel shows them (Left 1 .. Right 2048).
+
+- `DCAM - Coerce ROI.vi`: 1-based -> 0-based;
+  snapped down to the position unit ...
+"""</span>
+
+<span class="k">from</span> dataclasses <span class="k">import</span> dataclass
+
+<b>DEFAULT_POSITION_UNIT = 4</b>
+<span class="s"># the camera's subarray step, in pixels</span>
+
+<span class="k">class</span> <b>Roi</b>:
+    <span class="c">"""1-based, inclusive, as on the panel."""</span>
+    left: int
+    top: int
+
+<span class="k">def</span> <b>coerce_roi</b>(roi, hmax, vmax):
+    <span class="c">"""What the driver would accept."""</span>
+    ...</pre>
+    <ol>
+      <li><b>A long note at the top</b><span>Which part of the old LabVIEW program this came from,
+      and any oddity worth warning about. Often the most valuable text in the file.</span></li>
+      <li><b>What it needs from elsewhere</b><span>The <code>import</code> lines. This is how you
+      see, at a glance, which other files this one depends on.</span></li>
+      <li><b>Fixed numbers, named</b><span>Written in capitals. A number in the code always gets a
+      name and a comment saying where it came from — never a bare digit.</span></li>
+      <li><b>The actual content</b><span>Grouped definitions, each with its own one-line note.
+      Reading only those notes gives you the gist without the maths.</span></li>
+    </ol>
+  </div>
+</section>
+
+<!-- 9 -->
+<section class="slide" data-slide hidden>
+  <p class="eyebrow">Conventions</p>
+  <h2>What a name tells you before you open it</h2>
+  <div class="rows">
+    <div class="row"><span class="k">louisxiv_waveform.py</span><span class="v">The
+    <b>louisxiv_</b> prefix means: this is a direct translation of the old program's own
+    calculation. Change it only if LouisXIV changed.</span></div>
+    <div class="row"><span class="k">fake_fpga.py</span><span class="v"><b>fake_</b> and
+    <b>Simulated</b> mark the stand-in versions used when no hardware is attached.</span></div>
+    <div class="row"><span class="k">test_roi.py</span><span class="v">Anything starting
+    <b>test_</b> is a check, not part of the program. It exists to prove
+    <code>roi.py</code> is right.</span></div>
+    <div class="row"><span class="k">_display_frame()</span><span class="v">A leading
+    <b>underscore</b> means internal — used only inside its own file. Without one, it is meant to
+    be used from elsewhere.</span></div>
+    <div class="row"><span class="k">29c_trigger_up...py</span><span class="v">A leading
+    <b>number</b> means a hardware experiment, kept in the order it was run, like numbered pages
+    in a lab notebook.</span></div>
+  </div>
+</section>
+
+<!-- 10 -->
+<section class="slide" data-slide hidden>
+  <p class="eyebrow">How the pieces connect</p>
+  <h2>Follow one action down</h2>
+  <p class="sub">Pressing <strong>Acquire</strong> walks straight down the drawers. Each file uses
+  the one below it and knows nothing about the one above.</p>
+  <div class="chain">
+    <div class="link"><span class="f">gui\main_window.py</span><span class="d">reads the boxes on
+    screen — exposure, range, how many planes</span></div>
+    <div class="arrow">↓ asks for a movement plan</div>
+    <div class="link"><span class="f">hardware\louisxiv_waveform.py</span><span class="d">works out
+    the sweep, exactly as the old program does</span></div>
+    <div class="arrow">↓ needs to turn microns into volts</div>
+    <div class="link"><span class="f">config\calibration.py</span><span class="d">supplies this
+    rig's calibration numbers</span></div>
+    <div class="arrow">↓ hands the finished plan over</div>
+    <div class="link"><span class="f">hardware\fpga_trigger.py</span><span class="d">loads it onto
+    the card and starts it</span></div>
+    <div class="arrow">↓ images come back</div>
+    <div class="link"><span class="f">fileio\tiff_stack.py</span><span class="d">writes the stack in
+    the old program's format and naming</span></div>
+  </div>
+</section>
+
+<!-- 11 -->
+<section class="slide" data-slide hidden>
+  <p class="eyebrow">tests\</p>
+  <h2>A mirror of the program</h2>
+  <div class="two wide-left">
+    <div>
+      <pre class="tree"><b>src\unmscope\</b>              <b>tests\</b>
+  hardware\roi.py      →    <u>test_roi.py</u>
+  hardware\stage.py    →    <u>test_stage.py</u>
+  gui\camera_tab.py    →    <u>test_camera_tab.py</u>
+  fileio\tiff_stack.py →    <u>test_tiff_stack.py</u>
+  analysis\...         →    <u>test_projections.py</u>
+
+  <i>28 files · 246 checks · about 35 seconds</i></pre>
+    </div>
+    <div class="body">
+      <p>For nearly every file in the program there is a matching file of checks, named the same
+      way with <code>test_</code> in front. If you change <code>roi.py</code>, you look at
+      <code>test_roi.py</code>.</p>
+      <p>A check is simply: <strong>set up a known situation, do the thing, state what the answer
+      must be.</strong> If the answer changes, the check fails and says so.</p>
+      <p>They all run without a microscope, in half a minute, and they run before every save of the
+      work. That is the safety net that makes it reasonable to keep changing this software.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 12 -->
+<section class="slide" data-slide hidden>
+  <p class="eyebrow">spikes\ and tools\</p>
+  <h2>The two folders that are <em>not</em> the program</h2>
+  <div class="two">
+    <div class="panel">
+      <h3>spikes\ — 38 numbered scripts</h3>
+      <p>Each one answers a single question about the real hardware: <em>does this pin actually
+      output five volts? is the trigger really 100 milliseconds?</em> They are numbered in the order
+      they were run and kept forever, like a lab notebook.</p>
+      <p style="margin-top:12px">They are not part of the program and never run automatically.
+      Their value is as evidence — when someone asks "how do we know the laser channel is on that
+      pin", the answer is a numbered script and the measurement it produced.</p>
+    </div>
+    <div class="panel">
+      <h3>tools\ — 3 utilities for us</h3>
+      <p>A live panel for poking at the card by hand, a monitor for the signal stream, and a script
+      that screenshots both the old and new programs and prints how many pixels apart their layouts
+      are.</p>
+      <p style="margin-top:12px">Useful while building the software. Never seen by whoever is using
+      the microscope.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 13 -->
+<section class="slide" data-slide hidden>
+  <p class="eyebrow">docs\</p>
+  <h2>Why a fact is a fact</h2>
+  <div class="two">
+    <div class="body">
+      <p>Fourteen notes recording what was <strong>measured</strong>, as opposed to what was assumed.
+      Each one names the part of the old program it came from and the date it was checked on the
+      instrument.</p>
+      <p>This exists because six months later nobody remembers why a number is 6600 rather than
+      zero — and guessing again is how mistakes get reintroduced.</p>
+    </div>
+    <div>
+      <div class="panel">
+        <h3>Typical entries</h3>
+        <p><code>fpga_io_map.md</code> — which physical connector each signal comes out of, verified
+        with a meter.</p>
+        <p style="margin-top:10px"><code>known_issues.md</code> — traps we have already fallen into,
+        so nobody falls in twice.</p>
+        <p style="margin-top:10px"><code>camera_tab.md</code> — for one panel: what each control
+        does, which LabVIEW page it came from, and a table of how far off our layout is in pixels.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 14 -->
+<section class="slide" data-slide hidden>
+  <p class="eyebrow">While it is running</p>
+  <h2>Where settings actually live</h2>
+  <div class="two">
+    <div class="body">
+      <p>This trips people up, so it is worth being explicit. There are two settings files, and
+      only one of them is ours.</p>
+      <p>The old program's settings file is <strong>read-only input</strong>. On first run we copy
+      it, exactly, into a folder belonging to the user. From then on the new program reads and edits
+      only its own copy.</p>
+      <p>That way you can change something in the new program without any risk of disturbing the
+      software the lab depends on today.</p>
+    </div>
+    <div>
+      <div class="panel">
+        <h3>Read, never written</h3>
+        <p><code>UNMScope_Source\...\SPIMProject.ini</code> — LouisXIV's own settings, including this
+        rig's calibrations.</p>
+      </div>
+      <div class="panel">
+        <h3>Ours to change</h3>
+        <p><code>~\.unmscope\SPIMProject.ini</code> — a copy made on first run, in your user folder.
+        Every setting the new program saves goes here.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 15 -->
+<section class="slide" data-slide hidden>
+  <p class="eyebrow">Practical</p>
+  <h2>"I want to change something — where do I look?"</h2>
+  <div class="rows">
+    <div class="row"><span class="k">a button or a layout</span><span class="v">The matching file in
+    <code>gui\</code>. Panels are one file each, named after the panel.</span></div>
+    <div class="row"><span class="k">how the mirrors move</span><span class="v"><code>hardware\louisxiv_waveform.py</code>
+    — but check the old program first, since it is a translation.</span></div>
+    <div class="row"><span class="k">a calibration number</span><span class="v"><code>config\</code>,
+    and normally through the calibration window rather than by editing code.</span></div>
+    <div class="row"><span class="k">file names or format</span><span class="v"><code>fileio\tiff_stack.py</code>.</span></div>
+    <div class="row"><span class="k">"is this already known?"</span><span class="v"><code>ROADMAP.md</code>
+    for open questions, <code>docs\known_issues.md</code> for traps.</span></div>
+    <div class="row"><span class="k">"how do I run it?"</span><span class="v"><code>COMMANDS.md</code>.</span></div>
+  </div>
+</section>
+
+<!-- 16 -->
+<section class="slide" data-slide hidden>
+  <p class="eyebrow">To take away</p>
+  <h2>Four things about the structure</h2>
+  <ul class="plain">
+    <li><b>The folders are the filing system.</b> Five drawers in the program, plus separate folders
+    for checks, hardware experiments, utilities and written records.</li>
+    <li><b>Dependencies only point downward.</b> The window may use the hardware code; the hardware
+    code knows nothing about the window. That is why either can be worked on alone.</li>
+    <li><b>Names are literal, and they carry meaning.</b> <code>test_</code>, <code>fake_</code>,
+    <code>louisxiv_</code> and a leading underscore each tell you what a file or function is for
+    before you open it.</li>
+    <li><b>Every file says where it came from.</b> The note at the top of each one names the page of
+    the old program it was translated from — which is what makes the translation checkable rather
+    than trusted.</li>
+  </ul>
+  <div class="title-meta" style="margin-top:36px">
+    <span>UNMScope · Python replacement for LouisXIV</span>
+    <span>Chakraborty Lab · UNM</span>
+  </div>
+</section>
+
+</div>
+
+<div class="nav">
+  <span class="where">Slide <b id="cur">1</b> / <span id="tot">16</span></span>
+  <span class="hint">← → arrow keys to navigate</span>
+  <span class="btns">
+    <button id="prev" type="button">Back</button>
+    <button id="next" type="button">Next</button>
+  </span>
+</div>
+
+<script>
+(function () {
+  var slides = Array.prototype.slice.call(document.querySelectorAll('[data-slide]'));
+  var i = 0;
+  var cur = document.getElementById('cur');
+  var tot = document.getElementById('tot');
+  var fill = document.getElementById('fill');
+  var prev = document.getElementById('prev');
+  var next = document.getElementById('next');
+  tot.textContent = slides.length;
+
+  function show(n) {
+    i = Math.max(0, Math.min(slides.length - 1, n));
+    slides.forEach(function (s, k) { s.hidden = (k !== i); });
+    cur.textContent = i + 1;
+    fill.style.width = ((i + 1) / slides.length * 100) + '%';
+    prev.disabled = (i === 0);
+    next.disabled = (i === slides.length - 1);
+    window.scrollTo(0, 0);
+  }
+
+  prev.addEventListener('click', function () { show(i - 1); });
+  next.addEventListener('click', function () { show(i + 1); });
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === ' ') { show(i + 1); e.preventDefault(); }
+    else if (e.key === 'ArrowLeft' || e.key === 'PageUp') { show(i - 1); e.preventDefault(); }
+    else if (e.key === 'Home') { show(0); e.preventDefault(); }
+    else if (e.key === 'End') { show(slides.length - 1); e.preventDefault(); }
+  });
+
+  show(0);
+})();
+</script>

@@ -1,0 +1,529 @@
+<title>UNMScope Field Guide</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<style>
+:root {
+  /* light palette — cool-biased neutrals, teal accent off the 488 nm line */
+  --ground:      #F5F7F9;
+  --surface:     #FFFFFF;
+  --surface-sub: #EDF0F4;
+  --ink:         #141920;
+  --ink-soft:    #57616F;
+  --ink-faint:   #7C8794;
+  --rule:        #DBE0E7;
+  --rule-strong: #C3CAD4;
+  --accent:      #0E757F;   /* the Python port */
+  --accent-soft: #E2F1F2;
+  --reference:   #9A5C06;   /* the LabVIEW original */
+  --reference-soft: #F7EBDA;
+  --shadow: 0 1px 2px rgba(20, 25, 32, .06), 0 8px 24px -12px rgba(20, 25, 32, .18);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground:      #10141A;
+    --surface:     #171C23;
+    --surface-sub: #1E242C;
+    --ink:         #E5EAF1;
+    --ink-soft:    #98A2B1;
+    --ink-faint:   #77828F;
+    --rule:        #262D37;
+    --rule-strong: #38414D;
+    --accent:      #4FC3CB;
+    --accent-soft: #123336;
+    --reference:   #D9A566;
+    --reference-soft: #33260F;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 10px 28px -14px rgba(0,0,0,.7);
+  }
+}
+:root[data-theme="dark"] {
+  --ground:      #10141A;
+  --surface:     #171C23;
+  --surface-sub: #1E242C;
+  --ink:         #E5EAF1;
+  --ink-soft:    #98A2B1;
+  --ink-faint:   #77828F;
+  --rule:        #262D37;
+  --rule-strong: #38414D;
+  --accent:      #4FC3CB;
+  --accent-soft: #123336;
+  --reference:   #D9A566;
+  --reference-soft: #33260F;
+  --shadow: 0 1px 2px rgba(0,0,0,.4), 0 10px 28px -14px rgba(0,0,0,.7);
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  background: var(--ground);
+  color: var(--ink);
+  font-family: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
+  font-size: 16px;
+  line-height: 1.62;
+  -webkit-font-smoothing: antialiased;
+}
+
+.wrap { max-width: 1120px; margin: 0 auto; padding: 0 28px 96px; }
+.col  { max-width: 68ch; }
+
+h1, h2, h3, .eyebrow, .tag, th {
+  font-family: "IBM Plex Sans Condensed", "IBM Plex Sans", sans-serif;
+}
+h1 { font-size: clamp(2.1rem, 4.6vw, 3.1rem); font-weight: 700; line-height: 1.08; letter-spacing: -.015em; margin: 0 0 14px; text-wrap: balance; }
+h2 { font-size: 1.62rem; font-weight: 600; letter-spacing: -.006em; margin: 0 0 6px; text-wrap: balance; }
+h3 { font-size: 1.06rem; font-weight: 600; margin: 0 0 6px; }
+p  { margin: 0 0 16px; }
+a  { color: var(--accent); text-underline-offset: 3px; }
+a:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 3px; }
+
+code, .mono, kbd { font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
+code {
+  font-size: .875em; background: var(--surface-sub); color: var(--ink);
+  padding: .1em .38em; border-radius: 3px; border: 1px solid var(--rule);
+}
+
+.eyebrow {
+  font-size: .74rem; font-weight: 600; letter-spacing: .13em; text-transform: uppercase;
+  color: var(--ink-faint); margin: 0 0 10px;
+}
+
+/* ---- masthead ---- */
+header.masthead { padding: 62px 0 34px; border-bottom: 1px solid var(--rule); margin-bottom: 44px; }
+.lede { font-size: 1.14rem; color: var(--ink-soft); max-width: 62ch; margin-bottom: 26px; }
+.facts { display: flex; flex-wrap: wrap; gap: 10px 30px; padding: 0; margin: 0; list-style: none; }
+.facts li { display: flex; flex-direction: column; gap: 1px; }
+.facts .n { font-family: "IBM Plex Mono", monospace; font-size: 1.22rem; font-weight: 500; font-variant-numeric: tabular-nums; color: var(--ink); }
+.facts .k { font-size: .74rem; letter-spacing: .09em; text-transform: uppercase; color: var(--ink-faint); font-family: "IBM Plex Sans Condensed", sans-serif; }
+
+section { margin-bottom: 58px; }
+section > .col > p:last-child { margin-bottom: 0; }
+
+/* ---- the three trees ---- */
+.trees { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; margin: 26px 0 18px; }
+.tree {
+  background: var(--surface); border: 1px solid var(--rule); border-radius: 6px;
+  padding: 18px 18px 16px; display: flex; flex-direction: column; gap: 9px;
+}
+.tree .tag {
+  align-self: flex-start; font-size: .68rem; font-weight: 700; letter-spacing: .11em; text-transform: uppercase;
+  padding: 3px 8px; border-radius: 3px;
+}
+.tree.ref  { border-top: 3px solid var(--reference); }
+.tree.ref .tag  { background: var(--reference-soft); color: var(--reference); }
+.tree.port { border-top: 3px solid var(--accent); }
+.tree.port .tag { background: var(--accent-soft); color: var(--accent); }
+.tree .path { font-family: "IBM Plex Mono", monospace; font-size: .82rem; color: var(--ink); font-weight: 500; word-break: break-all; }
+.tree p { font-size: .93rem; color: var(--ink-soft); margin: 0; }
+.flow {
+  font-family: "IBM Plex Sans Condensed", sans-serif; font-size: .82rem; color: var(--ink-faint);
+  letter-spacing: .04em; display: flex; align-items: center; gap: 10px; margin-bottom: 6px;
+}
+.flow::before, .flow::after { content: ""; height: 1px; background: var(--rule); flex: 1; }
+
+/* ---- layer stack ---- */
+.stack { border: 1px solid var(--rule); border-radius: 6px; overflow: hidden; margin: 24px 0 14px; background: var(--surface); }
+.layer { display: grid; grid-template-columns: 152px 1fr 92px; gap: 18px; align-items: baseline; padding: 15px 18px; border-bottom: 1px solid var(--rule); }
+.layer:last-child { border-bottom: 0; }
+.layer.gui { background: var(--accent-soft); }
+.layer .name { font-family: "IBM Plex Mono", monospace; font-weight: 500; font-size: .93rem; color: var(--ink); }
+.layer .what { font-size: .93rem; color: var(--ink-soft); }
+.layer .what b { color: var(--ink); font-weight: 500; }
+.layer .size { font-family: "IBM Plex Mono", monospace; font-size: .8rem; color: var(--ink-faint); font-variant-numeric: tabular-nums; text-align: right; }
+@media (max-width: 640px) {
+  .layer { grid-template-columns: 1fr; gap: 3px; }
+  .layer .size { text-align: left; }
+}
+.note { font-size: .9rem; color: var(--ink-faint); }
+
+/* ---- device table ---- */
+.scroller { overflow-x: auto; margin: 22px 0 12px; border: 1px solid var(--rule); border-radius: 6px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; min-width: 560px; }
+th, td { text-align: left; padding: 11px 16px; border-bottom: 1px solid var(--rule); font-size: .91rem; vertical-align: top; }
+th { font-size: .72rem; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-faint); font-weight: 600; background: var(--surface-sub); }
+tr:last-child td { border-bottom: 0; }
+td.mono { font-family: "IBM Plex Mono", monospace; font-size: .84rem; }
+td .sim { color: var(--accent); }
+td .real { color: var(--reference); }
+
+/* ---- ordered procedure ---- */
+ol.steps { list-style: none; counter-reset: s; padding: 0; margin: 24px 0 0; display: flex; flex-direction: column; gap: 2px; }
+ol.steps li {
+  counter-increment: s; display: grid; grid-template-columns: 34px 1fr; gap: 16px;
+  padding: 14px 0; border-bottom: 1px solid var(--rule);
+}
+ol.steps li:last-child { border-bottom: 0; }
+ol.steps li::before {
+  content: counter(s, decimal-leading-zero);
+  font-family: "IBM Plex Mono", monospace; font-size: .78rem; font-weight: 500;
+  color: var(--accent); padding-top: 3px;
+}
+ol.steps h3 { margin-bottom: 3px; }
+ol.steps p { margin: 0; font-size: .95rem; color: var(--ink-soft); }
+
+/* ---- verification tiers ---- */
+.tiers { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 16px; margin-top: 24px; }
+.tier { background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 18px; }
+.tier .count { font-family: "IBM Plex Mono", monospace; font-size: 1.5rem; font-weight: 500; color: var(--ink); font-variant-numeric: tabular-nums; }
+.tier h3 { margin: 2px 0 7px; }
+.tier p { font-size: .92rem; color: var(--ink-soft); margin: 0; }
+.tier .needs { display: inline-block; margin-top: 12px; font-size: .72rem; letter-spacing: .08em; text-transform: uppercase;
+  font-family: "IBM Plex Sans Condensed", sans-serif; font-weight: 600; padding: 3px 8px; border-radius: 3px; }
+.needs.no  { background: var(--accent-soft); color: var(--accent); }
+.needs.yes { background: var(--reference-soft); color: var(--reference); }
+
+/* ---- folder map ---- */
+pre.map {
+  font-family: "IBM Plex Mono", monospace; font-size: .82rem; line-height: 1.75;
+  background: var(--surface); border: 1px solid var(--rule); border-radius: 6px;
+  padding: 20px 22px; overflow-x: auto; margin: 24px 0 12px; color: var(--ink-soft);
+}
+pre.map b { color: var(--ink); font-weight: 500; }
+pre.map i { color: var(--ink-faint); font-style: normal; }
+
+/* ---- rules-of-the-road callout ---- */
+.rules { border-left: 3px solid var(--reference); background: var(--surface); padding: 4px 22px; margin-top: 24px; border-radius: 0 6px 6px 0; border-top: 1px solid var(--rule); border-right: 1px solid var(--rule); border-bottom: 1px solid var(--rule); }
+.rules dt { font-weight: 600; margin-top: 16px; font-size: .97rem; }
+.rules dd { margin: 3px 0 0; color: var(--ink-soft); font-size: .94rem; }
+.rules dl { margin: 4px 0 20px; }
+
+/* ---- run strip ---- */
+.run { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; margin-top: 22px; }
+.cmd { background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 15px 17px; }
+.cmd code { display: block; background: none; border: 0; padding: 0; font-size: .86rem; color: var(--accent); font-weight: 500; margin-bottom: 5px; word-break: break-all; }
+.cmd span { font-size: .88rem; color: var(--ink-soft); }
+
+footer { border-top: 1px solid var(--rule); padding-top: 20px; color: var(--ink-faint); font-size: .86rem; }
+</style>
+
+<div class="wrap">
+
+<header class="masthead">
+  <p class="eyebrow">Orientation · UNM light-sheet microscope</p>
+  <h1>UNMScope Field Guide</h1>
+  <p class="lede">
+    UNMScope is the Python replacement for <em>LouisXIV</em>, the LabVIEW program that has run
+    this microscope for years. It is written as a <strong>port, not a rewrite</strong>: the LabVIEW
+    source stays the authority on what every number means, and the Python has to reproduce it.
+    This page is how the code is laid out and how a feature gets from one to the other.
+  </p>
+  <ul class="facts">
+    <li><span class="n">36</span><span class="k">source modules</span></li>
+    <li><span class="n">11,810</span><span class="k">lines of package code</span></li>
+    <li><span class="n">246</span><span class="k">automated tests</span></li>
+    <li><span class="n">38</span><span class="k">hardware spikes</span></li>
+    <li><span class="n">14</span><span class="k">reference docs</span></li>
+  </ul>
+</header>
+
+<section>
+  <div class="col">
+    <p class="eyebrow">Where things live</p>
+    <h2>Three sibling trees, one direction of travel</h2>
+    <p>
+      Everything sits under <code>H:\UNM_Lightsheet\</code> as three folders that never nest inside
+      one another. Information flows left to right and never back: nothing in Python writes into
+      the LabVIEW tree.
+    </p>
+  </div>
+
+  <p class="flow">reference&nbsp;&nbsp;→&nbsp;&nbsp;readable form&nbsp;&nbsp;→&nbsp;&nbsp;the port</p>
+  <div class="trees">
+    <div class="tree ref">
+      <span class="tag">Authority</span>
+      <span class="path">UNMScope_Source\</span>
+      <p>The real LouisXIV LabVIEW project — thousands of <code>.vi</code> files, the compiled FPGA
+      bitfile the card actually runs, and <code>SPIMProject.ini</code> with this rig's calibrations.
+      Read-only, and still the software the lab uses.</p>
+    </div>
+    <div class="tree ref">
+      <span class="tag">Readable form</span>
+      <span class="path">VI_Diagrams\</span>
+      <p>Every VI's block diagram and front panel exported to PNG, mirroring the source tree.
+      This is how the logic gets read without opening LabVIEW — including hidden frames, which
+      expose every case of a case structure and every button's event handler.</p>
+    </div>
+    <div class="tree port">
+      <span class="tag">The port</span>
+      <span class="path">UNMScope_Python\</span>
+      <p>The Python package, its tests, the hardware verification scripts, and the docs that
+      record which VI each piece of Python came from. This is the only tree that changes.</p>
+    </div>
+  </div>
+  <p class="note col">
+    Teaching point: a student can read the entire instrument's logic from the PNG exports without
+    a LabVIEW license. That indirection is what made the port tractable.
+  </p>
+</section>
+
+<section>
+  <div class="col">
+    <p class="eyebrow">Package architecture</p>
+    <h2>Five layers, dependencies pointing one way</h2>
+    <p>
+      Inside <code>src/unmscope/</code> the package is layered so that the parts that touch hardware
+      know nothing about the window, and the window knows nothing about registers. Read it bottom-up:
+      each layer may use the ones below it, never the ones above.
+    </p>
+  </div>
+
+  <div class="stack">
+    <div class="layer gui">
+      <span class="name">gui/</span>
+      <span class="what"><b>Everything the operator sees.</b> The main window plus one module per
+      panel — camera settings, the oscilloscope-style scope view, the utilities grid, the stage and
+      config dialogs. Laid out to match the LabVIEW panels pixel for pixel.</span>
+      <span class="size">12 files<br>6,254 ln</span>
+    </div>
+    <div class="layer">
+      <span class="name">analysis/</span>
+      <span class="what"><b>Image math.</b> Maximum-intensity projections and the deskew that
+      un-shears a stack acquired at the 45° stage angle.</span>
+      <span class="size">2 files<br>189 ln</span>
+    </div>
+    <div class="layer">
+      <span class="name">fileio/</span>
+      <span class="what"><b>Files on disk.</b> OME-TIFF stack writing in LouisXIV's naming scheme,
+      and its tab-delimited stage location files, byte-compatible in both directions.</span>
+      <span class="size">3 files<br>386 ln</span>
+    </div>
+    <div class="layer">
+      <span class="name">hardware/</span>
+      <span class="what"><b>The instrument.</b> FPGA trigger engine and its AI scope stream, the
+      camera, the stage, the waveform builders that compute what the galvos and piezo actually do.</span>
+      <span class="size">9 files<br>3,649 ln</span>
+    </div>
+    <div class="layer">
+      <span class="name">config/</span>
+      <span class="what"><b>Numbers that describe this rig.</b> µm-per-volt calibrations, hardware
+      config, and where files live. Reads LouisXIV's ini; writes only UNMScope's own copy.</span>
+      <span class="size">7 files<br>1,332 ln</span>
+    </div>
+  </div>
+  <p class="note col">
+    The GUI layer is half the codebase because matching a twenty-year-old front panel is genuinely
+    most of the work — the physics underneath it is comparatively small.
+  </p>
+</section>
+
+<section>
+  <div class="col">
+    <p class="eyebrow">The pattern that matters most</p>
+    <h2>Every device has a stand-in</h2>
+    <p>
+      This is the single design decision worth explaining first. Each piece of hardware is defined as
+      an abstract interface, and then implemented <em>twice</em> — once against the real driver, once
+      as a simulation. The GUI is written against the interface, so it cannot tell them apart.
+    </p>
+  </div>
+
+  <div class="scroller">
+    <table>
+      <thead>
+        <tr><th>Interface</th><th>Simulated</th><th>Real hardware</th><th>Talks to</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="mono">Camera</td>
+          <td class="mono"><span class="sim">SimulatedCamera</span></td>
+          <td class="mono"><span class="real">OrcaFlash4Camera</span></td>
+          <td>Hamamatsu DCAM via Micro-Manager</td>
+        </tr>
+        <tr>
+          <td class="mono">XYZStage</td>
+          <td class="mono"><span class="sim">SimulatedMP285</span></td>
+          <td class="mono"><span class="real">MP285Serial</span></td>
+          <td>Sutter MP-285 over serial</td>
+        </tr>
+        <tr>
+          <td class="mono">RotationStage</td>
+          <td class="mono"><span class="sim">SimulatedRotationStage</span></td>
+          <td class="mono">—</td>
+          <td>PI U-651 (not fitted)</td>
+        </tr>
+        <tr>
+          <td class="mono">FpgaTriggerController</td>
+          <td class="mono"><span class="sim">FakeFpgaTriggerController</span></td>
+          <td class="mono"><span class="real">FpgaTriggerController</span></td>
+          <td>PCIe-7852R via NI-RIO</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="note col">
+    Three consequences worth spelling out for students: the whole test suite runs on a laptop with no
+    microscope attached; a bug can be reproduced without booking instrument time; and there is a
+    genuine <em>simulate-on-FPGA</em> mode — simulated camera, real card, analog outputs clamped to
+    zero — for testing timing against hardware without moving a single galvo.
+  </p>
+</section>
+
+<section>
+  <div class="col">
+    <p class="eyebrow">Method</p>
+    <h2>How one feature gets ported</h2>
+    <p>
+      The same seven steps every time. The rule underneath them is that LabVIEW is the reference:
+      if LouisXIV already computes something, the job is to read what it computes, not to re-derive it
+      from physics. That rule exists because re-deriving it went wrong once — a deskew shift direction
+      was inferred from geometry instead of read from the VI, and it was wrong.
+    </p>
+  </div>
+
+  <ol class="steps">
+    <li>
+      <h3>Find the VI and read its diagram</h3>
+      <p>Locate the feature in <code>VI_Diagrams\</code>, including hidden case frames when the logic
+      hides inside a case structure or an event handler.</p>
+    </li>
+    <li>
+      <h3>Transcribe the math verbatim</h3>
+      <p>Port the formula as the VI computes it, wiring node by wiring node, with a comment naming the
+      VI it came from. Unit conversions and rounding modes included — LabVIEW rounds half-to-even.</p>
+    </li>
+    <li>
+      <h3>Measure the panel, don't eyeball it</h3>
+      <p>Widget geometry comes from pixel-scanning the rendered LabVIEW panel with PIL, then placing Qt
+      widgets at the measured coordinates. Layouts are checked with a reference-versus-ours delta table.</p>
+    </li>
+    <li>
+      <h3>Wire it to the interface, not the driver</h3>
+      <p>The panel talks to the abstract device, so it works against the simulation from the first run.</p>
+    </li>
+    <li>
+      <h3>Test against the fakes</h3>
+      <p>Unit tests for the math, offscreen-Qt tests for the panel. These run in about 35 seconds and
+      gate every commit.</p>
+    </li>
+    <li>
+      <h3>Verify on the real card</h3>
+      <p>A numbered script in <code>spikes/</code> drives the actual hardware and, where it matters,
+      the result is confirmed on an oscilloscope or a multimeter at the breakout box.</p>
+    </li>
+    <li>
+      <h3>Write down what was measured</h3>
+      <p>A file in <code>docs/</code> records the VI-to-Python mapping, the measured layout table, and
+      explicitly which details are still assumed rather than verified.</p>
+    </li>
+  </ol>
+</section>
+
+<section>
+  <div class="col">
+    <p class="eyebrow">Verification</p>
+    <h2>Three tiers of confidence</h2>
+    <p>
+      Not everything can be proven the same way. Keeping the tiers distinct is what stops an untested
+      assumption from being described as a verified fact.
+    </p>
+  </div>
+
+  <div class="tiers">
+    <div class="tier">
+      <span class="count">246</span>
+      <h3>Automated tests</h3>
+      <p>Physics, file formats, ROI arithmetic, and every panel built offscreen. Prove the code does
+      what we think it does.</p>
+      <span class="needs no">No hardware</span>
+    </div>
+    <div class="tier">
+      <span class="count">38</span>
+      <h3>Hardware spikes</h3>
+      <p>Standalone scripts run against the real FPGA and camera — trigger timing, DMA packing, analog
+      output at the pin. Prove the hardware agrees.</p>
+      <span class="needs yes">Real rig</span>
+    </div>
+    <div class="tier">
+      <span class="count">14</span>
+      <h3>Reference docs</h3>
+      <p>The measured pinout, the known issues, the VI mappings. Prove <em>why</em> a number is what it
+      is, months later.</p>
+      <span class="needs no">Read anywhere</span>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="col">
+    <p class="eyebrow">Repository map</p>
+    <h2>What is in the box</h2>
+  </div>
+  <pre class="map"><b>UNMScope_Python\</b>
+├── <b>src/unmscope/</b>          <i>the installable package</i>
+│   ├── <b>config/</b>            <i>calibration · hw_config · paths · spim_ini · um_per_volt · waveform_config</i>
+│   ├── <b>hardware/</b>          <i>fpga_trigger · fpga_scope · fake_fpga · camera · stage · waveform · louisxiv_waveform · roi</i>
+│   ├── <b>fileio/</b>            <i>tiff_stack · stage_locations</i>
+│   ├── <b>analysis/</b>          <i>projections (MIP + deskew)</i>
+│   └── <b>gui/</b>               <i>main_window · scope_view · camera_tab · utilities_tab · display · 5 panels</i>
+├── <b>tests/</b>                 <i>28 files, 246 tests — run with no hardware present</i>
+├── <b>spikes/</b>                <i>38 numbered scripts that drive the real card</i>
+├── <b>tools/</b>                 <i>live FPGA panel · scope monitor · LabVIEW pixel-compare</i>
+├── <b>docs/</b>                  <i>measured pinouts, VI mappings, known issues</i>
+├── <b>ROADMAP.md</b>             <i>what is done, what is next, open questions</i>
+└── <b>CLAUDE.md</b>              <i>the working agreements below</i></pre>
+</section>
+
+<section>
+  <div class="col">
+    <p class="eyebrow">Working agreements</p>
+    <h2>Four rules that shape every commit</h2>
+    <p>These live in <code>CLAUDE.md</code> and are the part most worth repeating to a new student.</p>
+  </div>
+  <div class="rules">
+    <dl>
+      <dt>LabVIEW is the reference.</dt>
+      <dd>Port what the VI computes. Do not re-derive it, do not auto-detect it, do not improve it
+      before it matches.</dd>
+
+      <dt>Never claim a layout from looking at a screenshot.</dt>
+      <dd>Downscaled images have produced wrong answers repeatedly here. Measure with pixel sampling
+      and publish the delta table.</dd>
+
+      <dt>Unwired controls stay visibly greyed.</dt>
+      <dd>A control that looks functional but does nothing is worse than a missing one. Honesty about
+      what is real is a design rule, not a nicety.</dd>
+
+      <dt>The port is a cleanup, not a copy.</dt>
+      <dd>LouisXIV accumulated two decades of unused controls. Match what is worth keeping; drop the
+      rest deliberately, and record the decision so it does not creep back.</dd>
+    </dl>
+  </div>
+</section>
+
+<section>
+  <div class="col">
+    <p class="eyebrow">Running it</p>
+    <h2>From a clean machine</h2>
+    <p>
+      A rig that drives the microscope needs the free NI-RIO driver and Hamamatsu's DCAM — but
+      <em>not</em> LabVIEW, which is only needed to compile the FPGA bitfile in the first place.
+      A laptop needs neither: the simulated backends and the full test suite run on any Python 3.11.
+    </p>
+  </div>
+  <div class="run">
+    <div class="cmd">
+      <code>pip install -e ".[dev]"</code>
+      <span>Installs the package and its test tooling.</span>
+    </div>
+    <div class="cmd">
+      <code>python -m unmscope.gui</code>
+      <span>Launches the window. Pick <em>Simulated</em> to run with no instrument.</span>
+    </div>
+    <div class="cmd">
+      <code>python -m pytest tests -q</code>
+      <span>All 246 tests, about 35 seconds, no hardware required.</span>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <p>
+    Instrument constants a student will meet early: the FPGA counts time in <strong>25 ns ticks</strong>
+    (40 MHz); analog channels are <strong>±10 V over 16 bits</strong>, or 3276.7 counts per volt; the
+    camera trigger on <strong>DIO4</strong> was measured at 100.000 ms; the Orca's 6.5 µm pixels at 30×
+    give <strong>0.2167 µm</strong> at the sample; and stacks are acquired with the stage at
+    <strong>45°</strong>, which is why they need deskewing.
+  </p>
+</footer>
+
+</div>

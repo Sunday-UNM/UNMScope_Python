@@ -70,10 +70,14 @@ Linear Ramp.vi`, `HHMI - SPIM Calc AOTF delay.vi`).
 
 - `python -u spikes/32_aotf_registers_on_scope.py` — the register-level
   proof, FPGA only.
-- A real check of the analog output needs a meter or a BNC loopback from
-  the channel's AO pin into AI0: the FPGA Scope's AI0 column would then
-  show the level at 10 µs resolution. Not done yet.
-- Not measured: the physical volts-per-count on the AOTF AO pins (assumed
-  the same ±10 V / 16-bit DAC as the galvo channels), and any per-channel
-  power calibration (LouisXIV can load an "AOTF power cal" V-vs-mW table;
-  the GUI uses the linear percent map).
+- **Physically confirmed on the pin (2026-09-04):** AOTF ch 2 -> AO7,
+  metered with a BNC on that channel while the software stepped it
+  0 / 1 / 2.5 / 5 V. The voltage tracked on the instrument, register and
+  FPGA `AOTF ch out (V)` indicator agreeing at each step. This is the first
+  AOTF (and first analog) output verified at the pin, not just internally;
+  the ±10 V / 16-bit DAC scale (3277 counts/V) is now confirmed for AO7.
+  ch 0/1/3 (AO5/AO6/AO3) were not on the meter but are register-identical.
+  NB a *steady* small level is easy to miss on a meter — step it (a moving
+  reading is unmistakable) rather than holding a fixed DC value.
+- Not measured: per-channel power calibration (LouisXIV can load an "AOTF
+  power cal" V-vs-mW table; the GUI uses the linear percent map).

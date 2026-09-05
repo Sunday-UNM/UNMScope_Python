@@ -44,7 +44,7 @@ import time
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import Qt, QTimer, QObject, Signal, QRect
+from PySide6.QtCore import Qt, QTimer, QObject, Signal, QRect, QPoint
 from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QFont
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox,
@@ -52,7 +52,7 @@ from PySide6.QtWidgets import (
     QTextEdit, QMessageBox, QSizePolicy, QCheckBox, QTabWidget, QSlider,
     QLineEdit, QTableWidget, QTableWidgetItem, QHeaderView, QProgressBar,
     QSplitter, QRadioButton, QButtonGroup, QToolButton, QScrollArea, QFrame,
-    QApplication, QFileDialog,
+    QApplication, QFileDialog, QToolTip,
 )
 
 from unmscope.hardware.camera import Camera, OrcaFlash4Camera, SimulatedCamera, other_camera_holders
@@ -106,6 +106,8 @@ QGroupBox::title {{
     subcontrol-origin: margin; left: 8px; padding: 0 4px; background: {PANEL_BG};
 }}
 QPushButton {{ background-color: {WHITE_BG}; border: 1px solid {BORDER}; padding: 3px 8px; }}
+QPushButton:hover:enabled {{ background-color: #f4f4ff; }}
+QPushButton:pressed {{ background-color: #c8c8e8; border: 1px solid #5a5a9a; padding: 4px 7px 2px 9px; }}
 QPushButton:disabled {{ color: #999; background-color: #eee; }}
 QSlider::groove:horizontal {{ height: 5px; background: #bbb; border-radius: 2px; }}
 QSlider::sub-page:horizontal {{ background: #2f6fdb; border-radius: 2px; }}
@@ -1203,9 +1205,22 @@ class MainWindow(QMainWindow):
 
     def _on_calc_projections(self):
         stack = self.acquired_stack()
+        btn = self.calc_projections_btn
         if stack is None:
             self._log("Calc: no Z-stack in memory (a completed Z stack is needed; Continuous runs are not retained).")
+            QToolTip.showText(btn.mapToGlobal(QPoint(0, -34)),
+                              "No Z-stack in memory: acquire a Z stack first.", btn)
             return
+        btn.setText("Calc…")            # visible while the projections compute
+        btn.setEnabled(False)
+        QApplication.processEvents()
+        try:
+            self._calc_projections(stack)
+        finally:
+            btn.setText("Calc")
+            btn.setEnabled(True)
+
+    def _calc_projections(self, stack):
         cal = self.calibration
         # The per-slice Sample Piezo positions LouisXIV reads back from each
         # image's Position cluster: Scan Setup start, stepping by the interval

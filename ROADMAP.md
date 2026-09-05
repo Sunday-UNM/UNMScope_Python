@@ -621,3 +621,39 @@ below is being implemented until the user picks.
     Config, Imagine Optics). Re-measure the grid rows after the removal
     (keep LouisXIV's order and button size; close the gaps). Keep
     `load_stack_from_file` only if the Calc path (item 18) still wants it.
+
+## Code cleanup pass (2026-09-05, adversarially-verified audit)
+
+A three-lens audit (dead code / duplication / stale text) found 84 confirmed
+issues (each independently re-verified by a second agent against the actual
+source before being trusted); commits `4a23173` `fdb0090` `2665f39` `6f574bd`
+applied the highest-value, lowest-risk subset -- 246 tests pass after each.
+
+**Done:** all confirmed dead code (unused imports, zero-caller functions,
+write-only attributes); one `paths.ensure_user_copy()` replacing four
+near-identical "copy LouisXIV's ini on first use" bodies; one
+`paths.LOUISXIV_ROOT`/`LOUISXIV_SUPPORT_DIR` replacing three hardcoded
+copies of the install path; `waveform.dither_block`/`assemble_scan` shared
+between the two waveform builders; `main_window._render`/`_bordered_panel`
+replacing two duplicated call sites each; the module docstrings/comments
+that had gone stale (main_window.py's header, CLAUDE.md's cleanup record,
+the um/V calibration docs, fpga_trigger.py's tail).
+
+**Deferred (in the audit's report, not applied -- lower value or higher
+risk for the size of the change):**
+- A shared `gui/widgets.py` (`make_label`/`make_button`/`make_spin`/
+  `make_readonly`/`bring_to_front`/`page_rect`) to de-duplicate the six
+  GUI panel modules' near-identical constructor helpers -- well specified
+  in the audit but touches 5-6 files and dozens of call sites; do as its
+  own reviewed pass, not mixed into other work.
+- Merging `spim_ini.RotationStageSettings` into `hw_config.py`'s copy of
+  the same `[Rotation Stage (PI U651) Settings]` section (two writers of
+  one section today) -- touches a test's code, not just its bytes.
+  Merging `spim_ini`'s bool/float ini codec into `hw_config.parse_value`/
+  `format_value`, and `calibration_tab.format_value`'s NaN/Inf spelling
+  into `um_per_volt.format_ini_double`'s -- both small, low priority.
+  Palette hex constants named differently per module (`#dddddd` etc.) --
+  cosmetic, skip unless a module using them is touched anyway.
+- ~30 remaining stale-text findings (mostly docs/*.md session-log-style
+  files and ROADMAP.md's own "Phase 1" framing) -- lower risk left as is;
+  fix opportunistically when touching those files.

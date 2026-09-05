@@ -65,6 +65,7 @@ from unmscope.analysis.projections import DEFAULT_STAGE_ANGLE_DEG, stack_project
 from unmscope.fileio.tiff_stack import save_tiff_stack, stack_path, write_acq_info
 from unmscope.gui.scope_view import FpgaScopePanel
 from unmscope.gui.camera_tab import CameraTab
+from unmscope.gui.display import FrameAverager, display_range, render_frame
 from unmscope.gui.utilities_tab import UtilitiesTab
 from unmscope.config.waveform_config import AxisSettings, WaveformConfig
 from unmscope.fileio.tiff_stack import read_tiff_stack
@@ -237,6 +238,9 @@ class MainWindow(QMainWindow):
         # dropped before they reach here (see _poll_camera_for_frame).
         self._stack_frames: list | None = None
         self._last_frame = None                  # newest displayed frame, for 'Save Image'
+        self._frame_averager = FrameAverager(1)  # Images tab 'Frames to Avg'
+        self._last_shown_frame = None
+        self._last_shown_label = None
         self._last_projections: dict | None = None
         # Saving, the LouisXIV way: a data folder chosen once per session
         # (Prompt for Save Path.vi), and inside it one 'Cell<N>' folder per
@@ -726,11 +730,22 @@ class MainWindow(QMainWindow):
         outer.setContentsMargins(4, 4, 4, 2)
         outer.setSpacing(3)
 
-        # Cleanup 2026-09-05 (user's call): LouisXIV's tool strip, Max Counts
-        # and display-option panels were laid out here but never wired, so
-        # they are gone until something real needs them; the canvas gets the
-        # width. The (wired) Save Image button moved under the canvas.
-        outer.addWidget(self._build_image_display(), stretch=1)
+        # Real panel layout: narrow tool strip | bounded scrollable image |
+        # narrow display-options strip (see SPIM MAINp.png's Images tab).
+        # Restored + wired on the user's call (2026-09-05): the display
+        # controls drive the pipeline in unmscope.gui.display; the drawing
+        # tools and the camera selectors stay greyed until they do something.
+        image_row = QHBoxLayout()
+        image_row.setSpacing(6)
+        image_row.addWidget(self._build_image_left_toolbar())
+        image_row.addWidget(self._build_image_display(), stretch=1)
+        # The real panel reserves a 16px vertical scrollbar gutter to the
+        # right of the canvas. We don't draw one, but the space still has
+        # to be spent or our canvas comes out wider than the reference.
+        image_row.addSpacing(16)
+        image_row.addWidget(self._build_max_counts_panel())
+        image_row.addWidget(self._build_display_options_panel())
+        outer.addLayout(image_row, stretch=1)
 
         # Frame counter/info live BELOW the canvas, in the thin strip the
         # real panel puts there -- they used to sit ABOVE it, which cost the
@@ -749,16 +764,222 @@ class MainWindow(QMainWindow):
         self.frame_counter_label = QLabel("0")
         self.frame_counter_label.setStyleSheet("font-weight: bold; color: #2a7;")
         status_strip.addWidget(self.frame_counter_label)
-        self.save_image_btn = QPushButton("\U0001F4BE Image")
-        self.save_image_btn.setToolTip("Save the displayed frame as a TIFF")
-        self.save_image_btn.clicked.connect(self._on_save_image)
-        status_strip.addWidget(self.save_image_btn)
         status_strip.addSpacing(12)
         self.frame_info_label = QLabel("-")
         status_strip.addWidget(self.frame_info_label)
         status_strip.addStretch(1)
         outer.addWidget(status_holder)
         return tab
+
+    def _build_image_left_toolbar(self) -> QWidget:
+        col_widget = QWidget()
+        col_widget.setFixedWidth(80)  # measured off the real panel
+        col = QVBoxLayout(col_widget)
+        col.setContentsMargins(2, 0, 2, 0)
+        col.setSpacing(2)
+
+        self.img_tool_group = QButtonGroup(self)
+        tool_specs = [
+            ("zoom", "\U0001F50D"), ("pan", "\u270b"), ("crosshair", "\u2795"),
+            ("line", "\u2571"), ("roi", "\u25ad"),
+        ]
+        for name, glyph in tool_specs:
+            btn = QToolButton()
+            btn.setText(glyph)
+            btn.setCheckable(True)
+            btn.setFixedSize(28, 28)
+            self.img_tool_group.addButton(btn)
+            col.addWidget(btn)
+            setattr(self, f"img_tool_{name}_btn", btn)
+        self.img_tool_zoom_btn.setChecked(True)
+
+        col.addSpacing(10)
+        self.cam_select_combo = QComboBox()
+        self.cam_select_combo.addItem("Cam 1")
+        col.addWidget(self.cam_select_combo)
+
+        col.addSpacing(10)
+        self.save_image_btn = QPushButton("\U0001F4BE Image")
+        self.save_image_btn.setToolTip("Save the displayed frame as a TIFF")
+        self.save_image_btn.clicked.connect(self._on_save_image)
+        col.addWidget(self.save_image_btn)
+
+        col.addSpacing(10)
+        self.cam_pan_btn = QPushButton("\u2725 Cam 1")
+        col.addWidget(self.cam_pan_btn)
+
+        col.addStretch(1)
+
+        # Not wired: the drawing tools (profiles do not exist yet) and the
+        # camera selectors (one camera).
+        for w in (self.img_tool_zoom_btn, self.img_tool_pan_btn,
+                  self.img_tool_crosshair_btn, self.img_tool_line_btn,
+                  self.img_tool_roi_btn, self.cam_select_combo, self.cam_pan_btn):
+            w.setEnabled(False)
+        return col_widget
+
+    def _build_max_counts_panel(self) -> QWidget:
+        # A SEPARATE bordered sub-panel from display-options below --
+        # confirmed by pixel-sampling the real front panel: there's a real
+        # ~14px gap and each side has its own 1px border the full panel
+        # height. 123px width measured off the real panel.
+        panel = QFrame()
+        panel.setObjectName("maxCountsPanel")
+        panel.setFixedWidth(123)
+        panel.setStyleSheet(f"QFrame#maxCountsPanel {{ border: 1px solid {BORDER}; background-color: {GROUP_BG}; }}")
+        col = QVBoxLayout(panel)
+        col.setContentsMargins(6, 6, 6, 6)
+        col.addStretch(2)  # content sits in the lower ~2/3, not top-anchored
+
+        # "Bright max" of LouisXIV's Scale = "By constant" (Given Range 0..Max
+        # Counts); used when Scale to Counts is on.
+        col.addWidget(QLabel("Max Counts"))
+        self.max_counts_spin = QSpinBox()
+        self.max_counts_spin.setRange(1, 65535)
+        self.max_counts_spin.setValue(4000)
+        col.addWidget(self.max_counts_spin)
+        self.max_counts_slider = QSlider(Qt.Horizontal)
+        self.max_counts_slider.setRange(1, 65535)
+        self.max_counts_slider.setValue(4000)
+        col.addWidget(self.max_counts_slider)
+        self.max_counts_spin.valueChanged.connect(self._on_max_counts_spin)
+        self.max_counts_slider.valueChanged.connect(self._on_max_counts_slider)
+
+        col.addSpacing(4)
+        col.addWidget(QLabel("Frames to Avg"))
+        self.frames_to_avg_spin = QSpinBox()
+        self.frames_to_avg_spin.setRange(1, 100)
+        self.frames_to_avg_spin.setValue(1)
+        self.frames_to_avg_spin.valueChanged.connect(self._on_frames_to_avg)
+        col.addWidget(self.frames_to_avg_spin)
+
+        col.addSpacing(4)
+        # Indicator: the max count of the last completed stack (LouisXIV
+        # computes it in its "calc stack max" thread).
+        col.addWidget(QLabel("Stack Max"))
+        self.stack_max_spin = QSpinBox()
+        self.stack_max_spin.setRange(0, 65535)
+        self.stack_max_spin.setValue(0)
+        self.stack_max_spin.setReadOnly(True)
+        self.stack_max_spin.setButtonSymbols(QSpinBox.NoButtons)
+        col.addWidget(self.stack_max_spin)
+        self.stack_max_slider = QSlider(Qt.Horizontal)
+        self.stack_max_slider.setRange(0, 65535)
+        self.stack_max_slider.setEnabled(False)
+        col.addWidget(self.stack_max_slider)
+        col.addStretch(1)
+        return panel
+
+    def _build_display_options_panel(self) -> QWidget:
+        # The other sub-panel -- 214px, its own border, top-anchored
+        # content with Text Info Overlay pinned to the bottom.
+        panel = QFrame()
+        panel.setObjectName("displayOptionsPanel")
+        panel.setFixedWidth(214)
+        panel.setStyleSheet(f"QFrame#displayOptionsPanel {{ border: 1px solid {BORDER}; background-color: {GROUP_BG}; }}")
+        col = QVBoxLayout(panel)
+        col.setContentsMargins(8, 8, 8, 8)
+
+        # "Pallete Color" -> IMAQ palette: Gray / Gradient / Rainbow
+        palette_row = QHBoxLayout()
+        palette_row.addWidget(QLabel("Pallete Color"))
+        palette_col = QVBoxLayout()
+        palette_col.setSpacing(0)
+        self.palette_group = QButtonGroup(self)
+        self.palette_gray_radio = QRadioButton("Gray")
+        self.palette_gradient_radio = QRadioButton("Gradient")
+        self.palette_rainbow_radio = QRadioButton("Rainbow")
+        self.palette_gradient_radio.setChecked(True)
+        for rb in (self.palette_gray_radio, self.palette_gradient_radio, self.palette_rainbow_radio):
+            self.palette_group.addButton(rb)
+            palette_col.addWidget(rb)
+            rb.toggled.connect(self._on_display_option_changed)
+        palette_row.addLayout(palette_col)
+        col.addLayout(palette_row)
+
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignLeft)
+        form.setVerticalSpacing(2)
+        self.scalebar_check = QCheckBox()
+        self.zoom_to_fit_check = QCheckBox()
+        self.zoom_to_fit_check.setChecked(True)
+        self.autoscale_z_check = QCheckBox()
+        self.autoscale_z_check.setChecked(True)
+        self.scale_to_counts_check = QCheckBox()
+        form.addRow("Scalebar", self.scalebar_check)
+        form.addRow("Zoom to fit", self.zoom_to_fit_check)
+        form.addRow("Autoscale Z", self.autoscale_z_check)
+        form.addRow("Scale to Counts", self.scale_to_counts_check)
+        col.addLayout(form)
+
+        col.addStretch(1)
+        self.text_info_overlay_check = QCheckBox("Text Info Overlay")
+        self.text_info_overlay_check.setChecked(True)
+        col.addWidget(self.text_info_overlay_check)
+        for w in (self.scalebar_check, self.zoom_to_fit_check, self.autoscale_z_check,
+                  self.scale_to_counts_check, self.text_info_overlay_check):
+            w.toggled.connect(self._on_display_option_changed)
+        return panel
+
+    # -- Images tab: the display pipeline (LouisXIV "Set User Palette") ------
+    def current_palette(self) -> str:
+        if self.palette_gray_radio.isChecked():
+            return "Gray"
+        if self.palette_rainbow_radio.isChecked():
+            return "Rainbow"
+        return "Gradient"
+
+    def _display_range_for(self, frame) -> tuple[float, float]:
+        return display_range(frame, autoscale=self.autoscale_z_check.isChecked(),
+                             scale_to_counts=self.scale_to_counts_check.isChecked(),
+                             max_counts=self.max_counts_spin.value())
+
+    def _scalebar_um_per_px(self) -> float | None:
+        if not self.scalebar_check.isChecked():
+            return None
+        binning = self.camera.get_binning() if self.camera is not None else 1
+        return self.calibration.detection.pixel_size_um(binning=binning)
+
+    def _display_frame(self, frame, label_text: str | None = None) -> None:
+        """Show a raw frame through Frames to Avg, the Scale mapping, the
+        palette, the overlays and Zoom to fit. Acquisition, saving and Calc
+        keep using the raw frames."""
+        shown = self._frame_averager.push(frame)
+        self._last_shown_frame, self._last_shown_label = frame, label_text
+        lo, hi = self._display_range_for(shown)
+        pix = render_frame(shown, palette=self.current_palette(), lo=lo, hi=hi,
+                           label_text=label_text if self.text_info_overlay_check.isChecked() else None,
+                           scalebar_um_per_px=self._scalebar_um_per_px())
+        if self.zoom_to_fit_check.isChecked():
+            self.image_scroll.setWidgetResizable(True)
+            self.image_label.setPixmap(pix.scaled(self.image_label.size(), Qt.KeepAspectRatio,
+                                                  Qt.SmoothTransformation))
+        else:
+            self.image_scroll.setWidgetResizable(False)     # 1:1 pixels, scrollable
+            self.image_label.setPixmap(pix)
+            self.image_label.adjustSize()
+
+    def _on_display_option_changed(self, *_):
+        if getattr(self, "_last_shown_frame", None) is not None:
+            self._frame_averager.reset()
+            self._display_frame(self._last_shown_frame, self._last_shown_label)
+
+    def _on_max_counts_spin(self, v: int):
+        self.max_counts_slider.blockSignals(True)
+        self.max_counts_slider.setValue(v)
+        self.max_counts_slider.blockSignals(False)
+        if self.scale_to_counts_check.isChecked():
+            self._on_display_option_changed()
+
+    def _on_max_counts_slider(self, v: int):
+        self.max_counts_spin.blockSignals(True)
+        self.max_counts_spin.setValue(v)
+        self.max_counts_spin.blockSignals(False)
+        if self.scale_to_counts_check.isChecked():
+            self._on_display_option_changed()
+
+    def _on_frames_to_avg(self, n: int):
+        self._frame_averager.set_n(n)
 
     def _build_image_display(self) -> QScrollArea:
         self.image_label = QLabel("(no image yet)")
@@ -769,7 +990,7 @@ class MainWindow(QMainWindow):
         self.image_label.setStyleSheet("background-color: #f0f0f0; color: #666;")
         self.image_label.setMinimumSize(300, 300)
 
-        scroll = QScrollArea()
+        self.image_scroll = scroll = QScrollArea()
         scroll.setWidget(self.image_label)
         scroll.setWidgetResizable(True)  # label still fills the viewport,
         # matching the pre-restyle behavior that _poll_camera_for_frame()
@@ -919,6 +1140,9 @@ class MainWindow(QMainWindow):
         self.deskew_check.setEnabled(have)
         if not have:
             return
+        stack_max = int(stack.max())                       # LouisXIV's "calc stack max"
+        self.stack_max_spin.setValue(stack_max)
+        self.stack_max_slider.setValue(stack_max)
         complete = bool(self.z_target_frames) and self.frame_count >= self.z_target_frames
         if self.save_files_chk.isChecked() and complete:
             self._save_stack(stack)
@@ -961,7 +1185,8 @@ class MainWindow(QMainWindow):
                                   deskew=self.deskew_check.isChecked())
         self._last_projections = projs
         for name, view in self.projection_labels.items():
-            pix = frame_to_qpixmap(projs[name])
+            lo, hi = self._display_range_for(projs[name])
+            pix = render_frame(projs[name], palette=self.current_palette(), lo=lo, hi=hi)
             view.setPixmap(pix.scaled(view.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
             self.projection_save_btns[name].setEnabled(True)
         self._log("Projections: " + ", ".join(f"{k} {v.shape[1]}x{v.shape[0]}" for k, v in projs.items())
@@ -1386,8 +1611,8 @@ class MainWindow(QMainWindow):
         self.z_target_frames = n
         self.frame_count = n
         self._last_frame = self._stack_frames[-1]
-        pix = frame_to_qpixmap(self._stack_frames[0], label_text=f"{Path(path).name} [1/{n}]")
-        self.image_label.setPixmap(pix.scaled(self.image_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        self._frame_averager.reset()
+        self._display_frame(self._stack_frames[0], label_text=f"{Path(path).name} [1/{n}]")
         self.frame_counter_label.setText(f"{n}  (loaded {Path(path).name})")
         self.calc_projections_btn.setEnabled(True)
         self.deskew_check.setEnabled(True)
@@ -1448,6 +1673,7 @@ class MainWindow(QMainWindow):
         self.frame_count = 0
         self.frame_counter_label.setText("0")
         self.acq_progress.setValue(0)
+        self._frame_averager.reset()
 
         if mode == MODE_ZSTACK:
             n = int(self.slice_count_field.text()) if self.slice_count_field.text().isdigit() else 1
@@ -1847,9 +2073,7 @@ class MainWindow(QMainWindow):
         if frame is not None:
             self._last_frame = frame
         if frame is not None and self.acquiring:   # during the stop grace period: count only
-            pix = frame_to_qpixmap(frame, label_text=f"Frame #{self.frame_count}")
-            scaled = pix.scaled(self.image_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            self.image_label.setPixmap(scaled)
+            self._display_frame(frame, label_text=f"Frame #{self.frame_count}")
             now = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
             self.frame_counter_label.setText(f"{self.frame_count}  (last at {now})")
             # Stats on a strided view -- exact values over all 4.2M pixels

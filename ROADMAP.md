@@ -414,3 +414,59 @@ freezes the window for ~10 s (safely now, not fatally); moving the driver
 into a worker thread or a subprocess is the real cure. Plus the AOTF
 items above, file saving, the Phase 1 core skeleton, motion stages,
 adaptive optics, pixel-matching the Waveforms tab.
+
+### Waveforms tab reworked into an oscilloscope (2026-09-04)
+
+The FPGA Scope view was an auto-scaled plot whose x axis was labelled from a
+free-running clock: ticks at `span * i/10` printed values like 2.106, 2.166,
+2.226 and changed ten times a second, so nothing could be read off it. It is
+now driven like a digital scope.
+
+- A fixed **10 x 8 division graticule**. `Time/div` and `Volts/div` come from
+  1-2-5 sequences, so every gridline is a round value by construction and the
+  labels stop moving. Times are measured from the SCREEN CENTRE, which keeps
+  them short at every zoom (referencing "now" printed -165900 us once zoomed
+  and panned).
+- **Trigger alignment** on a chosen digital column (default D4 cam trig): the
+  centre pins to a rising edge so the waveform stands still and times read
+  against the trigger. `Hold` freezes the buffer to explore a capture.
+- Wheel zooms the timebase about the pointer, Shift+wheel the volts/div.
+  There is deliberately **no drag-pan** -- position is the trigger's and Fit's
+  job, not something to shove around and have to find again.
+- **Hover** any trace for a callout: channel, its volts/div, the value there
+  (a RANGE when the column is decimated -- one pixel of a 200 ms window holds
+  20 000 samples) and the time from the trigger.
+- **Click a trace to pin a tag.** The tag names the channel, states that
+  channel's own volts/div and carries +/- to change it and x to remove it; it
+  can be dragged aside and keeps a leader to its point. Anchored by TIME, so
+  it survives zooming and rolling.
+- **Per-channel volts/div** (the default), because the digital flags swing
+  1.25 V while the X galvo is +-0.125 V and no single gain shows both. `Fit`
+  gives each channel its own gain so waveforms of very different amplitude
+  compare shape-for-shape. Once gains differ the vertical axis switches to
+  **Divisions** -- a Volts axis would be lying about every trace it does not
+  belong to -- and each tag states its own scale. `Per-ch V/div` off ganges
+  them back onto the coarsest gain in play.
+
+Two real bugs fixed underneath, both time-measurement errors that were
+invisible while the axis was decorative:
+
+- `envelope()` used `per = n // columns` and folded the leftover samples into
+  the last column, drawing a mid-window feature at 63% across: a **13% time
+  error**. Bin edges now come from `linspace`.
+- `_draw_traces` laid m samples over m-1 intervals while `x_left` was derived
+  from `len(seg)/fs` (an exclusive right edge), stretching every trace by
+  m/(m-1): **0.556 of a division at 10 us/div**, in the trigger-centring path.
+  Found by adversarial review; all 102 tests of the day passed with it present
+  because the hover/tag tests probe using coordinates read from the very cache
+  under test. `tests/test_scope_view.py` now also places a feature at a chosen
+  time and checks the pixel it lands on, across ten timebases.
+
+The panel's control rows moved into a horizontally scrollable strip: their
+LouisXIV labels report full width as a MINIMUM, which had the panel demanding
+1072 px. Panel minimum 1214 -> 627 px, and the main window 1938 -> 1675.
+
+Still open: the window is *already* wider than its 1381 px target because of a
+different tab (955 px) -- pre-existing, untouched here. Plus ~25 lower-severity
+review findings, mostly test quality; tags slide in free run when zoomed; hover
+repaints every trace on each pixel of pointer movement.

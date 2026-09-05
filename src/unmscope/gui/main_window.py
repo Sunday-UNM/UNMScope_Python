@@ -124,6 +124,21 @@ def _narrow(w, width: int = 80):
     return w
 
 
+def _bordered_panel(name: str, width: int, margin: int) -> tuple[QFrame, QVBoxLayout]:
+    """A bordered sub-panel of the panel background colour, fixed width,
+    with a QVBoxLayout of ``margin`` on every side -- the Images tab's Max
+    Counts and Display Options boxes are both this, at their own measured
+    width/margin. The stylesheet is scoped by objectName (a bare "QFrame"
+    rule would also border every QLabel, which is itself a QFrame)."""
+    panel = QFrame()
+    panel.setObjectName(name)
+    panel.setFixedWidth(width)
+    panel.setStyleSheet(f"QFrame#{name} {{ border: 1px solid {BORDER}; background-color: {GROUP_BG}; }}")
+    col = QVBoxLayout(panel)
+    col.setContentsMargins(margin, margin, margin, margin)
+    return panel, col
+
+
 class FpgaSignals(QObject):
     """Bridges FpgaTriggerController's background-thread callbacks to the
     GUI thread. Signal.emit() is thread-safe in Qt -- calling it from a
@@ -814,12 +829,7 @@ class MainWindow(QMainWindow):
         # confirmed by pixel-sampling the real front panel: there's a real
         # ~14px gap and each side has its own 1px border the full panel
         # height. 123px width measured off the real panel.
-        panel = QFrame()
-        panel.setObjectName("maxCountsPanel")
-        panel.setFixedWidth(123)
-        panel.setStyleSheet(f"QFrame#maxCountsPanel {{ border: 1px solid {BORDER}; background-color: {GROUP_BG}; }}")
-        col = QVBoxLayout(panel)
-        col.setContentsMargins(6, 6, 6, 6)
+        panel, col = _bordered_panel("maxCountsPanel", 123, 6)
         col.addStretch(2)  # content sits in the lower ~2/3, not top-anchored
 
         # "Bright max" of LouisXIV's Scale = "By constant" (Given Range 0..Max
@@ -864,12 +874,7 @@ class MainWindow(QMainWindow):
     def _build_display_options_panel(self) -> QWidget:
         # The other sub-panel -- 214px, its own border, top-anchored
         # content with Text Info Overlay pinned to the bottom.
-        panel = QFrame()
-        panel.setObjectName("displayOptionsPanel")
-        panel.setFixedWidth(214)
-        panel.setStyleSheet(f"QFrame#displayOptionsPanel {{ border: 1px solid {BORDER}; background-color: {GROUP_BG}; }}")
-        col = QVBoxLayout(panel)
-        col.setContentsMargins(8, 8, 8, 8)
+        panel, col = _bordered_panel("displayOptionsPanel", 214, 8)
 
         # "Pallete Color" -> IMAQ palette: Gray / Gradient / Rainbow
         palette_row = QHBoxLayout()
@@ -931,15 +936,22 @@ class MainWindow(QMainWindow):
         binning = self.camera.get_binning() if self.camera is not None else 1
         return self.calibration.detection.pixel_size_um(binning=binning)
 
+    def _render(self, frame, label_text: str | None = None,
+               scalebar_um_per_px: float | None = None) -> QPixmap:
+        """The display pipeline for one frame: this window's Scale mapping
+        and palette choice, plus whatever overlay the caller asks for.
+        Shared by the live/loaded-frame display and the Calc projections."""
+        lo, hi = self._display_range_for(frame)
+        return render_frame(frame, palette=self.current_palette(), lo=lo, hi=hi,
+                            label_text=label_text, scalebar_um_per_px=scalebar_um_per_px)
+
     def _display_frame(self, frame, label_text: str | None = None) -> None:
         """Show a raw frame through Frames to Avg, the Scale mapping, the
         palette, the overlays and Zoom to fit. Acquisition, saving and Calc
         keep using the raw frames."""
         shown = self._frame_averager.push(frame)
         self._last_shown_frame, self._last_shown_label = frame, label_text
-        lo, hi = self._display_range_for(shown)
-        pix = render_frame(shown, palette=self.current_palette(), lo=lo, hi=hi,
-                           label_text=label_text if self.text_info_overlay_check.isChecked() else None,
+        pix = self._render(shown, label_text=label_text if self.text_info_overlay_check.isChecked() else None,
                            scalebar_um_per_px=self._scalebar_um_per_px())
         if self.zoom_to_fit_check.isChecked():
             self.image_scroll.setWidgetResizable(True)
@@ -1190,8 +1202,7 @@ class MainWindow(QMainWindow):
                                   deskew=self.deskew_check.isChecked())
         self._last_projections = projs
         for name, view in self.projection_labels.items():
-            lo, hi = self._display_range_for(projs[name])
-            pix = render_frame(projs[name], palette=self.current_palette(), lo=lo, hi=hi)
+            pix = self._render(projs[name])
             view.setPixmap(pix.scaled(view.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
             self.projection_save_btns[name].setEnabled(True)
         self._log("Projections: " + ", ".join(f"{k} {v.shape[1]}x{v.shape[0]}" for k, v in projs.items())

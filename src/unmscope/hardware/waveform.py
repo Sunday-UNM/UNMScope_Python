@@ -124,6 +124,38 @@ class ScanWaveform:
         return self.ticks_between_points / TICKS_PER_S
 
 
+def dither_block(n_pts: int, dither_range_v: float, dither_pulses: float,
+                 dither_flyback_fraction: float) -> np.ndarray:
+    """The dither galvo's triangle across one block (smeared at the
+    turnarounds), or a flat block at zero when the dither is disabled --
+    shared by ``build_scan_waveform`` and ``louisxiv_waveform.build_louisxiv_waveform``."""
+    if dither_range_v and dither_pulses:
+        return smooth_turnarounds(
+            triangle_points(n_pts, dither_pulses, dither_range_v), dither_pulses, dither_flyback_fraction)
+    return np.zeros(n_pts)
+
+
+def assemble_scan(x_block_v: np.ndarray, slow_v: list[tuple[np.ndarray, np.ndarray]],
+                  d_block_v: np.ndarray, ticks_between_points: int) -> ScanWaveform:
+    """Repeat the fast-axis block once per slice (or use each slice's own
+    pre-shifted copy, e.g. the S-curve slow-axis tail), pair each with that
+    slice's (Z galvo, Z piezo) volts and the dither block, and pack into
+    words. ``x_block_v`` may be a single (n_pts,) array (repeated for every
+    slice) or already one row per slice with the same shape as each entry
+    of ``slow_v`` -- both builders that use this pass the former today."""
+    n_pts = len(d_block_v)
+    n_slices = len(slow_v)
+    x_rows = [x_block_v] * n_slices if x_block_v.ndim == 1 else list(x_block_v)
+    x_c = volts_to_counts(np.concatenate(x_rows))
+    zg_c = volts_to_counts(np.concatenate([zg for zg, _ in slow_v]))
+    zp_c = volts_to_counts(np.concatenate([zp for _, zp in slow_v]))
+    d_c = volts_to_counts(np.concatenate([d_block_v] * n_slices))
+    words = pack_points(x_c, zg_c, zp_c, dither=d_c)
+    return ScanWaveform(words=words, points_per_trigger=n_pts, ticks_between_points=ticks_between_points,
+                        n_slices=n_slices,
+                        channels={"X Galvo": x_c, "Z Galvo": zg_c, "Z Piezo": zp_c, "Dither Galvo": d_c})
+
+
 def build_scan_waveform(exposure_s: float, x_range_v: float, n_slices: int = 1,
                         z_galvo_start_v: float = 0.0, z_galvo_step_v: float = 0.0,
                         z_piezo_start_v: float = 0.0, z_piezo_step_v: float = 0.0,
@@ -160,25 +192,10 @@ def build_scan_waveform(exposure_s: float, x_range_v: float, n_slices: int = 1,
     # Dither galvo: a triangle across the whole block (the dither runs for
     # the exposure to smear out stripe artefacts), held at its start value
     # when disabled.
-    if dither_range_v and dither_pulses:
-        d_block_v = smooth_turnarounds(
-            triangle_points(n_pts, dither_pulses, dither_range_v), dither_pulses, dither_flyback_fraction)
-    else:
-        d_block_v = np.zeros(n_pts)
-    x_all, zg_all, zp_all, d_all = [], [], [], []
-    for k in range(max(1, n_slices)):
-        x_all.append(x_block_v)
-        d_all.append(d_block_v)
-        zg_all.append(np.full(n_pts, z_galvo_start_v + k * z_galvo_step_v))
-        zp_all.append(np.full(n_pts, z_piezo_start_v + k * z_piezo_step_v))
-    x_c = volts_to_counts(np.concatenate(x_all))
-    zg_c = volts_to_counts(np.concatenate(zg_all))
-    zp_c = volts_to_counts(np.concatenate(zp_all))
-    d_c = volts_to_counts(np.concatenate(d_all))
-    words = pack_points(x_c, zg_c, zp_c, dither=d_c)
-    return ScanWaveform(words=words, points_per_trigger=n_pts, ticks_between_points=ticks_between_points,
-                        n_slices=max(1, n_slices),
-                        channels={"X Galvo": x_c, "Z Galvo": zg_c, "Z Piezo": zp_c, "Dither Galvo": d_c})
+    d_block_v = dither_block(n_pts, dither_range_v, dither_pulses, dither_flyback_fraction)
+    slow_v = [(np.full(n_pts, z_galvo_start_v + k * z_galvo_step_v),
+              np.full(n_pts, z_piezo_start_v + k * z_piezo_step_v)) for k in range(max(1, n_slices))]
+    return assemble_scan(x_block_v, slow_v, d_block_v, ticks_between_points)
 
 
 def block_fits_period(wf: ScanWaveform, period_s: float, margin_s: float = 0.0005) -> bool:

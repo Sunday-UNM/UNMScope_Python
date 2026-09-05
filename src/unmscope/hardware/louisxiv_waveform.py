@@ -64,9 +64,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from unmscope.hardware.fpga_trigger import TICKS_PER_S
-from unmscope.hardware.waveform import (
-    ScanWaveform, pack_points, smooth_turnarounds, triangle_points, volts_to_counts,
-)
+from unmscope.hardware.waveform import ScanWaveform, assemble_scan, dither_block
 
 MAX_AO_RATE_KHZ = 1000.0        # HHMI - Max AO Rate.vi
 
@@ -293,30 +291,16 @@ def build_louisxiv_waveform(*, exposure_s: float, cycle_s: float, x_range_v: flo
     n_pts = line.total_points
     n_slices = max(1, int(n_slices))
     n_s = min(s_curve_points(line.return_points), n_pts)
-    x_all, zg_all, zp_all, d_all = [], [], [], []
-    if dither_range_v and dither_pulses:
-        d_block = smooth_turnarounds(triangle_points(n_pts, dither_pulses, dither_range_v),
-                                     dither_pulses, dither_flyback_fraction)
-    else:
-        d_block = np.zeros(n_pts)
+    d_block = dither_block(n_pts, dither_range_v, dither_pulses, dither_flyback_fraction)
+    slow_v = []
     for k in range(n_slices):
         zg = np.full(n_pts, z_galvo_start_v + k * z_galvo_step_v)
         zp = np.full(n_pts, z_piezo_start_v + k * z_piezo_step_v)
         if k < n_slices - 1 and n_s > 0:
             zg[n_pts - n_s:] = s_curve(zg[0], z_galvo_start_v + (k + 1) * z_galvo_step_v, n_s)
             zp[n_pts - n_s:] = s_curve(zp[0], z_piezo_start_v + (k + 1) * z_piezo_step_v, n_s)
-        x_all.append(line.positions)
-        zg_all.append(zg)
-        zp_all.append(zp)
-        d_all.append(d_block)
-    x_c = volts_to_counts(np.concatenate(x_all))
-    zg_c = volts_to_counts(np.concatenate(zg_all))
-    zp_c = volts_to_counts(np.concatenate(zp_all))
-    d_c = volts_to_counts(np.concatenate(d_all))
-    words = pack_points(x_c, zg_c, zp_c, dither=d_c)
-    scan = ScanWaveform(words=words, points_per_trigger=n_pts, ticks_between_points=rate.ticks_between_points,
-                        n_slices=n_slices,
-                        channels={"X Galvo": x_c, "Z Galvo": zg_c, "Z Piezo": zp_c, "Dither Galvo": d_c})
+        slow_v.append((zg, zp))
+    scan = assemble_scan(line.positions, slow_v, d_block, rate.ticks_between_points)
     notes = []
     if rate.update_rate != update_rate:
         notes.append(f"Updates/Pixel reduced {update_rate} -> {rate.update_rate} by the {MAX_AO_RATE_KHZ:g} kHz AO limit")

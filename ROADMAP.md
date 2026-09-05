@@ -603,9 +603,9 @@ below is being implemented until the user picks.
 **Code hygiene**
 14. Three ini-copy writers coexist (config/spim_ini.py, hw_config.py,
     um_per_volt.py) on the same file -- unify behind one writer.
-15. Copy the HW Config page renders + 37 case frames from the session
-    scratchpad (hwconfig_frames/) into VI_Diagrams for reproducible measuring.
-16. Prune the workflow worktrees/branches (.claude/worktrees, tool/*).
+15. **DONE** Agents' renders copied into VI_Diagrams (`GUI/HW Configuration GUI/hidden_and_pages`,
+    `GUI/Microns per Volt Settings GUI/hidden_and_pages`, `Motion/.../Sample Stage Control GUI/hidden_and_pages_stage`).
+16. **DONE** Worktrees and tool/* branches pruned after the merges.
 17. Timepoints and Multi-location boxes remain unwired (kept on request).
 18. **DONE** Stack Projections "Calc" (user, 2026-09-05: "looks grayed out"): ours was
     enabled only while a Z-stack is in memory (Z-stack run completed, or View

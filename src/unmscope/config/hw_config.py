@@ -398,13 +398,13 @@ def save_hw_config(cfg: HwConfig, path: str | Path | None = None) -> Path:
             ini.set(section, key, format_value(new, kind))
     out = ini.text()
     if out != raw:
-        with open(p, "w", encoding="utf-8", newline="") as fh:     # newline="": keep CRLF as-is
+        with open(p, "w", encoding="latin-1", newline="") as fh:   # latin-1: bytes in == bytes out; CRLF as-is
             fh.write(out)
     return p
 
 
 def _read(p: Path) -> str:
-    with open(p, encoding="utf-8", errors="replace", newline="") as fh:   # no newline translation
+    with open(p, encoding="latin-1", newline="") as fh:   # latin-1 round-trips every byte; no newline translation
         return fh.read()
 
 
@@ -413,7 +413,13 @@ def user_ini_path(path: str | Path | None = None, source: str | Path = LOUISXIV_
     """The ini this module edits. ``path`` defaults to ``USER_INI``; when it
     does not exist yet it is created as a byte-for-byte copy of ``source``
     (LouisXIV's SPIMProject.ini, which is never written)."""
-    p = Path(path) if path is not None else USER_INI
+    if path is not None:
+        p = Path(path)
+    elif USER_INI != Path.home() / ".unmscope" / "SPIMProject.ini":
+        p = USER_INI                      # monkeypatched by tests
+    else:
+        from unmscope.config.paths import user_ini
+        p = user_ini()
     if not p.exists():
         src = Path(source)
         if not src.exists():

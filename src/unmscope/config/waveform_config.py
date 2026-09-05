@@ -19,7 +19,12 @@ import json
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
-DEFAULT_PATH = Path.home() / ".unmscope" / "waveform_config.json"
+from unmscope.config.paths import user_dir
+
+def default_path() -> Path:
+    return user_dir() / "waveform_config.json"
+
+DEFAULT_PATH = Path.home() / ".unmscope" / "waveform_config.json"   # legacy name; save()/load() use default_path()
 
 #: Enum items substantiated by the diagrams / panel (see module docstring).
 WAVEFORM_TYPES = ("Linear",)                       # Generate SPIM Waveform: case "Linear"
@@ -106,15 +111,15 @@ class WaveformConfig:
                 setattr(cfg, f.name, type(getattr(cfg, f.name))(v))
         return cfg
 
-    def save(self, path: str | Path = DEFAULT_PATH) -> Path:
-        p = Path(path)
+    def save(self, path: str | Path | None = None) -> Path:
+        p = Path(path) if path is not None else default_path()
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
         return p
 
     @classmethod
-    def load(cls, path: str | Path = DEFAULT_PATH) -> "WaveformConfig":
-        p = Path(path)
+    def load(cls, path: str | Path | None = None) -> "WaveformConfig":
+        p = Path(path) if path is not None else default_path()
         if not p.exists():
             return cls()
         try:

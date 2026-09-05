@@ -135,7 +135,7 @@ def test_unmscope_copy_is_made_once_from_louisxiv_file(tmp_path, monkeypatch):
     src.parent.mkdir()
     src.write_bytes(INI)
     home = tmp_path / "home"
-    monkeypatch.setattr(upv.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("UNMSCOPE_HOME", str(home / ".unmscope"))     # unmscope.config.paths.user_dir()
     assert unmscope_ini_path() == home / ".unmscope" / "SPIMProject.ini"
     dest = ensure_unmscope_ini(source=src)
     assert dest == home / ".unmscope" / "SPIMProject.ini" and dest.read_bytes() == INI    # byte for byte

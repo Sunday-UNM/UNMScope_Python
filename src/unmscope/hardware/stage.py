@@ -350,9 +350,11 @@ class MP285Protocol:
         t0 = self._clock()
         buf = b""
         while len(buf) < n:
-            self._sleep(DRIVER_WAIT_MS / 1000.0)
             buf += self.t.read(n - len(buf))
-            if len(buf) < n and self._clock() - t0 > self.timeout_s:
+            if len(buf) >= n:
+                break
+            self._sleep(DRIVER_WAIT_MS / 1000.0)        # only while the reply is still incomplete
+            if self._clock() - t0 > self.timeout_s:
                 raise StageError(f"MP-285 did not answer within {self.timeout_s:g} s "
                                  f"({len(buf)} of {n} bytes)")
         return buf

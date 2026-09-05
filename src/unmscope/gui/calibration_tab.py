@@ -45,8 +45,9 @@ from __future__ import annotations
 import math
 from typing import Callable
 
-from PySide6.QtCore import QRegularExpression, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPen, QPolygon, QRegularExpressionValidator
+from dataclasses import replace
+from PySide6.QtCore import QEvent, QRegularExpression, Qt, Signal
+from PySide6.QtGui import QColor, QPainter, QPen, QPolygon, QRegularExpressionValidator, QValidator
 from PySide6.QtWidgets import QLabel, QLineEdit, QPushButton, QWidget
 from PySide6.QtCore import QPoint
 
@@ -199,6 +200,7 @@ class CalibrationTab(QWidget):
                          + (f"Used by UNMScope: {consumer}" if consumer
                             else "Stored for LouisXIV parity; no UNMScope consumer yet"))
             f.editingFinished.connect(lambda n=name: self._on_field_edited(n))
+            f.installEventFilter(self)       # restore the value if the text is left invalid
             self.fields[name] = f
             self.row_labels[name] = self._label(key, _rect(lx, y0 + k * ROW_PITCH, lw, lh))
 
@@ -235,7 +237,7 @@ class CalibrationTab(QWidget):
     def set_values(self, mtv: MicronsToVolt) -> None:
         """Fill the fields from a cluster and refresh the indicator (the
         "Initialize Variables" + "Update Values" pair)."""
-        self._values = mtv
+        self._values = replace(mtv)          # our own copy: edits never reach the caller's object
         self._updating = True
         try:
             for name, f in self.fields.items():
@@ -285,6 +287,17 @@ class CalibrationTab(QWidget):
             setattr(self._values, name, v)
             return True
         return False
+
+    def eventFilter(self, obj, event):
+        # Qt emits editingFinished only for Acceptable text; a field left
+        # empty or as a lone '-' would otherwise keep showing invalid text
+        # while the model kept the old value. LabVIEW keeps the old value.
+        if event.type() == QEvent.FocusOut and isinstance(obj, QLineEdit) and obj in self.fields.values():
+            v = obj.validator()
+            if v is not None and v.validate(obj.text(), 0)[0] != QValidator.Acceptable:
+                name = next(n for n, f in self.fields.items() if f is obj)
+                obj.setText(format_value(getattr(self._values, name)))
+        return super().eventFilter(obj, event)
 
     def _on_field_edited(self, name: str) -> None:
         if self._updating:

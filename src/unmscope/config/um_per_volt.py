@@ -62,8 +62,10 @@ INI_SECTION = "Microns to Volt calibrations"
 
 
 def unmscope_ini_path(home: Path | None = None) -> Path:
-    """The UNMScope-owned ini copy: ``<home>/.unmscope/SPIMProject.ini``."""
-    return (home if home is not None else Path.home()) / ".unmscope" / "SPIMProject.ini"
+    """UNMScope's own copy of SPIMProject.ini (unmscope.config.paths.user_dir;
+    ``home`` overrides the directory)."""
+    from unmscope.config.paths import user_dir
+    return (Path(home) if home is not None else user_dir()) / "SPIMProject.ini"
 
 
 def ensure_unmscope_ini(dest: Path | None = None, source: Path = LOUISXIV_INI) -> Path:
@@ -133,6 +135,17 @@ class MicronsToVolt:
     @classmethod
     def field_names(cls) -> tuple[str, ...]:
         return tuple(f.name for f in fields(cls))
+
+    def __eq__(self, other) -> bool:
+        """NaN-aware (Galvo cmd Y is NaN on this rig)."""
+        if not isinstance(other, MicronsToVolt):
+            return NotImplemented
+        for n in self.field_names():
+            a, b = getattr(self, n), getattr(other, n)
+            if a == b or (isinstance(a, float) and isinstance(b, float) and math.isnan(a) and math.isnan(b)):
+                continue
+            return False
+        return True
 
     @classmethod
     def key_of(cls, name: str) -> str:
@@ -234,6 +247,8 @@ def _rewrite_section(raw: bytes, section: str, values: dict[str, str]) -> bytes:
 
     def flush_pending() -> None:
         nonlocal last_key_line
+        if pending and 0 <= last_key_line < len(out) and not out[last_key_line].endswith(b"\n"):
+            out[last_key_line] += nl     # the file's last line had no newline: give it one
         for k, v in pending.items():
             line = k.encode("utf-8") + b" = " + v.encode("utf-8") + nl
             out.insert(last_key_line + 1, line)
@@ -274,4 +289,7 @@ def _rewrite_section(raw: bytes, section: str, values: dict[str, str]) -> bytes:
         out.append(b"[" + section.encode("utf-8") + b"]" + nl)
         last_key_line = len(out) - 1
         flush_pending()
-    return b"".join(out)
+    result = b"".join(out)
+    if raw and not ends_with_newline and result.endswith(nl):
+        result = result[:-len(nl)]       # keep the file's no-final-newline convention
+    return result

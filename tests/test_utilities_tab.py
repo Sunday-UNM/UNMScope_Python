@@ -31,7 +31,8 @@ def test_grid_has_louisxiv_18_tools_two_wired(window):
     tab = window.utilities_tab
     assert len(tab.buttons) == 18
     wired = [name for name, b in tab.buttons.items() if b.isEnabled()]
-    assert wired == ["View TIF stack", "Camera Debug Panel", "FPGA Scope"]
+    assert wired == ["View TIF stack", "um per V calibration", "Sample Stage Control",
+                     "Camera Debug Panel", "FPGA Scope", "HW Config"]
     assert not tab.buttons["Auto Background"].isEnabled()
 
 

@@ -26,14 +26,14 @@ from unmscope.config.waveform_config import WaveformConfig
 
 TOOLS = [  # (label, wired-callback name or None), LouisXIV order
     ("Align Laser", None), ("View TIF stack", "view_tif"),
-    ("Image Reviewer", None), ("um per V\ncalibration", None),
+    ("Image Reviewer", None), ("um per V\ncalibration", "um_per_volt"),
     ("Calculate PSF", None), ("View Z Lookup\nTable", None),
-    ("Sample Stage\nControl", None), ("Shift Vslit\ncalibration", None),
+    ("Sample Stage\nControl", "sample_stage"), ("Shift Vslit\ncalibration", None),
     ("Resave\nOME-XML TIFs", None), ("X&Z Galvo offsets\nper AOTF ch", None),
     ("Camera Debug\nPanel", "camera_debug"), ("FPGA\nScope", "fpga_scope"),
     ("Auto\nBackground", None), ("FPGA Monitor", None),
     ("Reset HW", None), ("X Galvo Z\nCorrections", None),
-    ("HW Config", None), ("Imagine Optics", None),
+    ("HW Config", "hw_config"), ("Imagine Optics", None),
 ]
 COL_X = (21 - 8, 201 - 8)
 ROW_Y0, ROW_PITCH = 113 - 76, 72
@@ -43,10 +43,15 @@ BTN_W, BTN_H = 152, 56
 class UtilitiesTab(QTabWidget):
     def __init__(self, *, view_tif: Callable[[str], None], fpga_scope: Callable[[], None],
                  camera_debug: Callable[[], None] | None = None,
+                 hw_config: Callable[[], None] | None = None,
+                 sample_stage: Callable[[], None] | None = None,
+                 um_per_volt: Callable[[], None] | None = None,
                  waveform_config: WaveformConfig | None = None, parent=None):
         super().__init__(parent)
+        noop = lambda: None
         self._actions = {"view_tif": self._on_view_tif, "fpga_scope": fpga_scope,
-                         "camera_debug": camera_debug or (lambda: None)}
+                         "camera_debug": camera_debug or noop, "hw_config": hw_config or noop,
+                         "sample_stage": sample_stage or noop, "um_per_volt": um_per_volt or noop}
         self._view_tif = view_tif
         self.buttons: dict[str, QPushButton] = {}
         tools = QWidget()

@@ -41,7 +41,7 @@ from pathlib import Path
 from unmscope.config.calibration import DEFAULT_INI
 
 #: The UNMScope-owned copy. Tests monkeypatch ``user_ini_path``.
-USER_INI = Path.home() / ".unmscope" / "SPIMProject.ini"
+USER_INI = Path.home() / ".unmscope" / "SPIMProject.ini"   # default; user_ini_path() honours UNMSCOPE_HOME
 
 SIMP285_SECTION = "SIMP-285 3D Stage"
 ROTATION_SECTION = "Rotation Stage (PI U651) Settings"
@@ -52,7 +52,11 @@ XYZ_ASSIGNMENTS = ("XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX")
 
 
 def user_ini_path() -> Path:
-    return USER_INI
+    """UNMScope's copy of SPIMProject.ini (unmscope.config.paths; USER_INI is
+    the module-level default kept for tests that monkeypatch it)."""
+    from unmscope.config import paths
+    default = Path.home() / ".unmscope" / "SPIMProject.ini"
+    return paths.user_ini() if USER_INI == default else USER_INI
 
 
 def ensure_user_ini(source: Path = DEFAULT_INI, dest: Path | None = None) -> Path:

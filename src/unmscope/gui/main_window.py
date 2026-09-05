@@ -68,6 +68,10 @@ from unmscope.gui.camera_tab import CameraTab
 from unmscope.gui.display import FrameAverager, display_range, render_frame
 from unmscope.gui.utilities_tab import UtilitiesTab
 from unmscope.gui.camera_debug_panel import CameraDebugPanel, CameraDebugStatus
+from unmscope.gui.calibration_tab import CalibrationTab
+from unmscope.gui.hw_config_dialog import show_hw_config_dialog
+from unmscope.gui.sample_stage_dialog import SampleStageDialog
+from unmscope.config.um_per_volt import load_calibration_from_unmscope_ini
 from unmscope.config.waveform_config import AxisSettings, WaveformConfig
 from unmscope.fileio.tiff_stack import read_tiff_stack
 
@@ -191,7 +195,13 @@ class MainWindow(QMainWindow):
         self.fpga: FpgaTriggerController | None = None
         self.scope: FpgaScope | None = None      # FPGA Scope, streams while the FPGA is connected
         # LouisXIV's um/V calibrations + voltage limits (SPIMProject.ini).
-        self.calibration = load_calibration()
+        # Calibrations come from UNMScope's own copy of SPIMProject.ini (the
+        # um/V Cal tab edits that copy; LouisXIV's file is read-only input).
+        try:
+            self.calibration = load_calibration_from_unmscope_ini()
+        except Exception as e:
+            self.calibration = load_calibration()
+            print(f"um/V calibration copy unavailable ({e}); using LouisXIV's ini read-only")
         # LouisXIV's 'Waveform' cluster (Low-Level Waveform Config), persisted
         # per user; the live fields feed build_scan_waveform at scan start.
         self.waveform_config = WaveformConfig.load()
@@ -241,6 +251,8 @@ class MainWindow(QMainWindow):
         self._last_frame = None                  # newest displayed frame, for 'Save Image'
         self._last_error_text = ""
         self.camera_debug_panel = None            # Utilities > Camera Debug Panel (LouisXIV's Debug Panel)
+        self._hw_config_dlg = None                # Utilities > HW Config
+        self.sample_stage_dialog = None           # Utilities > Sample Stage Control / Scan Setup > Configure
         self._frame_averager = FrameAverager(1)  # Images tab 'Frames to Avg'
         self._last_shown_frame = None
         self._last_shown_label = None
@@ -355,7 +367,7 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(self._build_connection_bar())
 
-        tabs = QTabWidget()
+        self.left_tabs = tabs = QTabWidget()
         tabs.setFixedWidth(406)  # measured off the real front panel
         scan_setup_scroll = QScrollArea()
         scan_setup_scroll.setWidget(self._build_scan_setup_tab())
@@ -369,6 +381,8 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._build_camera_tab(), "Camera")
         self.utilities_tab = UtilitiesTab(view_tif=self.load_stack_from_file, fpga_scope=self._show_fpga_scope,
                                           camera_debug=self._show_camera_debug_panel,
+                                          hw_config=self._show_hw_config, sample_stage=self._show_sample_stage,
+                                          um_per_volt=self._show_calibration_tab,
                                           waveform_config=self.waveform_config)
         self.utilities_tab.waveform_panel.changed.connect(self._on_waveform_config_changed)
         # The Scan Setup Dither box's sweeps / flyback ARE the cluster's Dither
@@ -377,6 +391,15 @@ class MainWindow(QMainWindow):
         self.dg_flyback.valueChanged.connect(self.utilities_tab.waveform_panel.dither_fract_flyback.setValue)
         self._sync_dither_spins(self.waveform_config)
         tabs.addTab(self.utilities_tab, "Utilities")
+        # um per V calibration: LouisXIV's Microns per Volt Settings GUI as its own
+        # tab (the user's call); Save reloads the Calibration the scan uses.
+        self.calibration_tab = CalibrationTab(log=self._log)
+        self.calibration_tab.saved.connect(self._on_calibration_saved)
+        cal_scroll = QScrollArea()
+        cal_scroll.setWidget(self.calibration_tab)
+        cal_scroll.setWidgetResizable(True)
+        cal_scroll.setFrameShape(QFrame.NoFrame)
+        tabs.addTab(cal_scroll, "um/V Cal")
         lay.addWidget(tabs, stretch=1)
         return container
 
@@ -671,10 +694,15 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout()
         chk = QCheckBox("Multi-location")
         cfg_btn = QPushButton("Configure")
+        # LouisXIV: 'Configure' shares event case [4] with the Utilities
+        # 'Sample Stage Control' button -- both open the stage panel.
+        cfg_btn.clicked.connect(self._show_sample_stage)
+        self.multilocation_chk = chk
+        self.multilocation_configure_btn = cfg_btn
         row.addWidget(chk); row.addWidget(cfg_btn); row.addStretch(1)
         lay.addLayout(row)
 
-        table = QTableWidget(3, 4)
+        self.locations_table = table = QTableWidget(3, 4)
         table.setHorizontalHeaderLabels(["X", "Y", "Z", "Z RO"])
         table.verticalHeader().setVisible(True)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
@@ -1579,6 +1607,60 @@ class MainWindow(QMainWindow):
             self._end_blocking()
 
     # -- Utilities tab ---------------------------------------------------------
+    def _on_calibration_saved(self, cal) -> None:
+        """um/V Cal Save: LouisXIV's 'Force Waveform Recalc' -- the next
+        Acquire builds the waveform from the saved numbers."""
+        self.calibration = cal
+        self._log(f"Calibration saved: X galvo {cal.x_galvo.um_per_volt:g} um/V, Z galvo "
+                  f"{cal.z_galvo.um_per_volt:g} um/V, Z piezo {cal.z_piezo.um_per_volt:g} um/V "
+                  f"(source: {cal.source}).")
+
+    def _show_calibration_tab(self) -> None:
+        self.left_tabs.setCurrentWidget(self.calibration_tab.parentWidget().parentWidget())
+
+    def _show_hw_config(self) -> None:
+        """Utilities > HW Config: LouisXIV's HW Configuration GUI on UNMScope's
+        own ini copy; Apply only records the change here (LouisXIV's full
+        Reset HW is not performed -- reconnect to pick the camera keys up)."""
+        dlg = show_hw_config_dialog(parent=self, existing=self._hw_config_dlg)
+        if dlg is not self._hw_config_dlg:
+            dlg.applied.connect(self._on_hw_config_applied)
+            self._hw_config_dlg = dlg
+
+    def _on_hw_config_applied(self, cfg) -> None:
+        cam = cfg.cameras[0] if getattr(cfg, "cameras", None) else None
+        self._log("HW Config applied to UNMScope's SPIMProject.ini copy"
+                  + (f" (Cam1: {cam.model_name if hasattr(cam, 'model_name') else ''} sync readout "
+                     f"{getattr(cam, 'sync_readout', '?')}, binning {getattr(cam, 'binning', '?')})" if cam else "")
+                  + "; takes effect on the next camera Connect.")
+
+    def _show_sample_stage(self) -> None:
+        """Utilities > Sample Stage Control and Scan Setup > Configure (both
+        SPIM MAIN event case [4]): one non-modal panel, simulated stage."""
+        if self.sample_stage_dialog is None:
+            self.sample_stage_dialog = SampleStageDialog(
+                rel_offset_provider=lambda: self.rel_offset_spin.value(), log=self._log, parent=self)
+            self.sample_stage_dialog.rel_offset_recalled.connect(self.rel_offset_spin.setValue)
+            self.sample_stage_dialog.sequence_changed.connect(self._refresh_locations_table)
+            self._refresh_locations_table()
+        self.sample_stage_dialog.show()
+        self.sample_stage_dialog.raise_()
+        self.sample_stage_dialog.activateWindow()
+
+    def _refresh_locations_table(self) -> None:
+        """SPIM MAIN 'Update Positions': the Scan Setup table mirrors the
+        Location Sequence (Name column dropped, 'no room')."""
+        if self.sample_stage_dialog is None:
+            return
+        seq = self.sample_stage_dialog.sequence
+        xyz = seq.positions_um()
+        rel = seq.rel_offsets_um()
+        self.locations_table.setRowCount(max(3, len(xyz)))
+        for r in range(self.locations_table.rowCount()):
+            vals = (f"{xyz[r][0]:.2f}", f"{xyz[r][1]:.2f}", f"{xyz[r][2]:.2f}", f"{rel[r]:.2f}") if r < len(xyz) else ("", "", "", "")
+            for c, v in enumerate(vals):
+                self.locations_table.setItem(r, c, QTableWidgetItem(v))
+
     def _camera_debug_status(self) -> CameraDebugStatus:
         """The counters LouisXIV's Debug Panel shows, from what this window
         keeps; camera reads are skipped during a blocking driver call."""
@@ -2147,6 +2229,8 @@ class MainWindow(QMainWindow):
             self._log(f"Buffer-state check failed: {type(e).__name__}: {e}")
 
     def closeEvent(self, event):
+        if self.sample_stage_dialog is not None:
+            self.sample_stage_dialog.shutdown()
         # A close can arrive from the native message pump while a driver
         # call is still blocking this thread. Tearing the hardware down from
         # inside that call is the same nested-driver fault the guard exists

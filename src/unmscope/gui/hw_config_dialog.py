@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtWidgets import QMessageBox
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QFileDialog, QLabel, QLineEdit, QPushButton, QSpinBox,
     QStyle, QTabBar, QTabWidget, QWidget,
@@ -214,6 +215,7 @@ class HwConfigDialog(QDialog):
     def _button(self, parent, text, rect, slot=None, *, name="hwButton") -> QPushButton:
         b = QPushButton(text, parent)
         b.setObjectName(name)
+        b.setAutoDefault(False)        # Enter in a field must not press a button (LabVIEW: Enter only commits)
         b.setGeometry(*_r(*rect) if parent is not self else rect)
         if slot is not None:
             b.clicked.connect(slot)
@@ -222,6 +224,7 @@ class HwConfigDialog(QDialog):
     def _browse(self, parent, rect, on_pick: Callable[[], None]) -> QPushButton:
         b = QPushButton(parent)
         b.setObjectName("hwButton")
+        b.setAutoDefault(False)
         b.setGeometry(*_r(*rect))
         b.setIcon(self.style().standardIcon(QStyle.SP_DirOpenIcon))
         b.clicked.connect(on_pick)
@@ -256,7 +259,7 @@ class HwConfigDialog(QDialog):
         self._label(page, "Serial Number", (30, 188, 80, 16))
         self.cam_serial = self._text(page, (27, 201, 72, 24), bevel=True)     # +1 px: the bevel shadow runs 1 px past the fill
         self._label(page, "Save Index", (28, 229, 70, 16))
-        self.cam_save_index = self._int(page, (27, 242, 54, 22), 0, 99, bevel=True)
+        self.cam_save_index = self._int(page, (27, 242, 54, 22), bevel=True)
         self.cam_sync_readout = self._check(page, "Sync Readout", (27, 266, 100, 13))
         self._label(page, "Image Transform", (28, 283, 95, 16))
         self.cam_image_transform = self._combo(page, IMAGE_TRANSFORMS, (27, 296, 80, 21))
@@ -266,9 +269,9 @@ class HwConfigDialog(QDialog):
         self._label(page, "RemoteIP", (150, 172, 70, 16))
         self.cam_remote_ip = self._text(page, (149, 185, 84, 24), bevel=True)
         self._label(page, "DCAM Port", (150, 213, 70, 16))
-        self.cam_dcam_port = self._int(page, (149, 226, 54, 22), 0, 65535, bevel=True)
+        self.cam_dcam_port = self._int(page, (149, 226, 54, 22), bevel=True)
         self._label(page, "Cmd Port", (150, 252, 70, 16))
-        self.cam_cmd_port = self._int(page, (149, 265, 54, 22), 0, 65535, bevel=True)
+        self.cam_cmd_port = self._int(page, (149, 265, 54, 22), bevel=True)
         self._label(page, "Binning", (150, 292, 50, 16))
         self.cam_binning = self._combo(page, BINNING_LABELS, (149, 306, 48, 23))
 
@@ -286,7 +289,7 @@ class HwConfigDialog(QDialog):
     def _build_imagine_optics(self, page: QWidget) -> None:
         self.io_enable = self._check(page, "Enable", (11, 36, 70, 13))
         self.io_simulate = self._check(page, "Simulate", (11, 51, 70, 13))
-        self.io_n_pts = self._int(page, (11, 64, 58, 21), 1, 999, arrows=True)
+        self.io_n_pts = self._int(page, (11, 64, 58, 21), arrows=True)
         self._label(page, "# Pts (Default)", (69, 69, 90, 16))
         self.io_default_camera = self._combo(page, CAMERA_IDS, (11, 84, 135, 21))
         self._label(page, "Default Camera", (148, 90, 90, 16))
@@ -303,7 +306,7 @@ class HwConfigDialog(QDialog):
                          lambda a=attr, pat=pattern, e=e: self._pick_file(e, pat))
             self._io_paths[attr] = e
         self._label(page, "Sleep after command apply (ms)", (17, 312, 180, 16))
-        self.io_sleep_ms = self._int(page, (15, 328, 58, 20), 0, 100000, arrows=True)
+        self.io_sleep_ms = self._int(page, (15, 328, 58, 20), arrows=True)
         self._label(page, "Default Analyis Method", (11, 356, 150, 16))
         self.io_analysis = self._combo(page, ANALYSIS_METHODS, (11, 371, 192, 21))
         self._label(page, "Matlab Script Directory", (12, 395, 140, 16))
@@ -465,7 +468,11 @@ class HwConfigDialog(QDialog):
     # -- the button row -----------------------------------------------------------
     def apply(self) -> bool:
         """[4] Apply Configs: write the ini copy, then tell the window."""
-        save_hw_config(self.config, self.ini_path)
+        try:
+            save_hw_config(self.config, self.ini_path)
+        except OSError as e:               # LouisXIV: Simple Error Handler dialog
+            QMessageBox.warning(self, "HW Config", f"Could not write {self.ini_path}:\n{e}")
+            return False
         self.applied.emit(copy_config(self.config))
         return True
 

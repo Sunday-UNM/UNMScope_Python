@@ -546,6 +546,9 @@ invent them. Foundation landed first: a Z-stack is now retained in memory
    + panel only; HW Config writes a UNMScope-owned copy of SPIMProject.ini (not
    LouisXIV's); FPGA Scope = the Waveforms tab (fix channel names 18-23: Perfusion,
    AOTF 2-6); build order: scope fix, Camera Debug Panel, HW Config, stage, um/V.
+   **DONE:** scope names (`b525ff4`), Camera Debug Panel (`931b97d`,
+   `gui/camera_debug_panel.py`, remote block dropped). HW Config / stage / um/V
+   are being built on branches tool/hw-config, tool/sample-stage, tool/um-per-volt.
    Research maps (panel controls, event cases, sub-VIs, hardware) are in the
    session workflow journals; digest in the scratchpad `tools_research_digest.txt`.
 6. **GUI cleanup DONE 2026-09-05** (user's decisions, recorded in CLAUDE.md):

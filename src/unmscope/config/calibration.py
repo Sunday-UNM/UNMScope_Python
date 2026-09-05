@@ -11,15 +11,25 @@ Sections used (values as found 2026-09-03):
     Dither Galvo um/V = 10              [D Galvo Limits (V)]  -5.5 .. 5.5
     SamplePiezo um/SamplePiezo Volt = 100
     XTile um/V = 1
+
+The [Microns to Volt calibrations] keys come from ``unmscope.config.um_per_volt``
+(LouisXIV's cluster, 1:1, with its Save); the full cluster rides along as
+``Calibration.um_per_volt`` and the axes' ``um_per_volt`` values are taken
+from that same object, so the two can never disagree. The fallback numbers
+when a key is missing are the 2026-09-03 ini values above (a pre-existing
+choice of this module; LouisXIV would use its cluster defaults instead, see
+docs/um_per_volt_calibration.md).
 """
 from __future__ import annotations
 
 import configparser
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-DEFAULT_INI = Path(r"H:\UNM_Lightsheet\UNMScope_Source\SPIM\SPIM Support files\SPIMProject.ini")
+from unmscope.config.um_per_volt import LOUISXIV_INI, MicronsToVolt
+
+DEFAULT_INI = LOUISXIV_INI
 
 
 @dataclass(frozen=True)
@@ -110,6 +120,16 @@ class Calibration:
     x_tile: Axis
     aotf: Aotf
     source: str
+    #: The whole [Microns to Volt calibrations] cluster (all nine keys); the
+    #: axes above carry the same um/V numbers.
+    um_per_volt: MicronsToVolt = field(default_factory=MicronsToVolt)
+
+
+#: Fallbacks for a missing [Microns to Volt calibrations] key: the 2026-09-03
+#: ini numbers for the six keys this module always read, LouisXIV's cluster
+#: defaults for the other three.
+_UM_PER_VOLT_FALLBACK = MicronsToVolt(galvo_cmd_x=2000.0, galvo_cmd_z=7.0, zpiezo=8.0,
+                                      dither_galvo=10.0, sample_piezo=100.0, xtile=1.0)
 
 
 def _get(cp: configparser.ConfigParser, section: str, key: str, default: float) -> float:
@@ -138,20 +158,21 @@ def load_calibration(ini_path: str | Path | None = None) -> Calibration:
     aotf = Aotf(labels=labels or ("637", "561", "488", "405"),
                 v_min=_get(cp, "AOTF Limits (V)", "Min (V)", 0.0),
                 v_max=_get(cp, "AOTF Limits (V)", "Max (V)", 5.0))
-    cal = "Microns to Volt calibrations"
+    mtv = MicronsToVolt.from_configparser(cp, fallback=_UM_PER_VOLT_FALLBACK)
     return Calibration(
         aotf=aotf,
         detection=Detection(magnification=_get(cp, "Detection optics", "Magnification", 30.0),
                             physical_pixel_z_um=_get(cp, "Detection optics", "PhysicalPixelSizeZ (um)", 0.2)),
-        x_galvo=Axis("X Galvo", _get(cp, cal, "Galvo cmd X um/X Volt", 2000.0),
+        x_galvo=Axis("X Galvo", mtv.galvo_cmd_x,
                      _get(cp, "X Galvo Limits (V)", "Min (V)", -2.5), _get(cp, "X Galvo Limits (V)", "Max (V)", 2.5)),
-        z_galvo=Axis("Z Galvo", _get(cp, cal, "Galvo cmd Z um/Z Volt", 7.0),
+        z_galvo=Axis("Z Galvo", mtv.galvo_cmd_z,
                      _get(cp, "Z Galvo Limits (V)", "Min (V)", -2.5), _get(cp, "Z Galvo Limits (V)", "Max (V)", 2.5)),
-        z_piezo=Axis("Z Piezo", _get(cp, cal, "Zpiezo um/Zpiezo Volt", 8.0),
+        z_piezo=Axis("Z Piezo", mtv.zpiezo,
                      _get(cp, "Z Piezo Limits (V)", "Min (V)", -2.5), _get(cp, "Z Piezo Limits (V)", "Max (V)", 10.0)),
-        dither_galvo=Axis("Dither Galvo", _get(cp, cal, "Dither Galvo um/V", 10.0),
+        dither_galvo=Axis("Dither Galvo", mtv.dither_galvo,
                           _get(cp, "D Galvo Limits (V)", "Min (V)", -5.5), _get(cp, "D Galvo Limits (V)", "Max (V)", 5.5)),
-        sample_piezo=Axis("Sample Piezo", _get(cp, cal, "SamplePiezo um/SamplePiezo Volt", 100.0), -10.0, 10.0),
-        x_tile=Axis("X Tile", _get(cp, cal, "XTile um/V", 1.0), -10.0, 10.0),
+        sample_piezo=Axis("Sample Piezo", mtv.sample_piezo, -10.0, 10.0),
+        x_tile=Axis("X Tile", mtv.xtile, -10.0, 10.0),
         source=source,
+        um_per_volt=mtv,
     )

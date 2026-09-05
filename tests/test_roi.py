@@ -68,8 +68,10 @@ def test_button_helpers_keep_size_and_centre():
     c = center_roi(r, 2048, 2048)
     assert c.width == 512 and c.center == (1024.5, 1024.5)
     at = center_roi_at(r, 300.0, 400.0)
-    assert at.width == 512
-    assert abs(at.center[0] - 300.0) <= 0.5 and abs(at.center[1] - 400.0) <= 0.5   # even width: x.5 centres
+    # [21] "Center ROI at XY": X -/+ (512 IQ 2) -> 44..556, one pixel wider than
+    # 512; the ROI handler's coercion trims it afterwards
+    assert (at.left, at.right, at.top, at.bottom) == (44, 556, 144, 656)
+    assert at.width == 513 and at.center == (300.0, 400.0)
 
 
 # -- the simulated camera honours ROI / binning / sensor mode --------------------

@@ -11,7 +11,7 @@ Tests: `tests/test_roi.py`, `tests/test_camera_tab.py`.
 | ROI Left/Right/Top/Bottom | 1-based inclusive, like the panel. Every edit is coerced: Left/Top clamped into the sensor and snapped **down** to the position unit, size rounded **down** to the size unit; the accepted values are written back. | `DCAM - Coerce ROI.vi`, `DCAM - Coerce ROI size.vi` (Round = Down), `DCAM - Set ROI.vi` |
 | # of pixels X/Y | Changing the count grows/shrinks the ROI about its centre by `(new - old) IQ 2` per side. | `HHMI - Adjust ROI based upon change in number of pixels.vi` |
 | FOV X/Y | `pixels * pixel size`, pixel size = 6.5 um * binning / mag 30 = 0.2167 um. | `Camera Image Pixel sizes.vi`, `SPIMProject.ini [Detection optics]` |
-| Sensor Mode | Normal Scan / Split View / Rolling Bottom. Dual View mode and Split pix # are only enabled in Split View (the live panel greys them in Normal Scan). | `DCAM - Set Sensor Mode.vi` (cases seen: "Split View", "Rolling Bott..."), `DCAM - Sensor Mode enum.ctl` |
+| Sensor Mode | Normal Scan / Light Sheet / Split View / Rolling Bottom. Dual View mode and Split pix # are only enabled in Split View (the live panel greys them in Normal Scan). LouisXIV's [18] "Cam settings" handler also sets X wave = Sawtooth with duty 0.05 for Light Sheet (waveform config, not ported) and sends Set Camera + Update Cam to the engine. | SPIM MAIN [18], `DCAM - Set Sensor Mode.vi` (cases seen: "Split View", "Rolling Bott..."), `DCAM - Sensor Mode enum.ctl` |
 | Actual | exposure read back from the camera, frame time = the trigger period for that exposure, rate = 1000 / frame time, "1 exposure(s)". | panel indicators |
 | Binning | API only (`set_binning` 1/2/4, symmetric); not on LouisXIV's Camera tab. | `DCAM - Set Binning.vi` |
 
@@ -25,13 +25,14 @@ before the exposure push (stopping is what loses the exposure, see
 
 ## Assumed, to confirm against LouisXIV / the hardware
 
-- **The five buttons** (Center ROI, Use all pixels, 1024x1024, 512x512, Center
-  ROI at). Their handlers are in SPIM MAIN.vi's event structure, which LabVIEW
-  stores compressed; the greppable VIs do not contain them. Implemented as the
-  evident behaviour: full sensor; that size centred on the sensor; same size
-  centred on the sensor; same size centred on (X, Y). To read the real
-  handlers, export SPIM MAIN.vi's diagram with LouisXIV closed (the COM class is
-  held by the running exe).
+- ~~The five buttons~~ -- **resolved 2026-09-05** from a hidden-frames export of
+  SPIM MAIN.vi's diagram (`VI_Diagrams/.../SPIM MAIN/hidden_frames`): [9] "All
+  pixels?" = (1, CCD X, 1, CCD Y); [5] "512x512"/"1024x1024" and [22] "Center
+  ROI" shift the ROI by round(round(CCD/2) - mean(Left, Right)) per axis; [21]
+  "Center ROI at XY" = X -/+ (width IQ 2), Y -/+ (height IQ 2) (one pixel wide
+  of even sizes, then coerced); [1] "# of image pixels" = the Adjust-ROI VI.
+  All then fire [73] "ROI": Value Change (coerce, update # of image pixels,
+  "Set Camera" to the engine). `roi.py` now implements exactly these.
 - **DCAM "SENSOR MODE" values** for the three mode names
   (`OrcaFlash4Camera.SENSOR_MODE_VALUES`): check with
   `getAllowedPropertyValues("SENSOR MODE")` on the real camera.

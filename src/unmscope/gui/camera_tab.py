@@ -14,9 +14,8 @@ Behaviour, VI for VI (H:\\UNM_Lightsheet\\VI_Diagrams):
 - FOV = pixels * Camera Image Pixel size (``Camera Image Pixel sizes.vi``).
 - Sensor Mode drives ``DCAM - Set Sensor Mode``; Dual View mode and Split
   pix # are only live in Split View (the live panel greys them otherwise).
-- The convenience buttons' exact handlers live in SPIM MAIN.vi's compressed
-  event structure (not readable this session); see roi.py for the ASSUMED
-  semantics they implement.
+- The buttons follow SPIM MAIN.vi's event cases [5], [9], [21], [22] and the
+  ROI handler [73] (hidden-frames diagram export); see roi.py.
 - Settings are pushed to the camera when it is idle, and again at scan start
   (``apply_to_camera``, LouisXIV's 'DCAM - Set parameters' at Acquire), since
   DCAM cannot change the subarray while a sequence is armed.

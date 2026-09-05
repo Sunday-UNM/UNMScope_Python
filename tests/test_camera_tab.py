@@ -49,10 +49,17 @@ def test_presets_and_centre_buttons(app):
     tab.roi_center_x.setValue(600)
     tab.roi_center_y.setValue(700)
     tab.on_center_roi_at()
-    # DCAM snaps Left/Top down to the 4-px position unit: centre within one unit
-    assert tab.roi.width == 512 and abs(tab.roi.center[0] - 600) <= 4 and abs(tab.roi.center[1] - 700) <= 4
+    # [21] gives 344..856 (513 wide); Coerce ROI snaps Left down to the 4-px unit
+    # FIRST and rounds the size from there, so LouisXIV lands on 341..856 = 516.
+    assert tab.roi == Roi(341, 441, 856, 956)
+    assert 512 <= tab.roi.width <= 516 and abs(tab.roi.center[0] - 600) <= 4
+    # [22] Center ROI from a clean off-centre 512 x 512 in the top-left corner
+    tab.on_use_all_pixels()
+    tab.roi_right.setValue(512)
+    tab.roi_bottom.setValue(512)
+    assert tab.roi == Roi(1, 1, 512, 512)
     tab.on_center_roi()
-    assert tab.roi.center == (1024.5, 1024.5)
+    assert tab.roi == Roi(769, 769, 1280, 1280) and tab.roi.center == (1024.5, 1024.5)
     tab.on_use_all_pixels()
     assert roi_fields(tab) == (1, 1, 2048, 2048)
 

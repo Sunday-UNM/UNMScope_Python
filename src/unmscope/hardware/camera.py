@@ -185,10 +185,12 @@ class Camera(abc.ABC):
 
     # -- ROI / binning / sensor mode: the LouisXIV Camera tab -----------------
     #: LouisXIV's DCAM sensor modes (DCAM - Sensor Mode enum). "Normal Scan"
-    #: is the panel default; "Split View" and "Rolling Bottom" are the cases
-    #: seen in DCAM - Set Sensor Mode.vi. The enum typedef's full item list is
-    #: stored compressed in the .ctl and was not readable this session.
-    SENSOR_MODES = ("Normal Scan", "Split View", "Rolling Bottom")
+    #: is the panel default and "Light Sheet" the other case SPIM MAIN's
+    #: [18] "Cam settings" handler switches on (it also sets X wave =
+    #: Sawtooth, duty 0.05 for Light Sheet -- a waveform-config knob, not
+    #: ported); "Split View" and "Rolling Bottom" are the cases seen in DCAM -
+    #: Set Sensor Mode.vi. The typedef's full item list was not readable.
+    SENSOR_MODES = ("Normal Scan", "Light Sheet", "Split View", "Rolling Bottom")
     SENSOR_WIDTH = 2048
     SENSOR_HEIGHT = 2048
 
@@ -527,7 +529,8 @@ class OrcaFlash4Camera(Camera):
     #: hardware: the Orca Flash 4.0 reports AREA (normal) and PROGRESSIVE
     #: (rolling / light-sheet readout); split view is a separate DCAM
     #: feature on some firmware. Check with getAllowedPropertyValues.
-    SENSOR_MODE_VALUES = {"Normal Scan": "AREA", "Rolling Bottom": "PROGRESSIVE", "Split View": "SPLIT VIEW"}
+    SENSOR_MODE_VALUES = {"Normal Scan": "AREA", "Light Sheet": "PROGRESSIVE",
+                          "Rolling Bottom": "PROGRESSIVE", "Split View": "SPLIT VIEW"}
 
     def _apply_roi(self, roi: Roi) -> None:
         # MMCore's setROI is 0-based (x, y, w, h) in the current binning; the

@@ -22,11 +22,16 @@ conversion inside the camera backend.
 - ``Camera Image Pixel sizes.vi``: um = pixels * pixel size; pixels = um /
   pixel size (pixel size = CCD pitch * binning / mag, see calibration).
 
-The Camera tab's convenience buttons (Use all pixels, 1024x1024, 512x512,
-Center ROI, Center ROI at) are handled inside SPIM MAIN.vi's event structure,
-whose strings LabVIEW stores compressed, so their exact semantics could not
-be read from the source in this session; the functions marked ASSUMED below
-implement the evident behaviour and must be confirmed against LouisXIV.
+The Camera tab's buttons are SPIM MAIN.vi event cases (read from a
+hidden-frames export of the diagram, 2026-09-05): [9] "All pixels?" sets
+(1, # of CCD pix X, 1, # of CCD pix Y); [5] "512x512"/"1024x1024" take the
+constant ROI (1, size, 1, size) and [22] "Center ROI" the current ROI, and
+shift all four edges by round(round(CCD/2) - mean(Left, Right)) per axis;
+[21] "Center ROI at XY" sets Left/Right = X -/+ (width IQ 2) and Top/Bottom =
+Y -/+ (height IQ 2) of the coerced ROI; [1] "# of image pixels" calls the
+Adjust-ROI VI with the old value. Every one of them then fires [73] "ROI":
+Value Change, which coerces (Camera Check USER ROI), updates # of image
+pixels, and sends "Set Camera" to the scan engine.
 """
 from __future__ import annotations
 
@@ -136,22 +141,37 @@ def pixels_for_um(um: float, pixel_size_um: float) -> float:
     return float(um) / float(pixel_size_um)
 
 
-# -- Camera-tab buttons: ASSUMED semantics (see module docstring) -----------------
+# -- Camera-tab buttons: SPIM MAIN.vi event cases (see the module docstring) ------
+
+def _to_i32(x: float) -> int:
+    """LabVIEW Round / To I32: half to even, as Python's round()."""
+    return int(round(x))
+
+
+def shift_to_sensor_center(roi: Roi, hmax: int, vmax: int) -> Roi:
+    """[22] "Center ROI" (and [5] for the presets): per axis, shift by
+    round(round(CCD pix / 2) - mean(Left, Right)); all four edges move."""
+    cx, cy = _to_i32(hmax / 2), _to_i32(vmax / 2)
+    dx = _to_i32(cx - (roi.left + roi.right) / 2)
+    dy = _to_i32(cy - (roi.top + roi.bottom) / 2)
+    return Roi(roi.left + dx, roi.top + dy, roi.right + dx, roi.bottom + dy)
+
 
 def centered_roi(width: int, height: int, hmax: int, vmax: int) -> Roi:
-    """ASSUMED: '1024x1024' / '512x512' -- that size centred on the sensor."""
-    left = (hmax - width) // 2 + 1
-    top = (vmax - height) // 2 + 1
-    return Roi(left, top, left + width - 1, top + height - 1)
+    """[5] "512x512" / "1024x1024": the constant (1, size, 1, size) ROI,
+    shifted to the sensor centre."""
+    return shift_to_sensor_center(Roi(1, 1, int(width), int(height)), hmax, vmax)
 
 
 def center_roi(roi: Roi, hmax: int, vmax: int) -> Roi:
-    """ASSUMED: 'Center ROI' -- keep the size, centre it on the sensor."""
-    return centered_roi(roi.width, roi.height, hmax, vmax)
+    """[22] "Center ROI": the current ROI shifted to the sensor centre."""
+    return shift_to_sensor_center(roi, hmax, vmax)
 
 
 def center_roi_at(roi: Roi, cx: float, cy: float) -> Roi:
-    """ASSUMED: 'Center ROI at' -- keep the size, centre it on (X, Y)."""
-    left = int(round(cx - (roi.width - 1) / 2.0))
-    top = int(round(cy - (roi.height - 1) / 2.0))
-    return Roi(left, top, left + roi.width - 1, top + roi.height - 1)
+    """[21] "Center ROI at XY": Left/Right = X -/+ (width IQ 2), Top/Bottom =
+    Y -/+ (height IQ 2). For even sizes this is one pixel wider than the ROI;
+    the ROI handler's coercion (size rounded Down) trims it."""
+    hw, hh = roi.width // 2, roi.height // 2
+    cx, cy = int(cx), int(cy)
+    return Roi(cx - hw, cy - hh, cx + hw, cy + hh)

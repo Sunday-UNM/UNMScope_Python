@@ -21,6 +21,11 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from unmscope.hardware.roi import (
+    DEFAULT_POSITION_UNIT, DEFAULT_SIZE_UNIT, Roi, coerce_roi, full_roi, roi_from_subarray,
+    subarray_from_roi,
+)
+
 
 #: Processes that are known to open the Hamamatsu camera through DCAM.
 #: Two processes opening DCAM at once is the prime suspect for the
@@ -178,6 +183,73 @@ class Camera(abc.ABC):
         Returns True if a repair was performed (and settings re-applied)."""
         return False
 
+    # -- ROI / binning / sensor mode: the LouisXIV Camera tab -----------------
+    #: LouisXIV's DCAM sensor modes (DCAM - Sensor Mode enum). "Normal Scan"
+    #: is the panel default; "Split View" and "Rolling Bottom" are the cases
+    #: seen in DCAM - Set Sensor Mode.vi. The enum typedef's full item list is
+    #: stored compressed in the .ctl and was not readable this session.
+    SENSOR_MODES = ("Normal Scan", "Split View", "Rolling Bottom")
+    SENSOR_WIDTH = 2048
+    SENSOR_HEIGHT = 2048
+
+    def sensor_size(self) -> tuple[int, int]:
+        """Full sensor (hmax, vmax) in unbinned pixels."""
+        return (self.SENSOR_WIDTH, self.SENSOR_HEIGHT)
+
+    def roi_units(self) -> tuple[int, int, int, int]:
+        """(hposunit, vposunit, hunit, vunit) -- the DCAM subarray steps."""
+        return (DEFAULT_POSITION_UNIT, DEFAULT_POSITION_UNIT, DEFAULT_SIZE_UNIT, DEFAULT_SIZE_UNIT)
+
+    def get_roi(self) -> Roi:
+        """Current ROI, 1-based inclusive, in unbinned sensor pixels."""
+        roi = getattr(self, "_roi", None)
+        return roi if roi is not None else full_roi(*self.sensor_size())
+
+    def set_roi(self, roi: Roi) -> Roi:
+        """DCAM - Set ROI: coerce (bounds, position units, size units rounded
+        Down), apply, and return what was actually set."""
+        hmax, vmax = self.sensor_size()
+        hpu, vpu, hu, vu = self.roi_units()
+        coerced = coerce_roi(roi, hmax, vmax, hposunit=hpu, vposunit=vpu, hunit=hu, vunit=vu)
+        self._apply_roi(coerced)
+        self._roi = coerced
+        return coerced
+
+    def _apply_roi(self, roi: Roi) -> None:
+        """Backend hook; the base keeps state only."""
+
+    def get_binning(self) -> int:
+        return int(getattr(self, "_binning", 1))
+
+    def set_binning(self, binning: int) -> int:
+        """DCAM - Set Binning: only 1, 2 or 4 (symmetric)."""
+        b = int(binning) if int(binning) in (1, 2, 4) else 1
+        self._apply_binning(b)
+        self._binning = b
+        return b
+
+    def _apply_binning(self, binning: int) -> None:
+        """Backend hook; the base keeps state only."""
+
+    def get_sensor_mode(self) -> str:
+        return getattr(self, "_sensor_mode", self.SENSOR_MODES[0])
+
+    def set_sensor_mode(self, mode: str) -> str:
+        if mode not in self.SENSOR_MODES:
+            raise ValueError(f"unknown sensor mode {mode!r}; one of {self.SENSOR_MODES}")
+        self._apply_sensor_mode(mode)
+        self._sensor_mode = mode
+        return mode
+
+    def _apply_sensor_mode(self, mode: str) -> None:
+        """Backend hook; the base keeps state only."""
+
+    def image_size(self) -> tuple[int, int]:
+        """(width, height) of the frames the camera delivers now: the ROI
+        divided by the binning."""
+        roi, b = self.get_roi(), self.get_binning()
+        return (max(1, roi.width // b), max(1, roi.height // b))
+
     @abc.abstractmethod
     def connect(self) -> None: ...
 
@@ -209,6 +281,7 @@ class SimulatedCamera(Camera):
     work and automated tests without touching real hardware."""
 
     def __init__(self, width: int = 2048, height: int = 2048):
+        self.SENSOR_WIDTH, self.SENSOR_HEIGHT = int(width), int(height)
         self._connected = False
         self._exposure_ms = 33.325
         self._width = width
@@ -243,7 +316,8 @@ class SimulatedCamera(Camera):
     def info(self) -> CameraInfo | None:
         if not self._connected:
             return None
-        return CameraInfo(name="Simulated Camera", serial="SIM-0000", width=self._width, height=self._height)
+        w, h = self.image_size()
+        return CameraInfo(name="Simulated Camera", serial="SIM-0000", width=w, height=h)
 
     def set_exposure_ms(self, exposure_ms: float) -> None:
         self._exposure_ms = exposure_ms
@@ -258,7 +332,8 @@ class SimulatedCamera(Camera):
         # size plus a per-frame offset. A fresh 2048x2048 Poisson draw per
         # frame cost ~150 ms and, at 10-30 fps in "simulate on FPGA" mode,
         # starved the GUI thread and the FPGA Scope reader of the GIL.
-        shape = (self._height, self._width)
+        w, h = self.image_size()
+        shape = (h, w)
         if self._base is None or self._base.shape != shape:
             self._base = self._rng.poisson(lam=200, size=shape).astype(np.uint16)
         self._frame_index += 1
@@ -447,6 +522,33 @@ class OrcaFlash4Camera(Camera):
         if self._mmc is None:
             raise CameraError("Camera not connected")
         return self._mmc.getExposure()
+
+    #: DCAM "SENSOR MODE" values for LouisXIV's mode names. UNVERIFIED on
+    #: hardware: the Orca Flash 4.0 reports AREA (normal) and PROGRESSIVE
+    #: (rolling / light-sheet readout); split view is a separate DCAM
+    #: feature on some firmware. Check with getAllowedPropertyValues.
+    SENSOR_MODE_VALUES = {"Normal Scan": "AREA", "Rolling Bottom": "PROGRESSIVE", "Split View": "SPLIT VIEW"}
+
+    def _apply_roi(self, roi: Roi) -> None:
+        # MMCore's setROI is 0-based (x, y, w, h) in the current binning; the
+        # subarray in DCAM - Set ROI is hpos, vpos, hsize, vsize likewise.
+        hpos, vpos, hsize, vsize = subarray_from_roi(roi)
+        b = self.get_binning()
+        self._mmc.setROI(hpos // b, vpos // b, hsize // b, vsize // b)
+
+    def get_roi(self) -> Roi:
+        try:
+            x, y, w, h = self._mmc.getROI()
+            b = self.get_binning()
+            return roi_from_subarray(x * b, y * b, w * b, h * b)
+        except Exception:
+            return super().get_roi()
+
+    def _apply_binning(self, binning: int) -> None:
+        self._mmc.setProperty(self.DEVICE_LABEL, "Binning", f"{binning}x{binning}")
+
+    def _apply_sensor_mode(self, mode: str) -> None:
+        self._mmc.setProperty(self.DEVICE_LABEL, "SENSOR MODE", self.SENSOR_MODE_VALUES[mode])
 
     def repair_exposure_if_lost(self, tolerance: float = 0.01) -> bool:
         """Work around a Micro-Manager Hamamatsu adapter quirk.

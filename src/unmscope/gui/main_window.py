@@ -63,6 +63,7 @@ from unmscope.config.calibration import load_calibration
 from unmscope.analysis.projections import DEFAULT_STAGE_ANGLE_DEG, stack_projections
 from unmscope.fileio.tiff_stack import save_tiff_stack, stack_path, write_acq_info
 from unmscope.gui.scope_view import FpgaScopePanel
+from unmscope.gui.camera_tab import CameraTab
 
 MODE_CONTINUOUS = "Continuous Scan"
 MODE_ZSTACK = "Z stack"
@@ -697,33 +698,26 @@ class MainWindow(QMainWindow):
 
     def _build_camera_tab(self) -> QWidget:
         # Connect/Disconnect + status live in the always-visible Hardware
-        # Connection bar above the tabs now -- this tab just holds settings
-        # for an already-connected camera.
-        tab = QWidget()
-        lay = QVBoxLayout(tab)
-
-        settings_box = QGroupBox("Camera Settings")
-        form = QFormLayout(settings_box)
-        self.exposure_spin = QDoubleSpinBox()
-        self.exposure_spin.setRange(0.1, 10000.0)
-        self.exposure_spin.setDecimals(2)
-        self.exposure_spin.setSuffix(" ms")
-        self.exposure_spin.setValue(100.0)
+        # Connection bar above the tabs; this tab is LouisXIV's Camera tab
+        # (unmscope.gui.camera_tab) for an already-connected camera.
+        self.camera_tab = CameraTab(
+            get_camera=lambda: self.camera,
+            pixel_size_um=lambda binning=1: self.calibration.detection.pixel_size_um(binning=binning),
+            log=self._log)
+        self.exposure_spin = self.camera_tab.exposure_spin
         self.exposure_spin.valueChanged.connect(self.on_exposure_changed)
-        form.addRow("Exposure:", self.exposure_spin)
         # LouisXIV runs this Orca in DCAM SYNCREADOUT trigger mode
         # (SPIMProject.ini [Cam1.Camera Settings] Sync Readout = TRUE): the
-        # FPGA trigger interval IS the exposure, so the frame time equals
-        # the exposure instead of exposure + 33 ms readout. Applied at
-        # Acquire (_start_acquisition); the first frame of every run is a
-        # warm-up frame of undefined exposure and is discarded.
-        self.sync_readout_chk = QCheckBox("Sync readout (frame time = exposure)")
-        self.sync_readout_chk.setChecked(True)
-        form.addRow("Trigger mode:", self.sync_readout_chk)
-
-        lay.addWidget(settings_box)
-        lay.addStretch(1)
-        return tab
+        # FPGA trigger interval IS the exposure. Applied at Acquire.
+        self.sync_readout_chk = self.camera_tab.sync_readout_chk
+        # Same reason as Scan Setup: keep the window at the real panel's size
+        # and scroll the page (the connection bar above the tabs costs 119 px
+        # of page height the real panel has).
+        scroll = QScrollArea()
+        scroll.setWidget(self.camera_tab)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        return scroll
 
     def _build_adv_setup_tab(self) -> QWidget:
         # FPGA Connect/Disconnect + status live in the always-visible
@@ -1402,6 +1396,7 @@ class MainWindow(QMainWindow):
             pass
         finally:
             self.exposure_spin.blockSignals(False)
+        self.camera_tab.refresh_from_camera()
 
     def on_disconnect_clicked(self):
         if not self._begin_blocking("Camera disconnect"):
@@ -1432,6 +1427,7 @@ class MainWindow(QMainWindow):
                 pass
             camera.disconnect()
             self._log("Camera disconnected.")
+        self.camera_tab.on_disconnected()
         self.status_label.setText("Not connected")
         self.status_label.setStyleSheet("font-weight: bold;")
 
@@ -1444,6 +1440,7 @@ class MainWindow(QMainWindow):
             self.camera.set_exposure_ms(value)
         except Exception as e:
             self._log(f"Set exposure failed: {type(e).__name__}: {e}")
+        self.camera_tab.refresh_actuals()
 
     # -- FPGA actions --------------------------------------------------------
     def on_fpga_connect_clicked(self):
@@ -1547,6 +1544,14 @@ class MainWindow(QMainWindow):
             msg = "Please select only 1 excitation source to be \"ON\" (with Power > 0%) and try again."
             self._log(f"Excitation check failed: {msg}")
             QMessageBox.warning(self, "Excitation", msg)
+            return
+
+        try:
+            if self.camera_tab.apply_to_camera(self.camera):
+                self._log("Camera ROI / sensor mode applied at scan start.")
+        except Exception as e:
+            self._log(f"Failed to apply camera ROI / sensor mode: {type(e).__name__}: {e}")
+            QMessageBox.warning(self, "Error", f"Failed to apply camera settings:\n{e}")
             return
 
         try:

@@ -482,6 +482,15 @@ invent them. Foundation landed first: a Z-stack is now retained in memory
    (exposure / rate / # exposures), Sensor Mode, Dual View + Split pix#, ROI
    (Left/Right/Top/Bottom; Center ROI, Use all pixels, 1024x1024, 512x512,
    Center ROI at), # of pixels X/Y, FOV X/Y (um), SubROIs/Full ROI, ROI center.
+   **DONE 2026-09-05** -- `gui/camera_tab.py` (layout measured box-for-box
+   against the live panel, 0 px delta on every box), `hardware/roi.py` (DCAM
+   Coerce ROI / Coerce ROI size / Adjust ROI / Set Binning, ported from the
+   VIs), ROI + binning + sensor mode on both camera backends;
+   `docs/camera_tab.md`. Still to confirm on hardware: the DCAM "SENSOR MODE"
+   value strings, the driver's real subarray units (assumed 4 px), and the
+   ASSUMED semantics of the five convenience buttons (their handlers live in
+   SPIM MAIN.vi's compressed event structure). Greyed, not wired: SubROIs /
+   Full ROI, Dual View mode, Split pix # -- keep-or-cut is the user's call.
 2. **Calc (Stack Projections)** -- XY / YZ / XZ max-intensity projections with
    DeSkew, from the retained stack. LabVIEW: `SPIM/.../Image/PSF/HHMI - Calc XZ
    and YZ Max Projection from slanted stack.vi`, `HHMI - Deskew Stack data into

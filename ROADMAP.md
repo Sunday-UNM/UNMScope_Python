@@ -536,6 +536,16 @@ invent them. Foundation landed first: a Z-stack is now retained in memory
    the rendered panel); wired: View TIF stack (loads a stack as if acquired),
    FPGA Scope. The other 16 are greyed; their SPIM MAIN event cases are indexed
    in `VI_Diagrams/.../SPIM MAIN/hidden_frames` for whichever the user picks.
+   **User's pick (2026-09-05), to port or build:** FPGA Scope (LouisXIV's
+   `HHMI - AI buffer.vi` panel -- compare with our Waveforms tab), HW Config
+   (`GUI/HW Configuration GUI.vi`), Sample Stage Control (`Motion/Sample Stage
+   Control (All Axes)/Sample Stage Control GUI.vi`, MP285 stage), Camera Debug
+   Panel (`GUI/Camera Debug Panel.vi`), um per V calibration (the per-channel
+   calibration, own tab). List may grow.
+6. **GUI cleanup DONE 2026-09-05** (user's decisions, recorded in CLAUDE.md):
+   eight empty tabs, the Images tab's unwired furniture, Perfusion, and the
+   Camera tab's SubROIs / Dual View / Split pix # removed; Timepoints,
+   Multi-location and the full Utilities grid kept.
 
 Scale note: items 1, 4 and 5 are a multi-week surface (each Utilities tool is
 its own sub-GUI). The one-laser-at-a-time rule stays as LouisXIV has it.

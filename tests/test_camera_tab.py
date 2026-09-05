@@ -34,8 +34,7 @@ def test_defaults_match_the_louisxiv_panel(app):
     assert (tab.pix_x.value(), tab.pix_y.value()) == (2048, 2048)
     assert tab.fov_x.text() == "443.7 um" or tab.fov_x.text() == "443.8 um"   # 2048 * 6.5/30
     assert tab.sensor_mode() == "Normal Scan"
-    assert not tab.dual_view_combo.isEnabled() and not tab.split_pix_spin.isEnabled()
-    assert not tab.subrois.isEnabled()
+    assert not hasattr(tab, "subrois") and not hasattr(tab, "dual_view_combo")   # removed 2026-09-05
 
 
 def test_presets_and_centre_buttons(app):
@@ -94,7 +93,6 @@ def test_camera_receives_the_roi_and_sensor_mode(app):
     assert (cam.info.width, cam.info.height) == (512, 512)
     tab.sensor_mode_combo.setCurrentText("Split View")
     assert cam.get_sensor_mode() == "Split View"
-    assert tab.dual_view_combo.isEnabled()
     # armed sequence: deferred to Acquire, then applied by apply_to_camera
     cam.start_sequence(None)
     tab.on_use_all_pixels()

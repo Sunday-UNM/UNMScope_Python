@@ -12,16 +12,15 @@ Behaviour, VI for VI (H:\\UNM_Lightsheet\\VI_Diagrams):
 - '# of pixels' X/Y edits resize the ROI about its centre (``HHMI - Adjust
   ROI based upon change in number of pixels``).
 - FOV = pixels * Camera Image Pixel size (``Camera Image Pixel sizes.vi``).
-- Sensor Mode drives ``DCAM - Set Sensor Mode``; Dual View mode and Split
-  pix # are only live in Split View (the live panel greys them otherwise).
+- Sensor Mode drives ``DCAM - Set Sensor Mode``.
 - The buttons follow SPIM MAIN.vi's event cases [5], [9], [21], [22] and the
   ROI handler [73] (hidden-frames diagram export); see roi.py.
 - Settings are pushed to the camera when it is idle, and again at scan start
   (``apply_to_camera``, LouisXIV's 'DCAM - Set parameters' at Acquire), since
   DCAM cannot change the subarray while a sequence is armed.
 
-Not wired (greyed, per the honesty rule): SubROIs / Full ROI, Dual View
-mode, Split pix #.
+Removed on the user's cleanup call (2026-09-05): SubROIs / Full ROI, Dual
+View mode, Split pix # (LouisXIV shows them greyed in Normal Scan anyway).
 """
 from __future__ import annotations
 
@@ -30,7 +29,7 @@ from typing import Callable
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QLabel, QLineEdit, QPushButton, QSpinBox,
-    QTabWidget, QWidget,
+    QWidget,
 )
 
 from unmscope.hardware.camera import Camera
@@ -150,13 +149,6 @@ class CameraTab(QWidget):
         self.sensor_mode_combo.setGeometry(*_rect(125, 394, 110, 21))   # +4 px: Qt's arrow is wider than LabVIEW's
         self.sensor_mode_combo.addItems(list(Camera.SENSOR_MODES))
         self.sensor_mode_combo.currentTextChanged.connect(self._on_sensor_mode)
-        self.dual_view_label = self._label("Dual View mode", _rect(30, 493, 100, 19))
-        self.dual_view_combo = QComboBox(self)
-        self.dual_view_combo.setGeometry(*_rect(159, 493, 76, 19))
-        self.dual_view_combo.addItems(["No D.V."])
-        self.split_pix_label = self._label("Split pix #", _rect(30, 515, 100, 19))
-        self.split_pix_spin = self._spin(_rect(159, 515, 70, 19), 1, 2048, 1024)
-        self._set_split_view_enabled(False)
 
         # Actual (read-backs)
         self._label("Actual", _rect(297, 151, 60, 18), bold=True)
@@ -200,25 +192,6 @@ class CameraTab(QWidget):
         self.fov_x = self._readback(_rect(178, 680, 58, 18))
         self.fov_y = self._readback(_rect(178, 734, 58, 18))
 
-        # SubROIs / Full ROI (not wired: greyed)
-        self.subrois = QTabWidget(self)
-        self.subrois.setStyleSheet("QTabWidget::pane { border: 1px solid #000000; background: #ffffff; }")
-        for name in ("SubROIs", "Full ROI"):
-            page = QWidget()
-            for i, lab in enumerate(("Left", "Right", "Top", "Bottom")):
-                y = 4 + i * 22
-                QLabel(lab, page).setGeometry(4, y, 40, 18)
-                f = QLineEdit(page); f.setGeometry(46, y, 56, 18); f.setReadOnly(True)
-                f.setStyleSheet(f"background: {FIELD_GREY};")
-            self.subrois.addTab(page, name)
-        # (276,642) is the measured PANE top; the tab strip sits above it, so
-        # the widget starts one tab-bar height higher (measured after the tabs
-        # exist: an empty bar reports no height).
-        bar_h = self.subrois.tabBar().sizeHint().height()
-        # Qt draws the pane border 3 px up into the bar (measured 551 vs 554).
-        self.subrois.setGeometry(*_rect(276, 642 - bar_h + 3, 116, 122 + bar_h - 3))
-        self.subrois.setEnabled(False)
-
         # ROI center box + buttons
         self._label("ROI center", _rect(159, 804, 70, 16))
         self._box(_rect(159, 820, 82, 53), white=True)
@@ -239,10 +212,6 @@ class CameraTab(QWidget):
 
     def sensor_mode(self) -> str:
         return self.sensor_mode_combo.currentText()
-
-    def _set_split_view_enabled(self, on: bool) -> None:
-        for w in (self.dual_view_label, self.dual_view_combo, self.split_pix_label, self.split_pix_spin):
-            w.setEnabled(on)
 
     def _show_roi(self, roi: Roi) -> None:
         self._updating = True
@@ -305,7 +274,6 @@ class CameraTab(QWidget):
         self._set_roi(center_roi_at(self._roi, self.roi_center_x.value(), self.roi_center_y.value()))
 
     def _on_sensor_mode(self, mode: str) -> None:
-        self._set_split_view_enabled(mode == "Split View")
         if self._updating:
             return
         self._push_to_camera()
@@ -370,7 +338,6 @@ class CameraTab(QWidget):
         self._updating = True
         try:
             self.sensor_mode_combo.setCurrentText(cam.get_sensor_mode())
-            self._set_split_view_enabled(cam.get_sensor_mode() == "Split View")
         finally:
             self._updating = False
         info = cam.info

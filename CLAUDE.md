@@ -83,3 +83,20 @@ Controls that are laid out to match the real panel but are not wired to
 hardware are left **disabled/greyed**, never made to look functional.
 See the `main_window.py` module docstring. Do not add explanatory
 dev-note labels into the UI -- the user has removed all of them.
+
+## Cleanup decisions (the user's, 2026-09-05) -- these override "pixel-comparable"
+
+The port is a cleanup, not a 1:1 copy: LouisXIV accumulated junk over the
+years. The user decided, tab by tab:
+
+- Removed: the empty tabs Preferences, Adv Setup, Bckgrd, Blank, Image
+  Profile, Stack Profile, Row Profile, Timing; the Images tab's unwired tool
+  strip, Max Counts and display-option panels (Save Image stays under the
+  canvas); Scan Setup's Perfusion box; the Camera tab's SubROIs / Dual View /
+  Split pix #.
+- Kept although unwired: Scan Setup's Timepoints and Multi-location boxes
+  (wanted later); the full 18-button Utilities grid (greyed until ported).
+- Low-Level Waveform Config lives under Utilities (LouisXIV: Adv Setup).
+
+Match the real panel for what remains; do not re-add removed elements
+without asking. When unsure whether an element is a keeper, ask.

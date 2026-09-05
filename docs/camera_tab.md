@@ -41,10 +41,10 @@ before the exposure push (stopping is what loses the exposure, see
 - The **sensor-mode enum's full item list**: only the three names above were
   recoverable.
 
-## Not wired (greyed)
+## Removed (user's cleanup call, 2026-09-05)
 
-SubROIs / Full ROI, Dual View mode, Split pix #. Whether they are keepers or
-LouisXIV junk is the user's call (cleanup directive).
+SubROIs / Full ROI, Dual View mode, Split pix # -- LouisXIV greys them in
+Normal Scan anyway; not carried over.
 
 ## Layout, measured
 
@@ -59,7 +59,6 @@ from the tab widget frame; ours rendered offscreen and scanned the same way.
 | # of pixels | (149,469)-(227,552) | (149,469)-(227,552) | 0 |
 | FOV | (150,586)-(233,669) | (150,586)-(233,669) | 0 |
 | ROI center | (151,732)-(232,784) | (151,732)-(232,784) | 0 |
-| SubROIs pane | (268,554)-(383,675) | (268,554)-(383,675) | 0 |
 
 Colours (measured): page (250,250,250), box borders black, read-back fields
 (240,240,240), editable fields white, button faces (253,253,253).

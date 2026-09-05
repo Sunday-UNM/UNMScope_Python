@@ -139,6 +139,10 @@ class ScopeTraceWidget(QWidget):
     #: How near the pointer must be to a trace, in pixels, to pick it.
     HOVER_SLOP = 6
 
+    #: In trigger mode, how far back to look for an edge (the panel caps it
+    #: at the buffer length). Big on purpose: see seconds_needed.
+    TRIGGER_LOOKBACK_S = 60.0
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumSize(400, 260)
@@ -159,6 +163,8 @@ class ScopeTraceWidget(QWidget):
         self._delay_s = 0.0        # how far the right edge sits behind "now"
         self._trigger_col: int | None = None   # None = free run; else align on this column
         self._trig_info = ""
+        self._held_trig: ScopeSnapshot | None = None   # last snapshot that had a usable edge
+        self._source: ScopeSnapshot | None = None      # what _visible_segment slices this paint
         self._drawn: dict[int, tuple] = {}     # per-channel geometry, for hit-testing
         self._hover: int | None = None
         self._hover_pos = None
@@ -189,7 +195,13 @@ class ScopeTraceWidget(QWidget):
         apart, so asking only for the screen would never find one.
         """
         want = self.view_seconds + self._delay_s
-        return max(want * 3, want + 0.25) if self._trigger_col is not None else want
+        if self._trigger_col is None:
+            return want
+        # Trigger mode: ask for every second the panel will give (it caps this
+        # at "# of seconds to buff"). A Z stack is a burst of a few hundred ms
+        # every few seconds; looking back only 3x the screen missed the burst
+        # between passes and dropped the view to a flat live line.
+        return max(want * 3, want + 0.25, self.TRIGGER_LOOKBACK_S)
 
     def set_time_per_div(self, value: float) -> None:
         self._ti = min(range(len(TIME_PER_DIV)), key=lambda i: abs(TIME_PER_DIV[i] - value))
@@ -206,6 +218,7 @@ class ScopeTraceWidget(QWidget):
             # Anything banked while the trigger owned the position would now
             # take effect all at once, landing the user on a blank screen.
             self._delay_s = 0.0
+        self._held_trig = None
         self._trigger_col = col
         self.update()
 
@@ -230,6 +243,8 @@ class ScopeTraceWidget(QWidget):
 
     def set_data(self, snap: ScopeSnapshot | None) -> None:
         self._snap = snap
+        if snap is None:
+            self._held_trig = None
         self.update()
 
     # -- per-channel vertical scale ------------------------------------------
@@ -556,39 +571,61 @@ class ScopeTraceWidget(QWidget):
             return []
         return [c for c in sorted(self._enabled) if c < frames.shape[1]]
 
-    def _effective_delay(self) -> float:
-        """Where the right edge sits behind 'now'. In trigger mode this is
-        derived from the newest usable edge instead of the pan position."""
-        snap = self._snap
-        self._trig_info = ""
-        if self._trigger_col is None or snap is None or len(snap.frames) == 0:
-            return self._delay_s
+    def _edge_delay(self, snap: ScopeSnapshot):
+        """(delay, reason) for aligning the centre on this snapshot's newest
+        usable rising edge; delay is None when there is none."""
         if self._trigger_col >= snap.frames.shape[1]:
-            return self._delay_s
+            return None, "trigger column not streamed"
         col = snap.frames[:, self._trigger_col].astype(np.float64) * AI_VOLTS_PER_COUNT
         hot = col > 0.6                                   # the 1.25 V digital flags
         rises = np.flatnonzero(hot[1:] & ~hot[:-1]) + 1
         if len(rises) == 0:
-            self._trig_info = "no trigger"
-            return self._delay_s
+            return None, "no trigger"
         n = len(col)
         half = int(round(self.view_seconds * snap.fs_hz / 2))
         usable = rises[rises + half <= n]
         if len(usable) == 0:
-            self._trig_info = "trigger too recent"
-            return self._delay_s
+            return None, "trigger too recent"
         idx = int(usable[-1])
-        self._trig_info = "trig'd"
-        return max(0.0, (n - (idx + half)) / snap.fs_hz)
+        return max(0.0, (n - (idx + half)) / snap.fs_hz), "trig'd"
+
+    def _effective_delay(self) -> float:
+        """Where the right edge sits behind 'now'. In trigger mode this is
+        derived from the newest usable edge instead of the pan position.
+
+        Also decides which snapshot this paint slices (_source). When the
+        fresh snapshot has no usable edge, the last one that did is held on
+        screen -- a scope's Normal trigger. Without that, a Z stack (a burst
+        every few seconds) vanished between passes into a flat live line.
+        """
+        snap = self._snap
+        self._source = snap
+        self._trig_info = ""
+        if self._trigger_col is None or snap is None or len(snap.frames) == 0:
+            return self._delay_s
+        delay, reason = self._edge_delay(snap)
+        if delay is not None:
+            self._held_trig = snap
+            self._trig_info = reason
+            return delay
+        held = self._held_trig
+        if held is not None:
+            held_delay, held_reason = self._edge_delay(held)
+            if held_delay is not None:
+                self._source = held
+                self._trig_info = "trig'd (held)"
+                return held_delay
+        self._trig_info = reason
+        return self._delay_s
 
     def _visible_segment(self, delay: float | None = None) -> np.ndarray | None:
         """The slice of the snapshot the current window covers. The snapshot's
         last sample is 'now'; the window ends ``delay`` before that."""
-        snap = self._snap
-        if snap is None or len(snap.frames) == 0:
-            return None
         if delay is None:
             delay = self._effective_delay()
+        snap = self._source if self._source is not None else self._snap
+        if snap is None or len(snap.frames) == 0:
+            return None
         n = len(snap.frames)
         fs = snap.fs_hz
         end = n - int(round(delay * fs))
@@ -739,7 +776,8 @@ class ScopeTraceWidget(QWidget):
             x = plot.left() + plot.width() * i / HDIV
             p.drawText(QRectF(x - 44, plot.bottom() + 3, 88, 14), Qt.AlignHCenter | Qt.AlignTop,
                        time_axis_label((i - HDIV / 2) * per_div, per_div))
-        ref = "trigger" if self._trigger_col is not None and self._trig_info == "trig'd" else "screen centre"
+        ref = ("trigger" if self._trigger_col is not None and self._trig_info.startswith("trig'd")
+               else "screen centre")
         p.drawText(QRectF(plot.left(), plot.bottom() + 18, plot.width(), 14),
                    Qt.AlignHCenter, f"Time from {ref} ({time_axis_unit(per_div)})")
         p.save()
@@ -763,7 +801,7 @@ class ScopeTraceWidget(QWidget):
         # The segment may be shorter than the window (the ring does not reach
         # back far enough yet). Anchor it at the right edge and leave the rest
         # of the screen blank rather than stretching it to fit.
-        have_s = len(seg) / self._snap.fs_hz
+        have_s = len(seg) / (self._source or self._snap).fs_hz
         x_left = self._t_to_x(have_s, plot)
 
         for c in cols:

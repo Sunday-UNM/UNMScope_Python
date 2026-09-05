@@ -508,3 +508,64 @@ def test_a_tag_button_scales_only_its_own_waveform_even_when_ganged(app):
     _click(w, plus.center().x(), plus.center().y())
     assert w.per_channel_scale is True, "the tag button did not switch to independent scales"
     assert w.gain(11) == before_other, "the other waveform moved too"
+
+
+def _burst_snapshot(seconds=0.6, fs=100_000.0, slices=5, step_v=0.05, idle_after=0.05):
+    """A Z-stack burst: `slices` triggers 100 ms apart, the AO block starting
+    12 ms before each DIO4 edge with the Z piezo stepping per slice, then
+    everything at 0 for `idle_after` (stop_free_run -> safe_state)."""
+    n = int(seconds * fs)
+    t = np.arange(n) / fs
+    v = np.zeros((n, len(AI_CHANNEL_NAMES)))
+    end = seconds - idle_after
+    for k in range(slices):
+        t_dio = end - (slices - k) * 0.1
+        t_blk = t_dio - 0.012
+        v[(t >= t_dio) & (t < t_dio + 1e-4), IDX_DIO4] = 1.25
+        v[(t >= t_blk) & (t < t_blk + 0.088), 10] = step_v * k
+    frames = np.clip(v / AI_VOLTS_PER_COUNT, -32768, 32767).astype(np.int16)
+    return ScopeSnapshot(frames=frames, fs_hz=fs, names=tuple(AI_CHANNEL_NAMES), end_frame_index=n)
+
+
+def _quiet_snapshot(seconds=0.6, fs=100_000.0):
+    n = int(seconds * fs)
+    return ScopeSnapshot(frames=np.zeros((n, len(AI_CHANNEL_NAMES)), dtype=np.int16), fs_hz=fs,
+                         names=tuple(AI_CHANNEL_NAMES), end_frame_index=n)
+
+
+def test_trigger_view_holds_the_last_burst_between_stack_passes(app):
+    """A Z stack is a burst every few seconds. Between passes the fresh
+    snapshot has no edge; the view must keep the last triggered frame (a
+    scope's Normal trigger), not drop to a flat live line -- on the real FPGA
+    that made a 0..200 mV piezo staircase look like nothing was driven."""
+    w = ScopeTraceWidget()
+    w.resize(860, 430)
+    w.set_enabled([10, IDX_DIO4])
+    w.set_trigger_column(IDX_DIO4)
+    w.set_time_per_div(20e-3)
+    w.set_data(_burst_snapshot())
+    _painted(w)
+    assert w._trig_info == "trig'd"
+    top_before = float(w._drawn[10][4].max())
+    assert top_before > 0.15                                  # the staircase is on screen
+
+    w.set_data(_quiet_snapshot())                             # between passes: no edge at all
+    _painted(w)
+    assert w._trig_info == "trig'd (held)"
+    assert 10 in w._drawn and float(w._drawn[10][4].max()) == pytest.approx(top_before)
+
+    w.set_time_per_div(5e-3)                                  # zooming re-slices the held frame
+    _painted(w)
+    assert w._trig_info == "trig'd (held)"
+
+    w.set_trigger_column(None)                                # free run: genuinely live again
+    _painted(w)
+    assert w._trig_info == ""
+    assert float(w._drawn[10][4].max()) < 1e-3
+
+
+def test_trigger_mode_asks_for_the_whole_buffer(app):
+    w = ScopeTraceWidget()
+    w.set_time_per_div(20e-3)
+    w.set_trigger_column(IDX_DIO4)
+    assert w.seconds_needed() >= 10.0      # the panel caps it at "# of seconds to buff"

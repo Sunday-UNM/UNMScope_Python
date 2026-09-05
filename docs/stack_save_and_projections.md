@@ -49,30 +49,38 @@ was not read; ours is `key = value` in ini style).
 | `HHMI - Deskew Max column data into XZ Array.vi`: the same shear on the XZ rows (YZ has X collapsed, no shear) | same |
 | `HHMI - Calc XZ and YZ Max Projection from slanted stack.vi`: Z rescaled by `Zpixsize / X and Y pixsize`, both flipped horizontally, U16 out | same |
 
-Geometry. `[Sample stage] Angle between stage and bessel beam (deg) = 45`.
-A stage step `ds` per slice moves the image laterally by `ds*cos(45)` and in
-depth by `ds*sin(45)`; in pixels `X step = ds*cos/pix`, `Z/XY = ds*sin/pix`.
-**These two formulas are inferred from the geometry, not read off a diagram**
-(the VIs take `X step (pix)` and the ratio as inputs computed upstream from the
-per-slice "Sample Piezo" positions). Pixel size is `[Detection optics]`:
-6.5 um sensor pitch / Magnification 30 = 0.2167 um (= the Camera tab's 444 um
-FOV over 2048 px). `ds` is the Scan Setup Z Piezo Interval.
+**Where the numbers come from -- read off the diagrams, not derived.**
+Callers were found by grepping the `.vi` files: `HHMI - Get Max Projection of
+slanted stack.vi` (from SPIM MAIN / Reviewer) calls the XY and XZ/YZ VIs.
 
-One deliberate deviation: the sheared canvas width uses `ceil` where LabVIEW
-rounds to I32, so a fractional final shift never spills intensity off the
-right edge (at most one pixel wider, never narrower). The sub-pixel shift is
-an exact two-tap spread that conserves intensity; a test pins both.
+- **XY** (`Get XY Max Projection of slanted stack`): the `Sample Piezo` position
+  is read from image[1] and image[0], subtracted, and passed through
+  **Absolute Value**. So the XY shift per slice is **`|S[1] - S[0]|`, in the
+  position's own units** -- that VI has no link to any pixel-size VI. The
+  canvas is widened by `(n-1)*step` converted **To I32** (round half to even;
+  Python's `round()` matches).
+- **XZ / YZ** (`Deskew Max column data into XZ Array`): `S step = S[1]-S[0]`
+  (**signed**), `X step (um) = S step * cos(STAGE ANGLE)`, `Z step (um) =
+  S step * sin(STAGE ANGLE)`, `X step (pix) = X step (um) / pixel size`,
+  `Zpixsize/XYpixsize = Z step (um) / pixel size`.
+- **Pixel size** (`Image Acq/High level/Constants/Camera Image Pixel sizes`):
+  `CCD pixel pitch * Binning / Mag` = 6.5 um * 1 / 30 = 0.2167 um
+  (`Detection.pixel_size_um(binning)`).
+- `STAGE ANGLE` = `[Sample stage] Angle between stage and bessel beam (deg)` = 45.
+- `S positions` in the GUI: Scan Setup Z Piezo start, stepping by the interval
+  towards the end (signed), one per slice -- the values LouisXIV reads back
+  from each image's Position cluster.
 
-**Direction of the shear.** LouisXIV's `X step (pix)` is signed by the
-per-slice Sample Piezo positions; which way the image content actually walks
-across the sensor for a positive step depends on the optics and is not in the
-ini. Python therefore measures it from the data (`estimate_drift_sign`: the
-cross-correlation lag between the first and last slices' column-max
-profiles) and shears against it, so a stationary feature collapses to a spot
-whichever way it drifts. `stack_projections(..., direction=+1/-1)` overrides
-the measurement. This is a deliberate departure, and the reason for it was
-found the hard way: with a fixed sign the first synthetic bead's streak
-doubled (38 -> 80 columns) instead of collapsing.
+An earlier version of this port derived the X-step formula from geometry and
+then *measured* the shear direction from the data; both were replaced by the
+above. The asymmetry (XY unconverted and absolute, XZ signed and in pixels) is
+LouisXIV's, reproduced as-is.
+
+**The one thing the diagrams cannot settle:** whether "Find shifted pixel
+value" moves content to the right or the left of the array for a positive
+step. This port shifts right. LouisXIV works on this rig, so on a real slanted
+stack a point-like feature must collapse after Calc; if it smears, that single
+convention is the thing to flip.
 
 DeSkew unticked = zero shear = a plain max along each axis.
 

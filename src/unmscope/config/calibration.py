@@ -92,7 +92,11 @@ class Detection:
 
     @property
     def xy_pixel_um(self) -> float:
-        return self.camera_pixel_um / self.magnification
+        return self.pixel_size_um(binning=1)
+
+    def pixel_size_um(self, binning: int = 1) -> float:
+        """Camera Image Pixel sizes.vi: ``CCD pixel size * Binning / Mag``."""
+        return self.camera_pixel_um * max(1, int(binning)) / self.magnification
 
 
 @dataclass(frozen=True)

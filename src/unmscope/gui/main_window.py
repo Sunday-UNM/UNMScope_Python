@@ -1140,8 +1140,14 @@ class MainWindow(QMainWindow):
         if stack is None:
             return
         cal = self.calibration
-        projs = stack_projections(stack, s_step_um=self.z_interval_spin.value(),
-                                  xy_pixel_um=cal.detection.xy_pixel_um,
+        # The per-slice Sample Piezo positions LouisXIV reads back from each
+        # image's Position cluster: Scan Setup start, stepping by the interval
+        # towards the end position (signed), one per retained slice.
+        start, end, step = self.z_start_spin.value(), self.z_end_spin.value(), self.z_interval_spin.value()
+        signed = step if end >= start else -step
+        s_positions = [start + k * signed for k in range(stack.shape[0])]
+        projs = stack_projections(stack, s_positions=s_positions,
+                                  xy_pixel_um=cal.detection.pixel_size_um(binning=1),
                                   deskew=self.deskew_check.isChecked())
         self._last_projections = projs
         for name, view in self.projection_labels.items():

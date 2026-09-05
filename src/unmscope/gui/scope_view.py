@@ -184,10 +184,6 @@ class ScopeTraceWidget(QWidget):
     def view_seconds(self) -> float:
         return HDIV * self.time_per_div
 
-    @property
-    def delay_seconds(self) -> float:
-        return self._delay_s
-
     def seconds_needed(self) -> float:
         """What the panel must pull from the ring to fill this view.
 
@@ -273,10 +269,6 @@ class ScopeTraceWidget(QWidget):
 
     def set_gain(self, c: int, value: float) -> None:
         self._gain[c] = min(VOLTS_PER_DIV, key=lambda v: abs(v - value))
-        self.update()
-
-    def set_offset(self, c: int, divisions: float) -> None:
-        self._offset[c] = float(divisions)
         self.update()
 
     @property
@@ -397,9 +389,6 @@ class ScopeTraceWidget(QWidget):
 
     def _y_to_div(self, y: float, plot: QRectF) -> float:
         return (plot.center().y() - y) / self._px_per_div(plot)
-
-    def _y_to_volts(self, c: int, y: float, plot: QRectF) -> float:
-        return (self._y_to_div(y, plot) - self.offset(c)) * self.gain(c)
 
     # -- pinned tags ---------------------------------------------------------
     #

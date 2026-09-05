@@ -156,9 +156,6 @@ class XYZStage(abc.ABC):
     @abc.abstractmethod
     def set_velocity_um_s(self, velocity: float) -> None: ...
 
-    def expected_move_time_s(self, target: Vec3) -> float:
-        return calc_xyz_move_time_s(self.get_position_um(), target, self.velocity_um_s, self.settling_ms)
-
     def wait_for_move(self, timeout_s: float, poll_ms: int = 25,
                       sleep: Callable[[float], None] = time.sleep,
                       clock: Callable[[], float] = time.monotonic) -> bool:

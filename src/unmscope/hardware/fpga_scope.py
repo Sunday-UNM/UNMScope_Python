@@ -237,12 +237,9 @@ class FpgaScope:
         self._stop = threading.Event()
         self._fifo = None
         # diagnostics
-        self.reads = 0
         self.backlog_max = 0
-        self.dropped_words = 0          # words discarded to realign to frame boundaries
         self.ai_error: dict = {}
         self.last_error: str | None = None
-        self.started_at = 0.0
 
     @property
     def running(self) -> bool:
@@ -269,11 +266,8 @@ class FpgaScope:
         fifo.configure(FIFO_DEPTH_ELEMENTS)
         fifo.start()
         self._fifo = fifo
-        self.reads = 0
         self.backlog_max = 0
-        self.dropped_words = 0
         self.last_error = None
-        self.started_at = time.perf_counter()
         self._stop.clear()
         self._thread = threading.Thread(target=self._reader, name="fpga-scope-reader", daemon=True)
         self._thread.start()
@@ -321,7 +315,6 @@ class FpgaScope:
                 if not self._stop.is_set():
                     self.last_error = f"FIFO read failed: {e!r}"
                 return
-            self.reads += 1
             self.backlog_max = max(self.backlog_max, r.elements_remaining)
             words = np.asarray(r.data, dtype=np.int16)
             if len(carry):

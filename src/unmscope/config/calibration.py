@@ -51,10 +51,6 @@ class Axis:
         return min(self.v_max, max(self.v_min, v))
 
     @property
-    def um_min(self) -> float:
-        return self.v_to_um(self.v_min)
-
-    @property
     def um_max(self) -> float:
         return self.v_to_um(self.v_max)
 

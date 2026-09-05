@@ -27,7 +27,7 @@ def window(app, monkeypatch, tmp_path):
     w.close()
 
 
-def test_grid_has_the_11_kept_tools_five_wired(window):
+def test_grid_has_the_11_kept_tools_six_wired(window):
     tab = window.utilities_tab
     assert len(tab.buttons) == 11
     for dropped in ("Align Laser", "Image Reviewer", "Calculate PSF", "Auto Background", "View TIF stack",

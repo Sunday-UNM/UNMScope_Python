@@ -62,7 +62,6 @@ BINNING_LABELS = tuple(f"{b}x{b}" for b in BINNINGS)
 Z_UM_PX_SOURCES = ("Z Galvo", "Z Piezo")                                    # Z um per px source enum.ctl
 ANALYSIS_METHODS = ("RMS Contrast", "Peak Intensity", "ModulationDepth (Matlab)")  # Adaptive Optics ... Analysis Method Enum.ctl
 
-N_CAMERAS = len(CAMERA_IDS)
 
 # Section names, spelled exactly as LouisXIV writes them (do not "fix" them).
 CAMERA_SECTION = "{cam}.Camera Settings"

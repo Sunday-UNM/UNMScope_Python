@@ -24,7 +24,6 @@ from unmscope.config.paths import user_dir
 def default_path() -> Path:
     return user_dir() / "waveform_config.json"
 
-DEFAULT_PATH = Path.home() / ".unmscope" / "waveform_config.json"   # legacy name; save()/load() use default_path()
 
 #: Enum items substantiated by the diagrams / panel (see module docstring).
 WAVEFORM_TYPES = ("Linear",)                       # Generate SPIM Waveform: case "Linear"

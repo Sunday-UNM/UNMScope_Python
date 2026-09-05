@@ -45,7 +45,6 @@ LABVIEW_TITLE = "SPIM MAIN"
 PYTHON_TITLE = "UNMScope"
 
 SW_RESTORE = 9
-FILL_DEFAULT = (0xF0, 0xF0, 0xF0)  # empty picture-control grey in BOTH apps
 
 
 class RECT(ctypes.Structure):

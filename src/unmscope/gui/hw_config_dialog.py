@@ -250,7 +250,7 @@ class HwConfigDialog(QDialog):
         self._label(page, "Camera", (22, 82, 60, 16))
         self.camera_combo = self._combo(page, CAMERA_IDS, (21, 94, 135, 21))
         self.camera_combo.currentIndexChanged.connect(lambda _i: self.refresh())   # [1] Camera -> Display Configs + Property Nodes
-        self.note = self._label(page, "*** Note: Enabling and Disabling cameras requires SW restart ***",
+        self._label(page, "*** Note: Enabling and Disabling cameras requires SW restart ***",
                                 (246, 117, 200, 34), wrap=True)
 
         self.cam_enabled = self._check(page, "Enabled", (27, 132, 90, 13))

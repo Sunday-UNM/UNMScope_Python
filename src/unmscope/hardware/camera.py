@@ -286,8 +286,6 @@ class SimulatedCamera(Camera):
         self.SENSOR_WIDTH, self.SENSOR_HEIGHT = int(width), int(height)
         self._connected = False
         self._exposure_ms = 33.325
-        self._width = width
-        self._height = height
         self._rng = np.random.default_rng()
         self._trigger_source = "INTERNAL"
         self._trigger_polarity = "NEGATIVE"

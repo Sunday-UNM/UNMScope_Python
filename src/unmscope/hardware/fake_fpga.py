@@ -46,7 +46,6 @@ from unmscope.hardware.fpga_trigger import (
 ReadValues = namedtuple("ReadValues", ["data", "elements_remaining"])
 _DEFAULTS_JSON = Path(__file__).resolve().parents[3] / "docs" / "fpga_reset_defaults.json"
 DIO4_HIGH_TICKS = 4000
-FIRST_POINT_DELAY_S = 50e-6
 
 
 def _load_defaults() -> dict:
@@ -171,7 +170,6 @@ class FakeSession:
         # AO engine state
         self._current_point = np.zeros(8, dtype=np.int64)   # [p0, p1, X, Z, ZP, Dither, Tiling, Filter]
         # AI stream state
-        self._ai_last_t: float | None = None
         self._ai_phase = 0.0
         self.log: list[tuple[float, str, object]] = []      # register writes, for tests
 
@@ -291,7 +289,6 @@ class FakeSession:
         nch = int(v.get("AI # of channels", 0))
         period_ticks = int(v.get("AI loop period (ticks)", 100)) or 100
         if nch <= 0 or self._armed_at is None:
-            self._ai_last_t = t_to
             return
         fs = TICKS_PER_S / period_ticks
         n = int((t_to - t_from) * fs + self._ai_phase)

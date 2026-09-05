@@ -51,7 +51,6 @@ from PySide6.QtGui import QColor, QPainter, QPen, QPolygon, QRegularExpressionVa
 from PySide6.QtWidgets import QLabel, QLineEdit, QPushButton, QWidget
 from PySide6.QtCore import QPoint
 
-from unmscope.config.calibration import Calibration
 from unmscope.config.um_per_volt import (
     MicronsToVolt, ensure_unmscope_ini, load_calibration_from_unmscope_ini,
 )

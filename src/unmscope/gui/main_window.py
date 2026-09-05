@@ -44,8 +44,8 @@ import time
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import Qt, QTimer, QObject, Signal, QRect, QPoint
-from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QFont
+from PySide6.QtCore import Qt, QTimer, QObject, Signal, QPoint
+from PySide6.QtGui import QPixmap, QColor
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox,
     QFormLayout, QLabel, QPushButton, QComboBox, QDoubleSpinBox, QSpinBox,
@@ -56,7 +56,7 @@ from PySide6.QtWidgets import (
 )
 
 from unmscope.hardware.camera import Camera, OrcaFlash4Camera, SimulatedCamera, other_camera_holders
-from unmscope.hardware.fpga_trigger import FpgaTriggerController, TICKS_PER_S, free_run_timing
+from unmscope.hardware.fpga_trigger import FpgaTriggerController, TICKS_PER_S
 from unmscope.hardware.fpga_scope import FpgaScope
 from unmscope.hardware.waveform import COUNTS_PER_VOLT
 from unmscope.hardware.louisxiv_waveform import build_louisxiv_waveform
@@ -88,7 +88,6 @@ WHITE_BG = "#ffffff"
 BORDER = "#8f8fbf"
 IDLE_GREEN = "#2fa72f"
 ACQUIRING_RED = "#cc3333"
-DISABLED_NOTE = "#6a6a6a"
 
 STYLESHEET = f"""
 QMainWindow, QWidget#central {{ background-color: {PANEL_BG}; }}
@@ -118,55 +117,11 @@ QSlider:disabled::sub-page:horizontal {{ background: #90a4c8; }}
 """
 
 
-def frame_to_qpixmap(frame: np.ndarray, label_text: str | None = None) -> QPixmap:
-    """uint16 (or any) 2D frame -> auto-contrast 8-bit QPixmap for display.
-    If label_text is given, it's burned into the top-left corner of the
-    image itself (not just a separate widget), with a dark backing box for
-    readability regardless of the underlying frame's brightness."""
-    lo, hi = np.percentile(frame, (0.5, 99.5))
-    if hi <= lo:
-        hi = lo + 1
-    scaled = np.clip((frame.astype(np.float32) - lo) / (hi - lo) * 255.0, 0, 255).astype(np.uint8)
-    h, w = scaled.shape
-    qimg = QImage(scaled.data, w, h, w, QImage.Format_Grayscale8).copy()
-    pix = QPixmap.fromImage(qimg)
-
-    if label_text:
-        painter = QPainter(pix)
-        font = QFont()
-        font.setPointSize(max(14, w // 40))
-        font.setBold(True)
-        painter.setFont(font)
-        metrics = painter.fontMetrics()
-        text_rect = metrics.boundingRect(label_text)
-        pad = 8
-        box = QRect(10, 10, text_rect.width() + 2 * pad, text_rect.height() + 2 * pad)
-        painter.fillRect(box, QColor(0, 0, 0, 160))
-        painter.setPen(QColor(255, 255, 0))
-        painter.drawText(box, Qt.AlignCenter, label_text)
-        painter.end()
-
-    return pix
-
-
 def _narrow(w, width: int = 80):
     """Cap a spinbox's width so it doesn't crowd out its label in the
     real panel's tight two-column Scan Setup layout."""
     w.setMaximumWidth(width)
     return w
-
-
-def _stub_note(text: str) -> QLabel:
-    lbl = QLabel(text)
-    lbl.setWordWrap(True)
-    # A word-wrapped QLabel's minimumSizeHint doesn't actually shrink on its
-    # own in Qt -- without a cap here, these notes were forcing the whole
-    # window ~270px wider than intended (each one wanted its full unwrapped
-    # single-line width as a minimum). 220px matches the narrow columns
-    # these live in throughout Scan Setup.
-    lbl.setMaximumWidth(220)
-    lbl.setStyleSheet(f"color: {DISABLED_NOTE}; font-style: italic; font-weight: normal;")
-    return lbl
 
 
 class FpgaSignals(QObject):
@@ -216,7 +171,6 @@ class MainWindow(QMainWindow):
         self._triggers_fired = 0
         self._arm_time = 0.0           # perf_counter() when the FPGA was armed
         self._finishing = False        # Z-stack: all triggers fired, waiting for frames
-        self._stale_discarded = 0
         self._run_closing = 0          # extra closing triggers this run (1 in SYNCREADOUT)
         self._warmup_remaining = 0     # leading frames to discard this run
         self._warmup_discarded = 0
@@ -228,7 +182,6 @@ class MainWindow(QMainWindow):
         # only for a freshly connected camera. Measured, spikes/24.
         self._sync_exposure_open = False
         self._last_status_log_t = 0.0
-        self._last_fpga_status = None
         # Name of the blocking driver call that owns this thread, or None.
         # See _begin_blocking() for what it is guarding against.
         self._blocking_op: str | None = None
@@ -369,7 +322,7 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(self._build_connection_bar())
 
-        self.left_tabs = tabs = QTabWidget()
+        tabs = QTabWidget()
         tabs.setFixedWidth(406)  # measured off the real front panel
         scan_setup_scroll = QScrollArea()
         scan_setup_scroll.setWidget(self._build_scan_setup_tab())
@@ -1909,7 +1862,6 @@ class MainWindow(QMainWindow):
         self._trigger_period_s = period_s
         self._triggers_fired = 0
         self._finishing = False
-        self._stale_discarded = 0
         self._run_closing = self.camera.closing_triggers()
         self._last_status_log_t = 0.0
         if sync:
@@ -1979,7 +1931,6 @@ class MainWindow(QMainWindow):
             return
         wf = lx.scan
         self.last_waveform = wf
-        self.last_louisxiv_waveform = lx
         self._log(f"LouisXIV ramp: {lx.line.total_points} pts/line = accel {lx.line.tau_elem} + linear "
                   f"{lx.line.linear_points} + decel {lx.line.tau_elem} + return {lx.line.return_points}; "
                   f"AO rate {lx.rate.ao_rate_hz / 1e3:.3f} kHz (exposure rule {lx.rate.rate_for_exposure_hz:.0f}, "
@@ -2114,7 +2065,6 @@ class MainWindow(QMainWindow):
         logged once a second. The achieved rate is from the hardware
         trigger counter, so it IS what an oscilloscope would show -- if it
         disagrees with the requested rate, fix the derivation, don't pad."""
-        self._last_fpga_status = st
         now = time.perf_counter()
         if now - self._last_status_log_t < 1.0:
             return
@@ -2220,7 +2170,6 @@ class MainWindow(QMainWindow):
                     # sequence starts in EXTERNAL mode (measured: it lands
                     # ~10 ms after arming, which no real exposure can).
                     # Counting it put every frame count off by one.
-                    self._stale_discarded += 1
                     self._log("Discarded a stale pre-trigger frame from the camera buffer.")
                     continue
                 if self._warmup_remaining > 0:

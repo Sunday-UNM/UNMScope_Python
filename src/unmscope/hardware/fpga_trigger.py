@@ -107,10 +107,9 @@ MONITOR_INTERVAL_S = 0.05
 #: (100 us) inside the FPGA; the sync pulse must be at least as wide for
 #: the edge detector, and must stay well below the cycle.
 MIN_TRIGGER_UP_TICKS = 4000
-#: LabVIEW's 'sync rdout offset' for the Orca (165 us) in
-#: HHMI - Generate trigger settings for FPGA.vi. Not used by default --
-#: 0 is what every verified pulse so far used.
-ORCA_SYNC_READOUT_OFFSET_TICKS = 6600
+# LabVIEW's 'sync rdout offset' for the Orca is 165 us (6600 ticks) in
+# HHMI - Generate trigger settings for FPGA.vi; not used here -- every
+# verified pulse used 0 (see docs/trigger_free_run_plan.md).
 #: 'AO DMA Timeout (ticks per read)'. Compile-time default is 40 (1 us);
 #: LabVIEW's Setup AO DMA buffer.vi writes 100. See start_free_run().
 AO_DMA_TIMEOUT_TICKS = 100
@@ -129,7 +128,6 @@ AO_LIMIT_FULL_SCALE = 32767          # the compile-time default (docs/fpga_reset
 #: four analog AOTF channels leave the breakout box on AO5, AO6, AO7, AO3
 #: (docs/fpga_io_map.md pinout); values are DAC counts like every AO.
 AOTF_LEVEL_KEYS = ("AOTF ch 0", "AOTF ch 1", "AOTF ch 2", "AOTF ch 3")
-AOTF_ANALOG_PIN = {0: "AO5", 1: "AO6", 2: "AO7", 3: "AO3"}
 AOTF_ZERO = {k: 0 for k in AOTF_LEVEL_KEYS}
 
 

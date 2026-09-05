@@ -32,7 +32,7 @@ What each column shows here (LouisXIV source -> Python source):
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable
 
 from PySide6.QtCore import Qt, QTimer

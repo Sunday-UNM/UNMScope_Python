@@ -69,7 +69,6 @@ class CameraTab(QWidget):
         self._log = log
         self._sensor = (Camera.SENSOR_WIDTH, Camera.SENSOR_HEIGHT)
         self._units = (4, 4, 4, 4)
-        self._binning = 1
         self._roi = full_roi(*self._sensor)
         self._updating = False
         self.pending_apply = False
@@ -155,7 +154,7 @@ class CameraTab(QWidget):
         self.actual_exposure = self._readback(_rect(253, 203, 76, 18))
         self.actual_frame_time = self._readback(_rect(253, 227, 76, 18))
         self.actual_rate = self._readback(_rect(334, 227, 54, 18))
-        self.actual_exposures = self._readback(_rect(253, 252, 138, 18), "1 exposure(s)")
+        self._readback(_rect(253, 252, 138, 18), "1 exposure(s)")  # static, as on the LouisXIV panel
         for f in (self.actual_exposure, self.actual_frame_time, self.actual_rate):
             f.setAlignment(Qt.AlignRight)
 
@@ -333,7 +332,6 @@ class CameraTab(QWidget):
             return
         self._sensor = cam.sensor_size()
         self._units = cam.roi_units()
-        self._binning = cam.get_binning()
         self._roi = cam.get_roi()
         self._updating = True
         try:

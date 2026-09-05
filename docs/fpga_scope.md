@@ -29,10 +29,15 @@ stream. Every column behaved exactly as the source diagrams predict:
 | 8–13 | AO values the engine outputs: X Galvo, Z Galvo, Z Piezo, Dither Galvo, AOTF0, Filter desired | all 0 (AO at zero) |
 | 14 | `Int Sync (Cycle Only)` | 0/4096, period 100.002 ms, **high 10.000 ms** |
 | 15 | `Cam Ext Trigger Out DO` = DIO4 read back | 0/4096, period 100.002 ms, **high 0.100 ms** |
-| 16–22 | AOTF0..AOTF6 (digital) | constant 0 |
-| 23 | Perfusion? | 0 |
+| 16, 17 | AOTF 0, AOTF 1 (AO-DMA level fields, numeric) | constant 0 |
+| 18 | Perfusion? (digital) | 0 |
+| 19–23 | AOTF 2..AOTF 6 (AO-DMA level fields, numeric) | constant 0 |
 | 24 | Shutter | 0 |
 | 25–28 | Channel Shutter 0..3 | 0 |
+
+(Order of 16–28 corrected 2026-09-05 from `HHMI - FPGA AI Loop.vi`'s Build
+Array, every wire traced in the diagram, and the `Active Channels` ring of
+`HHMI - AI buffer.vi`; the earlier table had Perfusion at 23.)
 | 29+ | (probe with `AI # of channels` = 40) | constant 0 → the array is 29 long |
 
 Digital signals are bit-shifted by 12 in the FPGA (`4096` = True) "so

@@ -41,7 +41,8 @@ DEFAULT_ACTIVE = (8, 14, 15, 16, 17, 9, 10, 11)
 #: Legend labels as LouisXIV shows them, by column index (others use the map names).
 LEGEND_LABELS = {14: "Int Cycle Trigger", 15: "D4 Cam Ext Trig Out", 8: "X Galvo", 9: "Z Galvo",
                  10: "Z Piezo", 11: "Dither Galvo", 12: "AOTF0 (AO)", 13: "Filter",
-                 16: "AOTF 0", 17: "AOTF 1", 18: "AOTF 2", 19: "AOTF 3", 20: "AOTF 4", 21: "AOTF 5", 22: "AOTF 6"}
+                 16: "AOTF 0", 17: "AOTF 1", 18: "Perfusion", 19: "AOTF 2", 20: "AOTF 3", 21: "AOTF 4",
+                 22: "AOTF 5", 23: "AOTF 6"}
 PALETTE = ["#ffffff", "#ff4040", "#40ff40", "#4080ff", "#ffff40", "#ff40ff", "#40ffff", "#ff9020",
            "#a0a0a0", "#c060ff", "#60c0ff", "#80ff80", "#ffb0b0", "#b0ffb0", "#b0b0ff", "#ffe080",
            "#e0e0e0", "#ff8080", "#80ff80", "#8080ff", "#ffff80", "#ff80ff", "#80ffff", "#ffc080",

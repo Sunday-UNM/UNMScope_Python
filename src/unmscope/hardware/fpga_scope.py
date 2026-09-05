@@ -52,14 +52,19 @@ import numpy as np
 
 from unmscope.hardware.fpga_trigger import TICKS_PER_S, FpgaTriggerController
 
-#: Column names of the FPGA's per-sample AI array (source-build order,
-#: columns 0-15 confirmed on the deployed bitfile).
+#: Column names of the FPGA's per-sample AI array. Columns 0-15 confirmed on
+#: the deployed bitfile; 16-28 in the order of HHMI - FPGA AI Loop.vi's Build
+#: Array (every wire pixel-traced in the diagram, 2026-09-05) and of the
+#: 'Active Channels' ring of HHMI - AI buffer.vi (LouisXIV's FPGA Scope):
+#: 16 AOTF 0, 17 AOTF 1, 18 Perfusion, 19-23 AOTF 2..6, 24 Shutter,
+#: 25-28 Channel Shutter 0-3. AOTF 0-6 here are the AO-DMA level fields
+#: (numeric), not 0/4096 flags; Perfusion / Shutter / Channel Shutter are.
 AI_CHANNEL_NAMES: tuple[str, ...] = (
     "AI0", "AI1", "AI2", "AI3", "AI4", "AI5", "AI6", "AI7",
     "X Galvo (AO)", "Z Galvo (AO)", "Z Piezo (AO)", "Dither Galvo (AO)", "AOTF0 (AO)", "Filter desired",
     "Int Sync (Cycle Only)", "Cam Ext Trigger Out (DIO4)",
-    "AOTF0", "AOTF1", "AOTF2", "AOTF3", "AOTF4", "AOTF5", "AOTF6",
-    "Perfusion?", "Shutter", "Channel Shutter 0", "Channel Shutter 1", "Channel Shutter 2", "Channel Shutter 3",
+    "AOTF0", "AOTF1", "Perfusion?", "AOTF2", "AOTF3", "AOTF4", "AOTF5", "AOTF6",
+    "Shutter", "Channel Shutter 0", "Channel Shutter 1", "Channel Shutter 2", "Channel Shutter 3",
 )
 IDX_INT_SYNC = 14
 IDX_DIO4 = 15

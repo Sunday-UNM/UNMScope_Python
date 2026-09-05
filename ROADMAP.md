@@ -542,6 +542,12 @@ invent them. Foundation landed first: a Z-stack is now retained in memory
    Control (All Axes)/Sample Stage Control GUI.vi`, MP285 stage), Camera Debug
    Panel (`GUI/Camera Debug Panel.vi`), um per V calibration (the per-channel
    calibration, own tab). List may grow.
+   **Decisions 2026-09-05:** MP-285 stage is NOT connected -> simulated backend
+   + panel only; HW Config writes a UNMScope-owned copy of SPIMProject.ini (not
+   LouisXIV's); FPGA Scope = the Waveforms tab (fix channel names 18-23: Perfusion,
+   AOTF 2-6); build order: scope fix, Camera Debug Panel, HW Config, stage, um/V.
+   Research maps (panel controls, event cases, sub-VIs, hardware) are in the
+   session workflow journals; digest in the scratchpad `tools_research_digest.txt`.
 6. **GUI cleanup DONE 2026-09-05** (user's decisions, recorded in CLAUDE.md):
    eight empty tabs, the Images tab's unwired furniture, Perfusion, and the
    Camera tab's SubROIs / Dual View / Split pix # removed; Timepoints,

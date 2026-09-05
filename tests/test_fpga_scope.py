@@ -18,6 +18,9 @@ def _pulse_train(n_samples, period, high, offset=0, level=DIGITAL_TRUE):
 def test_channel_map_matches_decode_run():
     assert AI_CHANNEL_NAMES[IDX_INT_SYNC] == "Int Sync (Cycle Only)"
     assert AI_CHANNEL_NAMES[IDX_DIO4] == "Cam Ext Trigger Out (DIO4)"
+    # columns 16-28 per HHMI - FPGA AI Loop.vi's Build Array (wire-traced 2026-09-05)
+    assert AI_CHANNEL_NAMES[16:24] == ("AOTF0", "AOTF1", "Perfusion?", "AOTF2", "AOTF3", "AOTF4", "AOTF5", "AOTF6")
+    assert AI_CHANNEL_NAMES[24] == "Shutter" and AI_CHANNEL_NAMES[28] == "Channel Shutter 3"
     assert len(AI_CHANNEL_NAMES) == 29
 
 

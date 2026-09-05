@@ -1616,6 +1616,9 @@ class MainWindow(QMainWindow):
         self.frame_counter_label.setText(f"{n}  (loaded {Path(path).name})")
         self.calc_projections_btn.setEnabled(True)
         self.deskew_check.setEnabled(True)
+        stack_max = int(stack.max())
+        self.stack_max_spin.setValue(stack_max)
+        self.stack_max_slider.setValue(stack_max)
         self._log(f"Loaded {n} x {stack.shape[1]}x{stack.shape[2]} from {path}.")
         return True
 

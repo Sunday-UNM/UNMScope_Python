@@ -185,8 +185,75 @@ def test_zstack_is_retained_and_continuous_is_not(app, window):
     pump(app, 0.05)
     w.on_acquire_clicked()
     assert w.acquiring
-    pump(app, 0.4)
-    assert w.frame_count > 3
+    # wait for frames, not for a fixed time: a fixed 0.4 s flaked under
+    # full-suite load (the fake FPGA bursts when the CPU is oversubscribed)
+    assert pump(app, 5.0, until=lambda: w.frame_count > 3), "no frames from Continuous scan"
     assert w._stack_frames is None and w.acquired_stack() is None
     w.on_acquire_clicked()
     pump(app, 0.3)
+
+
+def test_calc_projects_the_retained_stack_and_save_files_writes_louisxiv_layout(app, window, tmp_path):
+    """Items 2 and 3, end to end on the fake FPGA: after a Z-stack, Calc is
+    live and fills the three views; with Save Files on, the stack lands in
+    <data>/Cell1/img_CH<row>_000000.tif as a 10-page U16 OME-TIFF next to an
+    AcqInfo.txt, and the next stack goes to Cell2."""
+    import tifffile
+    w = window
+    w._data_dir = tmp_path                      # bypass the folder prompt
+    w.save_files_chk.setChecked(True)
+    assert not w.calc_projections_btn.isEnabled()
+
+    w.mode_combo.setCurrentText(mw.MODE_ZSTACK)
+    pump(app, 0.05)
+    w.on_acquire_clicked()
+    assert pump(app, 10.0, until=lambda: not w.acquiring), "Z stack did not finish"
+    pump(app, 0.3)
+
+    # Calc
+    assert w.calc_projections_btn.isEnabled() and w.deskew_check.isEnabled()
+    w.calc_projections_btn.click()
+    assert set(w._last_projections) == {"XY", "YZ", "XZ"}
+    for name, view in w.projection_labels.items():
+        assert view.pixmap() is not None and not view.pixmap().isNull(), f"{name} view empty"
+        assert w.projection_save_btns[name].isEnabled()
+    n, h, wd = w.acquired_stack().shape
+    assert w._last_projections["XY"].shape[0] == h
+    assert w._last_projections["XY"].shape[1] >= wd          # deskewed canvas is at least as wide
+
+    # Save Files -> LouisXIV layout
+    ch = w._selected_channel_index()
+    exp1 = tmp_path / "Cell1"
+    tif = exp1 / f"img_CH{ch:02d}_000000.tif"
+    assert tif.exists(), sorted(p.name for p in tmp_path.rglob("*"))
+    assert (exp1 / "AcqInfo.txt").exists()
+    with tifffile.TiffFile(str(tif)) as tf:
+        assert len(tf.pages) == 10 and tf.pages[0].dtype.name == "uint16" and tf.is_ome
+    assert "Slices = 10" in (exp1 / "AcqInfo.txt").read_text(encoding="utf-8")
+
+    # projection save goes next to the stack
+    w._on_save_projection("XY")
+    assert (exp1 / f"img_CH{ch:02d}_000000_XYMIP.tif").exists()
+
+    # a second stack -> the next experiment folder
+    w.on_acquire_clicked()
+    assert pump(app, 10.0, until=lambda: not w.acquiring)
+    pump(app, 0.3)
+    assert (tmp_path / "Cell2" / f"img_CH{ch:02d}_000000.tif").exists()
+
+
+def test_save_files_off_saves_nothing_and_save_image_writes_the_last_frame(app, window, tmp_path):
+    w = window
+    w._data_dir = tmp_path
+    w.save_files_chk.setChecked(False)
+    w.mode_combo.setCurrentText(mw.MODE_ZSTACK)
+    pump(app, 0.05)
+    w.on_acquire_clicked()
+    assert pump(app, 10.0, until=lambda: not w.acquiring)
+    pump(app, 0.3)
+    assert not list(tmp_path.rglob("*.tif"))
+    assert w._last_frame is not None
+    out = w._save_frame_to(tmp_path / "single.tif")
+    import tifffile
+    with tifffile.TiffFile(str(out)) as tf:
+        assert len(tf.pages) == 1 and tf.pages[0].dtype.name == "uint16"

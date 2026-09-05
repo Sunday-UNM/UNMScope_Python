@@ -82,7 +82,22 @@ class Aotf:
 
 
 @dataclass(frozen=True)
+class Detection:
+    """[Detection optics]: what a camera pixel sees at the sample. The XY
+    pixel size is the sensor pixel over the magnification -- 6.5 um / 30x =
+    0.2167 um, which is the Camera tab's 444 um FOV over 2048 px."""
+    magnification: float
+    physical_pixel_z_um: float
+    camera_pixel_um: float = 6.5          # Orca Flash 4.0 sensor pitch
+
+    @property
+    def xy_pixel_um(self) -> float:
+        return self.camera_pixel_um / self.magnification
+
+
+@dataclass(frozen=True)
 class Calibration:
+    detection: Detection
     x_galvo: Axis
     z_galvo: Axis
     z_piezo: Axis
@@ -122,6 +137,8 @@ def load_calibration(ini_path: str | Path | None = None) -> Calibration:
     cal = "Microns to Volt calibrations"
     return Calibration(
         aotf=aotf,
+        detection=Detection(magnification=_get(cp, "Detection optics", "Magnification", 30.0),
+                            physical_pixel_z_um=_get(cp, "Detection optics", "PhysicalPixelSizeZ (um)", 0.2)),
         x_galvo=Axis("X Galvo", _get(cp, cal, "Galvo cmd X um/X Volt", 2000.0),
                      _get(cp, "X Galvo Limits (V)", "Min (V)", -2.5), _get(cp, "X Galvo Limits (V)", "Max (V)", 2.5)),
         z_galvo=Axis("Z Galvo", _get(cp, cal, "Galvo cmd Z um/Z Volt", 7.0),

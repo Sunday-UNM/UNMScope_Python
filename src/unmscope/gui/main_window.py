@@ -39,7 +39,9 @@ matching the discipline that avoided further native-layer crashes.
 from __future__ import annotations
 
 import datetime
+import re
 import time
+from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import Qt, QTimer, QObject, Signal, QRect
@@ -50,7 +52,7 @@ from PySide6.QtWidgets import (
     QTextEdit, QMessageBox, QSizePolicy, QCheckBox, QTabWidget, QSlider,
     QLineEdit, QTableWidget, QTableWidgetItem, QHeaderView, QProgressBar,
     QSplitter, QRadioButton, QButtonGroup, QToolButton, QScrollArea, QFrame,
-    QApplication,
+    QApplication, QFileDialog,
 )
 
 from unmscope.hardware.camera import Camera, OrcaFlash4Camera, SimulatedCamera, other_camera_holders
@@ -58,6 +60,8 @@ from unmscope.hardware.fpga_trigger import FpgaTriggerController, TICKS_PER_S, f
 from unmscope.hardware.fpga_scope import FpgaScope
 from unmscope.hardware.waveform import build_scan_waveform, COUNTS_PER_VOLT
 from unmscope.config.calibration import load_calibration
+from unmscope.analysis.projections import DEFAULT_STAGE_ANGLE_DEG, stack_projections
+from unmscope.fileio.tiff_stack import save_tiff_stack, stack_path, write_acq_info
 from unmscope.gui.scope_view import FpgaScopePanel
 
 MODE_CONTINUOUS = "Continuous Scan"
@@ -241,6 +245,14 @@ class MainWindow(QMainWindow):
         # One entry per accepted slice, oldest first; warm-up/stale frames are
         # dropped before they reach here (see _poll_camera_for_frame).
         self._stack_frames: list | None = None
+        self._last_frame = None                  # newest displayed frame, for 'Save Image'
+        self._last_projections: dict | None = None
+        # Saving, the LouisXIV way: a data folder chosen once per session
+        # (Prompt for Save Path.vi), and inside it one 'Cell<N>' folder per
+        # stack (Find Next Experiment Folder Number.vi, prefix 'Cell').
+        self._data_dir: Path | None = None
+        self._current_exp_dir: Path | None = None
+        self._save_base = "img"
         self.acquiring = False
 
         self._build_ui()
@@ -636,8 +648,8 @@ class MainWindow(QMainWindow):
         form.addWidget(tp_combo, 0, 1)
         tp_spin = _narrow(QSpinBox(), 55); tp_spin.setRange(1, 9999); tp_spin.setValue(1)
         form.addWidget(tp_spin, 0, 2)
-        save_chk = QCheckBox("Save Files")
-        form.addWidget(save_chk, 1, 0, 1, 3)
+        self.save_files_chk = QCheckBox("Save Files")
+        form.addWidget(self.save_files_chk, 1, 0, 1, 3)
 
         for r, (label, default) in enumerate([
             ("Stack Acq. Time", "00:00.00"),
@@ -823,6 +835,7 @@ class MainWindow(QMainWindow):
 
         col.addSpacing(10)
         self.save_image_btn = QPushButton("\U0001F4BE Image")
+        self.save_image_btn.clicked.connect(self._on_save_image)
         col.addWidget(self.save_image_btn)
 
         col.addSpacing(10)
@@ -970,6 +983,7 @@ class MainWindow(QMainWindow):
         # and below it. The ~29px I first measured "between the boxes" is
         # that gutter, not empty space.
         self.projection_labels = {}
+        self.projection_save_btns = {}
         for name in ("XY", "YZ", "XZ"):
             proj_row = QHBoxLayout()
             proj_row.setSpacing(4)
@@ -990,6 +1004,8 @@ class MainWindow(QMainWindow):
                 "QPushButton { font-size: 13px; padding: 0px; }"
                 "QPushButton:disabled { color: #222; }"
             )
+            save_btn.clicked.connect(lambda _c=False, n=name: self._on_save_projection(n))
+            self.projection_save_btns[name] = save_btn
             gutter.addWidget(save_btn)
             gutter.addStretch(1)
             proj_row.addLayout(gutter)
@@ -1012,6 +1028,7 @@ class MainWindow(QMainWindow):
         side.addWidget(self.deskew_check)
         self.calc_projections_btn = QPushButton("Calc")
         self.calc_projections_btn.setEnabled(False)
+        self.calc_projections_btn.clicked.connect(self._on_calc_projections)
         side.addWidget(self.calc_projections_btn)
         side.addStretch(1)
         outer.addLayout(side)
@@ -1030,6 +1047,141 @@ class MainWindow(QMainWindow):
     def _log(self, msg: str):
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         self.log.append(f"[{ts}] {msg}")
+
+    # -- Save / Calc: the way LouisXIV does it ----------------------------------
+    def _selected_channel_index(self) -> int:
+        """LouisXIV's CH index in the filename: the one enabled Excitation row."""
+        for i, (chk, _wl, spin) in enumerate(self.excitation_rows):
+            if chk.isChecked() and spin.value() > 0:
+                return i
+        return 0
+
+    def _ensure_data_dir(self) -> Path | None:
+        """Prompt once per session for where to save (Prompt for Save Path.vi)."""
+        if self._data_dir is None:
+            chosen = QFileDialog.getExistingDirectory(self, "Choose the data folder")
+            if not chosen:
+                return None
+            self._data_dir = Path(chosen)
+        return self._data_dir
+
+    @staticmethod
+    def next_experiment_folder(data_dir: Path, prefix: str = "Cell") -> Path:
+        """Find Next Experiment Folder Number.vi: scan for the highest
+        '<prefix><N>' folder (e.g. Cell24) and return '<prefix><N+1>'."""
+        highest = 0
+        pat = re.compile(r"^" + re.escape(prefix) + r"(\d+)$")
+        if data_dir.exists():
+            for p in data_dir.iterdir():
+                m = pat.match(p.name)
+                if p.is_dir() and m:
+                    highest = max(highest, int(m.group(1)))
+        return data_dir / f"{prefix}{highest + 1}"
+
+    def _acq_info(self) -> dict:
+        cal = self.calibration
+        sel = self._selected_channel_index()
+        chk, wl, spin = self.excitation_rows[sel]
+        info = {
+            "Mode": self.mode_combo.currentText(),
+            "Exposure (ms)": self.exposure_spin.value(),
+            "Trigger mode": "SYNCREADOUT" if self.sync_readout_chk.isChecked() else "EDGE",
+            "Slices": self.frame_count,
+            "Z Piezo Interval (um)": self.z_interval_spin.value(),
+            "Z Piezo Start (um)": self.z_start_spin.value(),
+            "Z Piezo End (um)": self.z_end_spin.value(),
+            "Excitation": f"{wl} nm at {spin.value():g} %",
+            "XY pixel size (um)": round(cal.detection.xy_pixel_um, 5),
+            "Stage angle (deg)": DEFAULT_STAGE_ANGLE_DEG,
+        }
+        if self.camera is not None and self.camera.info is not None:
+            i = self.camera.info
+            info["Camera"] = {"Model": i.name, "Serial": i.serial, "Width": i.width, "Height": i.height}
+        return info
+
+    def _on_stack_finished(self):
+        """After any stop: offer the stack to Calc, and save it if Save Files
+        is on and the stack is complete (partials are not kept, as LouisXIV's
+        'Close Files and Delete Partials' does)."""
+        stack = self.acquired_stack()
+        have = stack is not None
+        self.calc_projections_btn.setEnabled(have)
+        self.deskew_check.setEnabled(have)
+        if not have:
+            return
+        complete = bool(self.z_target_frames) and self.frame_count >= self.z_target_frames
+        if self.save_files_chk.isChecked() and complete:
+            self._save_stack(stack)
+
+    def _save_stack(self, stack) -> Path | None:
+        data_dir = self._ensure_data_dir()
+        if data_dir is None:
+            self._log("Save cancelled: no data folder chosen.")
+            return None
+        exp = self.next_experiment_folder(data_dir)
+        cal = self.calibration
+        ch = self._selected_channel_index()
+        path = stack_path(exp, self._save_base, ch, 0)
+        try:
+            save_tiff_stack(path, stack, ome=True, pixel_size_um=cal.detection.xy_pixel_um,
+                            z_step_um=self.z_interval_spin.value(),
+                            channel_name=self.excitation_rows[ch][1])
+            write_acq_info(exp, self._acq_info())
+        except Exception as e:
+            self._log(f"Stack save FAILED: {type(e).__name__}: {e}")
+            QMessageBox.warning(self, "Save failed", str(e))
+            return None
+        self._current_exp_dir = exp
+        self._log(f"Saved {stack.shape[0]}-slice stack: {path}  (+ AcqInfo.txt)")
+        return path
+
+    def _on_calc_projections(self):
+        stack = self.acquired_stack()
+        if stack is None:
+            return
+        cal = self.calibration
+        projs = stack_projections(stack, s_step_um=self.z_interval_spin.value(),
+                                  xy_pixel_um=cal.detection.xy_pixel_um,
+                                  deskew=self.deskew_check.isChecked())
+        self._last_projections = projs
+        for name, view in self.projection_labels.items():
+            pix = frame_to_qpixmap(projs[name])
+            view.setPixmap(pix.scaled(view.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            self.projection_save_btns[name].setEnabled(True)
+        self._log("Projections: " + ", ".join(f"{k} {v.shape[1]}x{v.shape[0]}" for k, v in projs.items())
+                  + (" (deskewed)" if self.deskew_check.isChecked() else " (no deskew)"))
+
+    def _projection_path(self, name: str) -> Path | None:
+        folder = self._current_exp_dir or self._ensure_data_dir()
+        if folder is None:
+            return None
+        ch, t = self._selected_channel_index(), 0
+        return folder / f"{self._save_base}_CH{ch:02d}_{t:06d}_{name}MIP.tif"
+
+    def _on_save_projection(self, name: str):
+        if not self._last_projections or name not in self._last_projections:
+            return
+        path = self._projection_path(name)
+        if path is None:
+            return
+        save_tiff_stack(path, self._last_projections[name], ome=True,
+                        pixel_size_um=self.calibration.detection.xy_pixel_um)
+        self._log(f"Saved {name} projection: {path}")
+
+    def _save_frame_to(self, path) -> Path:
+        return save_tiff_stack(path, self._last_frame, ome=True,
+                               pixel_size_um=self.calibration.detection.xy_pixel_um)
+
+    def _on_save_image(self):
+        """HHMI - SPIM Save Image.vi: prompt for a path, save the image as U16 TIFF."""
+        if self._last_frame is None:
+            QMessageBox.information(self, "Save Image", "No image to save yet.")
+            return
+        start = str((self._data_dir or Path.home()) / f"{self._save_base}.tif")
+        chosen, _f = QFileDialog.getSaveFileName(self, "Save image as TIFF", start, "TIFF (*.tif)")
+        if not chosen:
+            return
+        self._log(f"Saved image: {self._save_frame_to(chosen)}")
 
     def acquired_stack(self):
         """The last retained Z-stack as an (n, H, W) array, or None if there
@@ -1650,6 +1802,7 @@ class MainWindow(QMainWindow):
         self._update_connection_buttons()
         self._clear_image_to_black()
         self._log("Acquisition stopped, back to IDLE.")
+        self._on_stack_finished()
 
     def _on_fpga_status(self, st):
         """~20/s snapshot of the FPGA's own counters while free-running,
@@ -1784,6 +1937,8 @@ class MainWindow(QMainWindow):
             self._log(f"Camera poll FAILED: {type(e).__name__}: {e}")
             return
 
+        if frame is not None:
+            self._last_frame = frame
         if frame is not None and self.acquiring:   # during the stop grace period: count only
             pix = frame_to_qpixmap(frame, label_text=f"Frame #{self.frame_count}")
             scaled = pix.scaled(self.image_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)

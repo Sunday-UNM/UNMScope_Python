@@ -470,3 +470,48 @@ Still open: the window is *already* wider than its 1381 px target because of a
 different tab (955 px) -- pre-existing, untouched here. Plus ~25 lower-severity
 review findings, mostly test quality; tags slide in free run when zoomed; hover
 repaints every trace on each pixel of pointer movement.
+
+### Action items from the user (2026-09-04 evening) -- "just the way LouisXIV does"
+
+Directive: match LouisXIV's behaviour and look; take real math and file
+formats from the LabVIEW source (H:\UNM_Lightsheet\UNMScope_Source), never
+invent them. Foundation landed first: a Z-stack is now retained in memory
+(`MainWindow.acquired_stack()`), which items 2 and 3 both need.
+
+1. **Camera tab** -- port the controls the Python tab lacks: Actual read-back
+   (exposure / rate / # exposures), Sensor Mode, Dual View + Split pix#, ROI
+   (Left/Right/Top/Bottom; Center ROI, Use all pixels, 1024x1024, 512x512,
+   Center ROI at), # of pixels X/Y, FOV X/Y (um), SubROIs/Full ROI, ROI center.
+2. **Calc (Stack Projections)** -- XY / YZ / XZ max-intensity projections with
+   DeSkew, from the retained stack. LabVIEW: `SPIM/.../Image/PSF/HHMI - Calc XZ
+   and YZ Max Projection from slanted stack.vi`, `HHMI - Deskew Stack data into
+   XY Max projection.vi`, `HHMI - Get Max Projection of slanted stack.vi`.
+   **DONE 2026-09-04** -- `analysis/projections.py`, Calc/DeSkew and the per-view
+   save buttons wired; `docs/stack_save_and_projections.md`.
+3. **Save TIFF stacks** the way LouisXIV does (format + naming from
+   `Common/File IO/Image/Tiff/*`, e.g. `Convert tiff filename to
+   channel-time-and-z.vi`). Needs a TIFF writer dependency (tifffile).
+   **DONE 2026-09-04** -- `fileio/tiff_stack.py`; Save Files writes
+   `<data>/Cell<N>/img_CH%02d_%06d.tif` (U16, uncompressed, OME-XML) + `AcqInfo.txt`;
+   Save Image button; `docs/stack_save_and_projections.md`.
+4. **Low-Level Waveform Config** -- port from LouisXIV's Adv Setup, but place it
+   under **Utilities** (a deliberate move). Waveform type, Pixel/ms, Updates/Pix,
+   Fractional Flyback/Smoothing, per-axis Excitation Size/Pixels (X, Xwvfrm, Z,
+   Spiezo, Zpiezo, Dither), AOTF / galvo / piezo delays, sweep period, duty,
+   # integrations, cam exp, cycle time, Z motion, DOE beams, X wave, Z
+   bidirectional, virtual confocal, custom cycle time, Z piezo selector, AOTF
+   cycle / sweep mode / pulse width / pulse duty, dither triangle pulses, etc.
+5. **Utilities tab** -- "most of" LouisXIV's 18 launcher tools; which subset is
+   the user's call. Mapped: Align Laser; View TIF stack (pairs with 3); Image
+   Reviewer; **um per V calibration** (the per-channel calibration the user wants
+   in its own tab); Calculate PSF (`Image/PSF/*`); View Z Lookup Table
+   (`Calibration/Z Lookup/*`); Sample Stage Control; Shift Vslit calibration
+   (`Calibration/Vslit Lookup/*`); Resave OME-XML TIFs (external exe); X&Z Galvo
+   offsets per AOTF ch (`Calibration/X and Z Galvo offsets calibration GUI.vi`);
+   Camera Debug Panel (`GUI/Camera Debug Panel.vi`); **FPGA Scope (done: the
+   Waveforms tab)**; Auto Background (greyed in LouisXIV too); FPGA Monitor;
+   Reset HW (= safe_state/reset); X Galvo Z Corrections (`Calibration/X Galvo/`);
+   HW Config (`GUI/HW Configuration GUI.vi`); Imagine Optics (adaptive optics).
+
+Scale note: items 1, 4 and 5 are a multi-week surface (each Utilities tool is
+its own sub-GUI). The one-laser-at-a-time rule stays as LouisXIV has it.

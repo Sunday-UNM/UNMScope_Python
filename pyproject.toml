@@ -6,6 +6,7 @@ requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2",
     "numpy",
+    "tifffile",
     "PySide6",
     "pymmcore-plus",
     "qtpy",

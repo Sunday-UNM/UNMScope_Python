@@ -607,13 +607,13 @@ below is being implemented until the user picks.
     scratchpad (hwconfig_frames/) into VI_Diagrams for reproducible measuring.
 16. Prune the workflow worktrees/branches (.claude/worktrees, tool/*).
 17. Timepoints and Multi-location boxes remain unwired (kept on request).
-18. Stack Projections "Calc" (user, 2026-09-05: "looks grayed out"): ours is
+18. **DONE** Stack Projections "Calc" (user, 2026-09-05: "looks grayed out"): ours was
     enabled only while a Z-stack is in memory (Z-stack run completed, or View
     TIF stack); Continuous runs do not retain frames. LouisXIV's [56] "Max
     Projs" latch button is ALWAYS enabled and projects whatever stack the image
     window holds. Decide: keep the guard, or match LouisXIV (always enabled, log
     "no stack" when empty).
-19. Utilities grid: REMOVE (user, 2026-09-05) Align Laser, Image Reviewer,
+19. **DONE** Utilities grid: REMOVED (user, 2026-09-05) Align Laser, Image Reviewer,
     Calculate PSF, Auto Background and View TIF stack. Keep the rest (um per V
     calibration, View Z Lookup Table, Sample Stage Control, Shift Vslit
     calibration, Resave OME-XML TIFs, X&Z Galvo offsets per AOTF ch, Camera

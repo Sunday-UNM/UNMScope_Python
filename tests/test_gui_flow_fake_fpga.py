@@ -202,7 +202,15 @@ def test_calc_projects_the_retained_stack_and_save_files_writes_louisxiv_layout(
     w = window
     w._data_dir = tmp_path                      # bypass the folder prompt
     w.save_files_chk.setChecked(True)
-    assert not w.calc_projections_btn.isEnabled()
+    # Calc is always enabled (LouisXIV's Max Projs latch); with no stack it only logs
+    assert w.calc_projections_btn.isEnabled() and w.acquired_stack() is None
+    msgs, orig_log = [], w._log
+    w._log = lambda m: (msgs.append(m), orig_log(m))
+    try:
+        w._on_calc_projections()
+    finally:
+        w._log = orig_log
+    assert any("no Z-stack in memory" in m for m in msgs)
 
     w.mode_combo.setCurrentText(mw.MODE_ZSTACK)
     pump(app, 0.05)

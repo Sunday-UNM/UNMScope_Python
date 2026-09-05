@@ -1,6 +1,6 @@
 """The Utilities tab (tool grid + Low-Level Waveform Config) inside the main
 window, headless: the grid, the live config fields, the Scan Setup dither
-sync, and View TIF stack presenting a saved stack as an acquired one."""
+sync, and load_stack_from_file presenting a saved stack as an acquired one."""
 import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -27,13 +27,14 @@ def window(app, monkeypatch, tmp_path):
     w.close()
 
 
-def test_grid_has_louisxiv_18_tools_two_wired(window):
+def test_grid_has_the_13_kept_tools_five_wired(window):
     tab = window.utilities_tab
-    assert len(tab.buttons) == 18
+    assert len(tab.buttons) == 13
+    for dropped in ("Align Laser", "Image Reviewer", "Calculate PSF", "Auto Background", "View TIF stack"):
+        assert dropped not in tab.buttons                                # removed 2026-09-05 (user)
     wired = [name for name, b in tab.buttons.items() if b.isEnabled()]
-    assert wired == ["View TIF stack", "um per V calibration", "Sample Stage Control",
-                     "Camera Debug Panel", "FPGA Scope", "HW Config"]
-    assert not tab.buttons["Auto Background"].isEnabled()
+    assert wired == ["um per V calibration", "Sample Stage Control", "Camera Debug Panel", "FPGA Scope", "HW Config"]
+    assert not tab.buttons["Reset HW"].isEnabled()
 
 
 def test_fpga_scope_button_shows_the_waveforms_tab(window):
@@ -55,7 +56,7 @@ def test_live_fields_and_dither_sync(window):
     assert panel.config().dither_fract_flyback == 0.05
 
 
-def test_view_tif_stack_loads_as_an_acquired_stack(window, tmp_path):
+def test_load_stack_from_file_presents_it_as_an_acquired_stack(window, tmp_path):
     stack = (np.random.default_rng(0).integers(0, 4000, size=(5, 64, 48))).astype(np.uint16)
     path = tmp_path / "img_CH00_000000.tif"
     save_tiff_stack(path, stack)
@@ -63,5 +64,5 @@ def test_view_tif_stack_loads_as_an_acquired_stack(window, tmp_path):
     assert window.load_stack_from_file(str(path)) is True
     got = window.acquired_stack()
     assert got.shape == (5, 64, 48) and np.array_equal(got, stack)
-    assert window.calc_projections_btn.isEnabled()
+    assert window.calc_projections_btn.isEnabled()          # always enabled now (LouisXIV's Max Projs latch)
     assert "loaded" in window.frame_counter_label.text()

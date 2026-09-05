@@ -379,7 +379,7 @@ class MainWindow(QMainWindow):
         # panel's size; nothing is normally cut off at the target size.
         tabs.addTab(scan_setup_scroll, "Scan Setup")
         tabs.addTab(self._build_camera_tab(), "Camera")
-        self.utilities_tab = UtilitiesTab(view_tif=self.load_stack_from_file, fpga_scope=self._show_fpga_scope,
+        self.utilities_tab = UtilitiesTab(fpga_scope=self._show_fpga_scope,
                                           camera_debug=self._show_camera_debug_panel,
                                           hw_config=self._show_hw_config, sample_stage=self._show_sample_stage,
                                           um_per_volt=self._show_calibration_tab,
@@ -1087,10 +1087,10 @@ class MainWindow(QMainWindow):
         side = QVBoxLayout()
         self.deskew_check = QCheckBox("DeSkew")
         self.deskew_check.setChecked(True)
-        self.deskew_check.setEnabled(False)
         side.addWidget(self.deskew_check)
+        # Always enabled, like LouisXIV's [56] "Max Projs" latch: it projects
+        # whatever stack is in memory and just logs when there is none.
         self.calc_projections_btn = QPushButton("Calc")
-        self.calc_projections_btn.setEnabled(False)
         self.calc_projections_btn.clicked.connect(self._on_calc_projections)
         side.addWidget(self.calc_projections_btn)
         side.addStretch(1)
@@ -1170,8 +1170,6 @@ class MainWindow(QMainWindow):
         'Close Files and Delete Partials' does)."""
         stack = self.acquired_stack()
         have = stack is not None
-        self.calc_projections_btn.setEnabled(have)
-        self.deskew_check.setEnabled(have)
         if not have:
             return
         stack_max = int(stack.max())                       # LouisXIV's "calc stack max"
@@ -1206,6 +1204,7 @@ class MainWindow(QMainWindow):
     def _on_calc_projections(self):
         stack = self.acquired_stack()
         if stack is None:
+            self._log("Calc: no Z-stack in memory (a completed Z stack is needed; Continuous runs are not retained).")
             return
         cal = self.calibration
         # The per-slice Sample Piezo positions LouisXIV reads back from each
@@ -1709,9 +1708,10 @@ class MainWindow(QMainWindow):
             self._log(f"Could not save the waveform config: {e}")
 
     def load_stack_from_file(self, path: str) -> bool:
-        """Utilities > View TIF stack: load a saved stack and hold it as the
-        retained stack, so the Images view shows it and Calc / Save work on
-        it exactly as after an acquisition."""
+        """Load a saved stack and hold it as the retained stack, so the Images
+        view shows it and Calc / Save work on it exactly as after an
+        acquisition. (The Utilities 'View TIF stack' button was removed on the
+        user's call, 2026-09-05; this stays for the launcher and tests.)"""
         if self.acquiring:
             self._log("View TIF stack: stop the acquisition first.")
             return False
@@ -1729,8 +1729,6 @@ class MainWindow(QMainWindow):
         self._frame_averager.reset()
         self._display_frame(self._stack_frames[0], label_text=f"{Path(path).name} [1/{n}]")
         self.frame_counter_label.setText(f"{n}  (loaded {Path(path).name})")
-        self.calc_projections_btn.setEnabled(True)
-        self.deskew_check.setEnabled(True)
         stack_max = int(stack.max())
         self.stack_max_spin.setValue(stack_max)
         self.stack_max_slider.setValue(stack_max)

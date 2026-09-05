@@ -73,18 +73,17 @@ waveform, Z Piezo Selector, Linked / XZcrrct.
 
 ## Tools grid
 
-18 buttons in LouisXIV's order. Wired: **View TIF stack** (loads a stack as
-if just acquired: Images view, Calc, Save all work on it -- LouisXIV's [100]
-"View tif" opens its reviewer instead) and **FPGA Scope** (the Waveforms tab
-is our FPGA scope). Greyed: Align Laser, Image Reviewer, Calculate PSF, Sample
-Stage Control, Resave OME-XML TIFs, Camera Debug Panel, Auto Background
-(greyed in LouisXIV too), Reset HW, HW Config, um per V calibration, View Z
-Lookup Table, Shift Vslit calibration, X&Z Galvo offsets per AOTF ch, FPGA
-Monitor, X Galvo Z Corrections, Imagine Optics. The event cases for each
-exist in `hidden_frames/` ([17] Calculate PSF, [42] FPGA Monitor, [45] HW
-Config, [68] Resave OME-XML Util, [69] Reset HW, [85] Shift Vslit cal, [101]
-View Z Lookup, [107] X Galvo Z Corrections, ...) for when the user picks
-which to port.
+13 of LouisXIV's 18 tools, in its reading order; the user dropped Align
+Laser, Image Reviewer, Calculate PSF, Auto Background and View TIF stack
+(2026-09-05). Wired: **um per V calibration** (switches to the um/V Cal tab),
+**Sample Stage Control** (simulated MP-285 panel, `docs/sample_stage.md`),
+**Camera Debug Panel** (`docs/camera_debug_panel.md` / the module docstring),
+**FPGA Scope** (the Waveforms tab), **HW Config** (`docs/hw_config.md`).
+Greyed until ported: View Z Lookup Table, Shift Vslit calibration, Resave
+OME-XML TIFs, X&Z Galvo offsets per AOTF ch, FPGA Monitor, Reset HW, X Galvo
+Z Corrections, Imagine Optics. Their SPIM MAIN event cases are in
+`hidden_frames/` ([42] FPGA Monitor, [68] Resave OME-XML Util, [69] Reset HW,
+[85] Shift Vslit cal, [101] View Z Lookup, [107] X Galvo Z Corrections, ...).
 
 ## Layout, measured
 

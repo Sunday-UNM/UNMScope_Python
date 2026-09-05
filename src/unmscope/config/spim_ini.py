@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import configparser
 import re
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -63,14 +62,9 @@ def ensure_user_ini(source: Path = DEFAULT_INI, dest: Path | None = None) -> Pat
     """Return the path of the UNMScope copy, creating it from ``source``
     (byte for byte) on first use. A missing source leaves an empty copy so
     the app still starts; the settings then fall back to their defaults."""
+    from unmscope.config.paths import ensure_user_copy
     dest = Path(dest) if dest is not None else user_ini_path()
-    if not dest.exists():
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        if Path(source).exists():
-            shutil.copyfile(source, dest)
-        else:
-            dest.write_bytes(b"")
-    return dest
+    return ensure_user_copy(source, dest, if_missing="empty")
 
 
 def _parser() -> configparser.ConfigParser:

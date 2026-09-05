@@ -5,6 +5,7 @@ files under UNMScope_Source are read-only inputs everywhere."""
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 
 
@@ -13,7 +14,39 @@ def user_dir() -> Path:
     return Path(override) if override else Path.home() / ".unmscope"
 
 
+#: LouisXIV's install (read-only input everywhere; Python never writes here).
+LOUISXIV_ROOT = Path(r"H:\UNM_Lightsheet\UNMScope_Source")
+LOUISXIV_SUPPORT_DIR = LOUISXIV_ROOT / "SPIM" / "SPIM Support files"
+
+
 def user_ini() -> Path:
     """UNMScope's copy of SPIMProject.ini (created from LouisXIV's on first use
     by whichever module needs it first)."""
     return user_dir() / "SPIMProject.ini"
+
+
+def ensure_user_copy(source: Path, dest: Path, *, if_missing: str = "skip") -> Path:
+    """Create ``dest`` as a byte-for-byte copy of ``source`` (LouisXIV's file)
+    on first use; an existing ``dest`` is never touched. The four UNMScope
+    modules that own a slice of SPIMProject.ini (spim_ini, hw_config,
+    um_per_volt, fileio.stage_locations) all had their own copy of this
+    "copy on first use" logic with a slightly different policy for a missing
+    source -- this is the one copy, parametrised by that policy:
+
+    - ``"skip"``  (default): return ``dest`` and create nothing.
+    - ``"empty"``: write an empty ``dest`` so the app still starts.
+    - ``"raise"``: raise ``FileNotFoundError``.
+    """
+    dest, source = Path(dest), Path(source)
+    if dest.exists():
+        return dest
+    if source.exists():
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, dest)
+    elif if_missing == "empty":
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"")
+    elif if_missing == "raise":
+        raise FileNotFoundError(f"neither {dest} nor LouisXIV's {source} exists")
+    # "skip": dest stays absent; callers fall back to in-memory defaults.
+    return dest

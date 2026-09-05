@@ -46,16 +46,17 @@ from __future__ import annotations
 import configparser
 import math
 import re
-import shutil
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from unmscope.config.paths import LOUISXIV_SUPPORT_DIR
 
 if TYPE_CHECKING:  # pragma: no cover
     from unmscope.config.calibration import Calibration
 
 #: LouisXIV's own file: read-only input for Python (never written).
-LOUISXIV_INI = Path(r"H:\UNM_Lightsheet\UNMScope_Source\SPIM\SPIM Support files\SPIMProject.ini")
+LOUISXIV_INI = LOUISXIV_SUPPORT_DIR / "SPIMProject.ini"
 
 #: The section the constants VI reads and writes (string constant in the VI).
 INI_SECTION = "Microns to Volt calibrations"
@@ -73,11 +74,9 @@ def ensure_unmscope_ini(dest: Path | None = None, source: Path = LOUISXIV_INI) -
     byte) and return its path. An existing copy is left untouched; if neither
     file exists the path is returned anyway (reads then fall back to
     defaults and the first Save creates the file with just this section)."""
+    from unmscope.config.paths import ensure_user_copy
     dest = Path(dest) if dest is not None else unmscope_ini_path()
-    if not dest.exists() and Path(source).exists():
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, dest)
-    return dest
+    return ensure_user_copy(source, dest)
 
 
 def read_ini(path: Path) -> configparser.ConfigParser:

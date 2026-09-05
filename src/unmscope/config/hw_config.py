@@ -42,7 +42,6 @@ from __future__ import annotations
 
 import configparser
 import copy
-import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
@@ -419,13 +418,8 @@ def user_ini_path(path: str | Path | None = None, source: str | Path = LOUISXIV_
     else:
         from unmscope.config.paths import user_ini
         p = user_ini()
-    if not p.exists():
-        src = Path(source)
-        if not src.exists():
-            raise FileNotFoundError(f"neither {p} nor LouisXIV's {src} exists")
-        p.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(src, p)
-    return p
+    from unmscope.config.paths import ensure_user_copy
+    return ensure_user_copy(source, p, if_missing="raise")
 
 
 def copy_config(cfg: HwConfig) -> HwConfig:

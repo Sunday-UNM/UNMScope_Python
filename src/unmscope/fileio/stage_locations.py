@@ -33,13 +33,13 @@ on copies under ``~/.unmscope`` made on first use (``ensure_user_copy``).
 from __future__ import annotations
 
 import math
-import shutil
 from pathlib import Path
 from typing import Callable
 
+from unmscope.config.paths import LOUISXIV_SUPPORT_DIR
 from unmscope.hardware.stage import Vec3, calc_max_move_time_s
 
-SUPPORT_DIR = Path(r"H:\UNM_Lightsheet\UNMScope_Source\SPIM\SPIM Support files")
+SUPPORT_DIR = LOUISXIV_SUPPORT_DIR
 LOCATIONS_FILENAME = "SPIMProject 3D Stage Locations.txt"
 SEQUENCE_FILENAME = "SPIMProject 3D Stage Sequence Locations.txt"
 DEFAULT_LOCATIONS_FILE = SUPPORT_DIR / LOCATIONS_FILENAME
@@ -65,11 +65,8 @@ def user_sequence_path() -> Path:
 def ensure_user_copy(source: Path, dest: Path) -> Path:
     """Copy LouisXIV's file to the UNMScope location on first use (byte for
     byte); a missing source gives no file, which loads as 'no rows'."""
-    dest = Path(dest)
-    if not dest.exists() and Path(source).exists():
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, dest)
-    return dest
+    from unmscope.config.paths import ensure_user_copy as _ensure_user_copy
+    return _ensure_user_copy(source, dest)
 
 
 # -- Load Location File.vi ----------------------------------------------------

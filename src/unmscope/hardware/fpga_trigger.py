@@ -63,7 +63,9 @@ from dataclasses import dataclass
 import nifpga
 import numpy as np
 
-BITFILE = r"H:\UNM_Lightsheet\UNMScope_Source\bin\data\SPIMFPGAProject_SPIM_MAIN_VI.lvbitx"
+from unmscope.config.paths import LOUISXIV_ROOT
+
+BITFILE = str(LOUISXIV_ROOT / "bin" / "data" / "SPIMFPGAProject_SPIM_MAIN_VI.lvbitx")
 RESOURCE = "RIO0"
 
 AO_MODE_START_RUN_WVFRM = 0

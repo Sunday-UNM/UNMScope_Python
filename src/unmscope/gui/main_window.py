@@ -385,6 +385,7 @@ class MainWindow(QMainWindow):
                                           camera_debug=self._show_camera_debug_panel,
                                           hw_config=self._show_hw_config, sample_stage=self._show_sample_stage,
                                           um_per_volt=self._show_calibration_tab,
+                                          reset_hw=self.on_reset_hw_clicked,
                                           waveform_config=self.waveform_config)
         self.utilities_tab.waveform_panel.changed.connect(self._on_waveform_config_changed)
         # The Scan Setup Dither box's sweeps / flyback ARE the cluster's Dither
@@ -1638,6 +1639,39 @@ class MainWindow(QMainWindow):
         self.calibration_window.show()
         self.calibration_window.raise_()
         self.calibration_window.activateWindow()
+
+    def on_reset_hw_clicked(self) -> None:
+        """Utilities > Reset HW. LouisXIV's [69] "Reset HW" sends the engine to
+        its "Reset HW" state ("do a hardware reset on DAQ boards, reinitialize
+        everything": Start hardware 1, Load Locals, Set Camera, Enable-disable,
+        Start UI Loop). Here: stop a run, close and re-open the FPGA (reset +
+        safe state) and the camera (same backend, settings re-applied), then
+        the enable pass."""
+        if not self._begin_blocking("Reset HW"):
+            return
+        try:
+            self._reset_hw()
+        finally:
+            self._end_blocking()
+
+    def _reset_hw(self) -> None:
+        self._log("Reset HW: reinitialising everything.")
+        if self.acquiring:
+            self._stop_acquisition()
+        had_fpga = self.fpga is not None
+        had_camera = self.camera is not None
+        if had_fpga:
+            self._disconnect_fpga()                      # 'Reset DAQ cards': close = safe state
+        if had_camera:
+            self._disconnect_camera()
+        if had_camera:
+            self._connect_camera()                       # 'Set Camera': exposure / ROI / mode re-applied
+        if had_fpga:
+            self._connect_fpga()                         # 'Start hardware 1': reset + run + safe state
+        self._update_connection_buttons()                # 'Enable-disable'
+        self._log("Reset HW done: "
+                  + ("camera reconnected, " if had_camera and self.camera is not None else "no camera, ")
+                  + ("FPGA reconnected." if had_fpga and self.fpga is not None else "no FPGA."))
 
     def _show_hw_config(self) -> None:
         """Utilities > HW Config: LouisXIV's HW Configuration GUI on UNMScope's

@@ -10,9 +10,10 @@ render (tab body border at x = 8), rows from y = 113 with a 72 px pitch
 (tab page top at y = 76). The remaining tools keep LouisXIV's reading order
 and close up the gaps left by the removed ones.
 
-Wired: um per V calibration (the um/V Cal tab), Sample Stage Control,
-Camera Debug Panel, FPGA Scope (the Waveforms tab), HW Config. The rest are
-greyed until ported.
+Wired: um per V calibration (its own window), Sample Stage Control, Camera
+Debug Panel, FPGA Scope (the Waveforms tab), Reset HW (stop, re-open the FPGA
+and the camera, re-apply settings -- LouisXIV's "Reset HW" engine state), HW
+Config. The rest are greyed until ported.
 """
 from __future__ import annotations
 
@@ -27,7 +28,7 @@ TOOLS = [  # (label, wired-callback name or None), LouisXIV's reading order
     ("um per V\ncalibration", "um_per_volt"), ("View Z Lookup\nTable", None),
     ("Sample Stage\nControl", "sample_stage"), ("X&Z Galvo offsets\nper AOTF ch", None),
     ("Camera Debug\nPanel", "camera_debug"), ("FPGA\nScope", "fpga_scope"),
-    ("FPGA Monitor", None), ("Reset HW", None),
+    ("FPGA Monitor", None), ("Reset HW", "reset_hw"),
     ("X Galvo Z\nCorrections", None), ("HW Config", "hw_config"),
     ("Imagine Optics", None),
 ]
@@ -42,12 +43,14 @@ class UtilitiesTab(QTabWidget):
                  hw_config: Callable[[], None] | None = None,
                  sample_stage: Callable[[], None] | None = None,
                  um_per_volt: Callable[[], None] | None = None,
+                 reset_hw: Callable[[], None] | None = None,
                  waveform_config: WaveformConfig | None = None, parent=None):
         super().__init__(parent)
         noop = lambda: None
         self._actions = {"fpga_scope": fpga_scope,
                          "camera_debug": camera_debug or noop, "hw_config": hw_config or noop,
-                         "sample_stage": sample_stage or noop, "um_per_volt": um_per_volt or noop}
+                         "sample_stage": sample_stage or noop, "um_per_volt": um_per_volt or noop,
+                         "reset_hw": reset_hw or noop}
         self.buttons: dict[str, QPushButton] = {}
         tools = QWidget()
         tools.setMinimumSize(370, ROW_Y0 + ((len(TOOLS) + 1) // 2) * ROW_PITCH)

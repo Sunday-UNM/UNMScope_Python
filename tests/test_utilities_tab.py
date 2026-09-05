@@ -34,8 +34,25 @@ def test_grid_has_the_11_kept_tools_five_wired(window):
                     "Resave OME-XML TIFs", "Shift Vslit calibration"):
         assert dropped not in tab.buttons                                # removed 2026-09-05 (user)
     wired = [name for name, b in tab.buttons.items() if b.isEnabled()]
-    assert wired == ["um per V calibration", "Sample Stage Control", "Camera Debug Panel", "FPGA Scope", "HW Config"]
-    assert not tab.buttons["Reset HW"].isEnabled()
+    assert wired == ["um per V calibration", "Sample Stage Control", "Camera Debug Panel", "FPGA Scope",
+                     "Reset HW", "HW Config"]
+    assert not tab.buttons["FPGA Monitor"].isEnabled()
+
+
+def test_reset_hw_reopens_the_camera(window):
+    window.backend_combo.setCurrentText("Simulated")
+    window.on_connect_clicked()
+    first = window.camera
+    assert first is not None and first.is_connected
+    msgs, orig = [], window._log
+    window._log = lambda m: (msgs.append(m), orig(m))
+    try:
+        window.utilities_tab.buttons["Reset HW"].click()
+    finally:
+        window._log = orig
+    assert window.camera is not None and window.camera.is_connected and window.camera is not first
+    assert not first.is_connected
+    assert any("Reset HW done" in m for m in msgs)
 
 
 def test_fpga_scope_button_shows_the_waveforms_tab(window):

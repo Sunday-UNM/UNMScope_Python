@@ -558,3 +558,52 @@ invent them. Foundation landed first: a Z-stack is now retained in memory
 
 Scale note: items 1, 4 and 5 are a multi-week surface (each Utilities tool is
 its own sub-GUI). The one-laser-at-a-time rule stays as LouisXIV has it.
+
+## Action items for the user's review (2026-09-05, not started -- decide first)
+
+Collected from the tool builds, their reviews and the day's findings. Nothing
+below is being implemented until the user picks.
+
+**Decisions needed**
+1. HW Config > Apply: today it only writes UNMScope's ini copy and logs; LouisXIV
+   does a full Reset HW. Options: (a) leave "takes effect on next Connect", (b)
+   stop the run + disconnect/reconnect camera + FPGA reset. Which camera keys
+   should Connect honour: Sync Readout (now hard-coded on), Binning, Serial
+   number check (the DCAM adapter cannot select by serial), Simulate?
+2. um/V Cal: the live ini says X galvo = 2000 um/V while LouisXIV's panel
+   default is 53 -- which is right? Needs a bench measurement. Also LouisXIV's X
+   galvo path adds (Xmin+Xmax)/2 and, with "Enable X Galvo Correction LUT",
+   runs the 19-point XGalvo_LUT -- neither is ported.
+3. Sample piezo voltage limits: calibration.py uses +-10 V; LouisXIV's constants
+   are 0..10 V (HHMI - Z Piezo AOTF voltage limits.vi). X tile's +-10 V is a guess.
+4. Camera Debug Panel: "Exposures Acqd" shows FPGA triggers fired (no DCAM-side
+   count through pymmcore); refresh 500 ms assumed. Keep the five camera rows?
+5. Images tab: the Gradient palette is NI's description, not NI's LUT -- compare
+   on a real image. FOV shows 443.7 um where LouisXIV shows 444.0 (pixel-size
+   rounding). Drawing tools / Cam selectors stay greyed.
+6. um/V Cal tab is 466 px wide in the 406 px column (horizontal scroll) --
+   accept, or shorten the "Galvo Pos um/Galvo Pos Volt" label? Its Revert button
+   is an addition (LouisXIV has Close).
+7. Sample Stage: Auto Refresh (on) / Wait for Moves (off) defaults assumed; the
+   window drops LouisXIV's error clusters (701x735 vs 701x805); Gen. Grid
+   Sequence greyed; multi-position acquisition coupling deferred. When the MP-285
+   is cabled: COM8, 9600 8-N-1, low-resolution mode at 2500 um/s to confirm.
+8. Low-Level Waveform Config: still greyed -- delays, Duty, DOE, AOTF pulse /
+   sweep / cycle fields, Z wave Sweep, Wait for Zsettle, Sine; Z motion enum
+   items unknown beyond the default.
+9. Scope extras from LouisXIV declined for now (ordered channel list, two
+   cursors, 29 ch at 200 kS/s) -- revisit if wanted.
+
+**Verification still owed (hardware / real data)**
+10. DCAM "SENSOR MODE" value strings and the 4-px subarray units on the Orca.
+11. Deskew shift direction on a real slanted stack (point feature must collapse).
+12. Z piezo (AO2) / Wvfrm2 DMA path at a pin (0/1/2.5/5 V staircase).
+13. The bench serial protocol of the MP-285 (fake transport only so far).
+
+**Code hygiene**
+14. Three ini-copy writers coexist (config/spim_ini.py, hw_config.py,
+    um_per_volt.py) on the same file -- unify behind one writer.
+15. Copy the HW Config page renders + 37 case frames from the session
+    scratchpad (hwconfig_frames/) into VI_Diagrams for reproducible measuring.
+16. Prune the workflow worktrees/branches (.claude/worktrees, tool/*).
+17. Timepoints and Multi-location boxes remain unwired (kept on request).

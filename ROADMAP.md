@@ -581,9 +581,9 @@ below is being implemented until the user picks.
 5. Images tab: the Gradient palette is NI's description, not NI's LUT -- compare
    on a real image. FOV shows 443.7 um where LouisXIV shows 444.0 (pixel-size
    rounding). Drawing tools / Cam selectors stay greyed.
-6. um/V Cal tab is 466 px wide in the 406 px column (horizontal scroll) --
-   accept, or shorten the "Galvo Pos um/Galvo Pos Volt" label? Its Revert button
-   is an addition (LouisXIV has Close).
+6. **DONE** um/V Cal is no longer a left tab: it opens as its own window from
+   the Utilities grid (user, 2026-09-05), so the 466 px width is moot. Its
+   Revert button is still an addition (LouisXIV has Close).
 7. Sample Stage: Auto Refresh (on) / Wait for Moves (off) defaults assumed; the
    window drops LouisXIV's error clusters (701x735 vs 701x805); Gen. Grid
    Sequence greyed; multi-position acquisition coupling deferred. When the MP-285

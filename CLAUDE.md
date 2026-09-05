@@ -101,6 +101,8 @@ years. The user decided, tab by tab:
   calibration were removed (user, 2026-09-05).
 - Stack Projections "Calc" is always enabled, like LouisXIV's latch button;
   with no stack in memory it only logs.
+- um per V calibration opens as its own window from the Utilities grid; the
+  separate "um/V Cal" left tab was removed (user, 2026-09-05).
 - Low-Level Waveform Config lives under Utilities (LouisXIV: Adv Setup).
 
 Match the real panel for what remains; do not re-add removed elements

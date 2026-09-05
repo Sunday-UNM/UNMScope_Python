@@ -393,15 +393,18 @@ class MainWindow(QMainWindow):
         self.dg_flyback.valueChanged.connect(self.utilities_tab.waveform_panel.dither_fract_flyback.setValue)
         self._sync_dither_spins(self.waveform_config)
         tabs.addTab(self.utilities_tab, "Utilities")
-        # um per V calibration: LouisXIV's Microns per Volt Settings GUI as its own
-        # tab (the user's call); Save reloads the Calibration the scan uses.
+        # um per V calibration: LouisXIV's Microns per Volt Settings GUI, opened
+        # from the Utilities grid as its own window (the user dropped the
+        # separate left tab, 2026-09-05); Save reloads the Calibration the
+        # scan uses.
         self.calibration_tab = CalibrationTab(log=self._log)
         self.calibration_tab.saved.connect(self._on_calibration_saved)
-        cal_scroll = QScrollArea()
-        cal_scroll.setWidget(self.calibration_tab)
-        cal_scroll.setWidgetResizable(True)
-        cal_scroll.setFrameShape(QFrame.NoFrame)
-        tabs.addTab(cal_scroll, "um/V Cal")
+        self.calibration_window = QWidget(self, Qt.Window)
+        self.calibration_window.setWindowTitle("Microns per Volt Settings")
+        cal_lay = QVBoxLayout(self.calibration_window)
+        cal_lay.setContentsMargins(0, 0, 0, 0)
+        cal_lay.addWidget(self.calibration_tab)
+        self.calibration_window.resize(self.calibration_tab.minimumSize())
         lay.addWidget(tabs, stretch=1)
         return container
 
@@ -1630,7 +1633,11 @@ class MainWindow(QMainWindow):
                   f"(source: {cal.source}).")
 
     def _show_calibration_tab(self) -> None:
-        self.left_tabs.setCurrentWidget(self.calibration_tab.parentWidget().parentWidget())
+        """Utilities > um per V calibration: LouisXIV's [31] 'Edit um/V Cal'
+        launches the settings GUI as its own window."""
+        self.calibration_window.show()
+        self.calibration_window.raise_()
+        self.calibration_window.activateWindow()
 
     def _show_hw_config(self) -> None:
         """Utilities > HW Config: LouisXIV's HW Configuration GUI on UNMScope's

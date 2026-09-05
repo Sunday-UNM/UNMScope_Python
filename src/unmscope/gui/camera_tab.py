@@ -113,6 +113,11 @@ class CameraTab(QWidget):
         s.setRange(lo, hi)
         s.setValue(value)
         s.setKeyboardTracking(False)
+        # LabVIEW's increment arrows are an 8 px strip; Qt's are ~16 px and
+        # clip a 4-digit value in these measured 53-56 px fields, so the
+        # numbers are typed / wheel-edited instead (up/down keys still work).
+        s.setButtonSymbols(QSpinBox.NoButtons)
+        s.setAlignment(Qt.AlignRight)
         return s
 
     def _button(self, text: str, rect, slot) -> QPushButton:
@@ -137,17 +142,17 @@ class CameraTab(QWidget):
         self.exposure_spin.setAlignment(Qt.AlignRight)
         # Not on the LouisXIV panel (it is an ini setting there); placed in the
         # box's empty band. Read by the acquisition start.
-        self.sync_readout_chk = QCheckBox("Sync readout (frame time = exposure)", self)
-        self.sync_readout_chk.setGeometry(*_rect(30, 232, 200, 18))
+        self.sync_readout_chk = QCheckBox("Sync readout (frame = exposure)", self)
+        self.sync_readout_chk.setGeometry(*_rect(30, 232, 206, 18))
         self.sync_readout_chk.setChecked(True)
         self._label("Sensor Mode", _rect(30, 394, 90, 21))
         self.sensor_mode_combo = QComboBox(self)
-        self.sensor_mode_combo.setGeometry(*_rect(125, 394, 106, 21))
+        self.sensor_mode_combo.setGeometry(*_rect(125, 394, 110, 21))   # +4 px: Qt's arrow is wider than LabVIEW's
         self.sensor_mode_combo.addItems(list(Camera.SENSOR_MODES))
         self.sensor_mode_combo.currentTextChanged.connect(self._on_sensor_mode)
         self.dual_view_label = self._label("Dual View mode", _rect(30, 493, 100, 19))
         self.dual_view_combo = QComboBox(self)
-        self.dual_view_combo.setGeometry(*_rect(159, 493, 70, 19))
+        self.dual_view_combo.setGeometry(*_rect(159, 493, 76, 19))
         self.dual_view_combo.addItems(["No D.V."])
         self.split_pix_label = self._label("Split pix #", _rect(30, 515, 100, 19))
         self.split_pix_spin = self._spin(_rect(159, 515, 70, 19), 1, 2048, 1024)

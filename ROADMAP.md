@@ -613,3 +613,6 @@ below is being implemented until the user picks.
     Projs" latch button is ALWAYS enabled and projects whatever stack the image
     window holds. Decide: keep the guard, or match LouisXIV (always enabled, log
     "no stack" when empty).
+19. Utilities: the user does NOT need "View TIF stack" (2026-09-05) -- remove
+    the button from the grid (keep `load_stack_from_file` only if something
+    else needs it, e.g. the Calc path in item 18).

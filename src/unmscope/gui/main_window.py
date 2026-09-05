@@ -67,6 +67,7 @@ from unmscope.gui.scope_view import FpgaScopePanel
 from unmscope.gui.camera_tab import CameraTab
 from unmscope.gui.display import FrameAverager, display_range, render_frame
 from unmscope.gui.utilities_tab import UtilitiesTab
+from unmscope.gui.camera_debug_panel import CameraDebugPanel, CameraDebugStatus
 from unmscope.config.waveform_config import AxisSettings, WaveformConfig
 from unmscope.fileio.tiff_stack import read_tiff_stack
 
@@ -238,6 +239,8 @@ class MainWindow(QMainWindow):
         # dropped before they reach here (see _poll_camera_for_frame).
         self._stack_frames: list | None = None
         self._last_frame = None                  # newest displayed frame, for 'Save Image'
+        self._last_error_text = ""
+        self.camera_debug_panel = None            # Utilities > Camera Debug Panel (LouisXIV's Debug Panel)
         self._frame_averager = FrameAverager(1)  # Images tab 'Frames to Avg'
         self._last_shown_frame = None
         self._last_shown_label = None
@@ -365,6 +368,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(scan_setup_scroll, "Scan Setup")
         tabs.addTab(self._build_camera_tab(), "Camera")
         self.utilities_tab = UtilitiesTab(view_tif=self.load_stack_from_file, fpga_scope=self._show_fpga_scope,
+                                          camera_debug=self._show_camera_debug_panel,
                                           waveform_config=self.waveform_config)
         self.utilities_tab.waveform_panel.changed.connect(self._on_waveform_config_changed)
         # The Scan Setup Dither box's sweeps / flyback ARE the cluster's Dither
@@ -1078,6 +1082,8 @@ class MainWindow(QMainWindow):
     def _log(self, msg: str):
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         self.log.append(f"[{ts}] {msg}")
+        if "FAILED" in msg or "ERROR" in msg or "Error" in msg:
+            self._last_error_text = msg            # shown by the Camera Debug Panel
 
     # -- Save / Calc: the way LouisXIV does it ----------------------------------
     def _selected_channel_index(self) -> int:
@@ -1573,6 +1579,33 @@ class MainWindow(QMainWindow):
             self._end_blocking()
 
     # -- Utilities tab ---------------------------------------------------------
+    def _camera_debug_status(self) -> CameraDebugStatus:
+        """The counters LouisXIV's Debug Panel shows, from what this window
+        keeps; camera reads are skipped during a blocking driver call."""
+        cam = self.camera
+        connected = cam is not None and cam.is_connected
+        backlog = slots = 0
+        if connected and self._blocking_op is None:
+            try:
+                backlog = int(cam.remaining_image_count())
+                slots = int(cam.buffer_capacity()[1])
+            except Exception as e:
+                self._last_error_text = f"Camera status read FAILED: {type(e).__name__}: {e}"
+        return CameraDebugStatus(
+            exposures_downloaded=int(self.frame_count), total_expected=int(self.z_target_frames or 0),
+            exposures_acquired=int(getattr(self, "_triggers_fired", 0)), download_backlog=backlog,
+            save_backlog=0, image_buffer_slots=slots, open_file_refs=0,
+            dcam_api=bool(connected and getattr(cam, "reacts_to_dio4", False)),
+            error_text=self._last_error_text, connected=connected)
+
+    def _show_camera_debug_panel(self):
+        """Utilities > Camera Debug Panel: one non-modal window, raised if open."""
+        if self.camera_debug_panel is None:
+            self.camera_debug_panel = CameraDebugPanel(self._camera_debug_status, parent=self)
+        self.camera_debug_panel.show()
+        self.camera_debug_panel.raise_()
+        self.camera_debug_panel.activateWindow()
+
     def _show_fpga_scope(self):
         """Utilities > FPGA Scope: the Waveforms tab is the FPGA scope."""
         self.top_tabs.setCurrentWidget(self.scope_panel)

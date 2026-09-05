@@ -9,8 +9,9 @@ render (tab body border at x = 8), rows from y = 113 with a 72 px pitch
 the right).
 
 Wired here: "View TIF stack" (load a stack into the window, as if it had
-just been acquired, so Calc / save work on it) and "FPGA Scope" (shows the
-Waveforms tab). Every other tool is greyed until it is ported; "Auto
+just been acquired, so Calc / save work on it), "FPGA Scope" (shows the
+Waveforms tab) and "Camera Debug Panel" (LouisXIV's read-only status window,
+gui/camera_debug_panel.py). Every other tool is greyed until it is ported; "Auto
 Background" is greyed in LouisXIV too. Which of them to port is the user's
 call (cleanup directive).
 """
@@ -29,7 +30,7 @@ TOOLS = [  # (label, wired-callback name or None), LouisXIV order
     ("Calculate PSF", None), ("View Z Lookup\nTable", None),
     ("Sample Stage\nControl", None), ("Shift Vslit\ncalibration", None),
     ("Resave\nOME-XML TIFs", None), ("X&Z Galvo offsets\nper AOTF ch", None),
-    ("Camera Debug\nPanel", None), ("FPGA\nScope", "fpga_scope"),
+    ("Camera Debug\nPanel", "camera_debug"), ("FPGA\nScope", "fpga_scope"),
     ("Auto\nBackground", None), ("FPGA Monitor", None),
     ("Reset HW", None), ("X Galvo Z\nCorrections", None),
     ("HW Config", None), ("Imagine Optics", None),
@@ -41,9 +42,11 @@ BTN_W, BTN_H = 152, 56
 
 class UtilitiesTab(QTabWidget):
     def __init__(self, *, view_tif: Callable[[str], None], fpga_scope: Callable[[], None],
+                 camera_debug: Callable[[], None] | None = None,
                  waveform_config: WaveformConfig | None = None, parent=None):
         super().__init__(parent)
-        self._actions = {"view_tif": self._on_view_tif, "fpga_scope": fpga_scope}
+        self._actions = {"view_tif": self._on_view_tif, "fpga_scope": fpga_scope,
+                         "camera_debug": camera_debug or (lambda: None)}
         self._view_tif = view_tif
         self.buttons: dict[str, QPushButton] = {}
         tools = QWidget()

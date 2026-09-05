@@ -96,8 +96,9 @@ years. The user decided, tab by tab:
   Split pix #.
 - Kept although unwired: Scan Setup's Timepoints and Multi-location boxes
   (wanted later).
-- Utilities grid: 13 of the 18 tools; Align Laser, Image Reviewer, Calculate
-  PSF, Auto Background and View TIF stack were removed (user, 2026-09-05).
+- Utilities grid: 11 of the 18 tools; Align Laser, Image Reviewer, Calculate
+  PSF, Auto Background, View TIF stack, Resave OME-XML TIFs and Shift Vslit
+  calibration were removed (user, 2026-09-05).
 - Stack Projections "Calc" is always enabled, like LouisXIV's latch button;
   with no stack in memory it only logs.
 - Low-Level Waveform Config lives under Utilities (LouisXIV: Adv Setup).

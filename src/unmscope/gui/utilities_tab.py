@@ -1,7 +1,8 @@
-"""The Utilities tab: LouisXIV's tool grid (13 of its 18 tools -- the user
-dropped Align Laser, Image Reviewer, Calculate PSF, Auto Background and View
-TIF stack on 2026-09-05), plus the Low-Level Waveform Config page the user
-asked to have here (LouisXIV keeps it under Adv Setup).
+"""The Utilities tab: LouisXIV's tool grid (11 of its 18 tools -- the user
+dropped Align Laser, Image Reviewer, Calculate PSF, Auto Background, View
+TIF stack, Resave OME-XML TIFs and Shift Vslit calibration on 2026-09-05),
+plus the Low-Level Waveform Config page the user asked to have here
+(LouisXIV keeps it under Adv Setup).
 
 Grid layout MEASURED on the COM-rendered Utilities page of SPIM MAIN.vi
 (2026-09-05): two columns of 152 x 56 buttons at x = 21 and 201 of the
@@ -24,8 +25,7 @@ from unmscope.config.waveform_config import WaveformConfig
 
 TOOLS = [  # (label, wired-callback name or None), LouisXIV's reading order
     ("um per V\ncalibration", "um_per_volt"), ("View Z Lookup\nTable", None),
-    ("Sample Stage\nControl", "sample_stage"), ("Shift Vslit\ncalibration", None),
-    ("Resave\nOME-XML TIFs", None), ("X&Z Galvo offsets\nper AOTF ch", None),
+    ("Sample Stage\nControl", "sample_stage"), ("X&Z Galvo offsets\nper AOTF ch", None),
     ("Camera Debug\nPanel", "camera_debug"), ("FPGA\nScope", "fpga_scope"),
     ("FPGA Monitor", None), ("Reset HW", None),
     ("X Galvo Z\nCorrections", None), ("HW Config", "hw_config"),

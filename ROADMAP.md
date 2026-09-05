@@ -614,9 +614,9 @@ below is being implemented until the user picks.
     window holds. Decide: keep the guard, or match LouisXIV (always enabled, log
     "no stack" when empty).
 19. **DONE** Utilities grid: REMOVED (user, 2026-09-05) Align Laser, Image Reviewer,
-    Calculate PSF, Auto Background and View TIF stack. Keep the rest (um per V
-    calibration, View Z Lookup Table, Sample Stage Control, Shift Vslit
-    calibration, Resave OME-XML TIFs, X&Z Galvo offsets per AOTF ch, Camera
+    Calculate PSF, Auto Background, View TIF stack; then (same day) Resave
+    OME-XML TIFs and Shift Vslit calibration. Kept (11): um per V
+    calibration, View Z Lookup Table, Sample Stage Control, X&Z Galvo offsets per AOTF ch, Camera
     Debug Panel, FPGA Scope, FPGA Monitor, Reset HW, X Galvo Z Corrections, HW
     Config, Imagine Optics). Re-measure the grid rows after the removal
     (keep LouisXIV's order and button size; close the gaps). Keep

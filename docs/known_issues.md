@@ -241,3 +241,14 @@ cycles): frames arrived at ~30 fps with no triggers. A stop/start also
 does NOT clear an open exposure. The GUI therefore never restarts the
 sequence between acquisitions, and `start_sequence()` re-asserts
 TRIGGER SOURCE / polarity / TRIGGER ACTIVE right before capture starts.
+
+## `achieved_hz` under-reads on short bounded runs (poll lag, not the FPGA)
+
+`FreeRunStatus.achieved_hz` divides the trigger count by the host time
+between the first and the last observed count change; the last one lags by
+up to a status-poll period. Seen 2026-09-05: a 10-trigger run at 100 ms
+reported 8.9 Hz while the FPGA's own `int_cycle_mismatches` stayed 0 and 50
+triggers averaged 100.6-100.8 ms between count callbacks (the ~0.6 ms is the
+same poll bias). Judge the cycle from `int_cycle_mismatches` or the FPGA
+scope (Waveforms tab), or over 50+ triggers, not from `achieved_hz` on a
+10-trigger run.

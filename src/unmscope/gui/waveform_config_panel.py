@@ -11,10 +11,19 @@ cluster (204,204,204), sub-clusters (170,170,170), greyed block
 
 Live (editable, honoured by unmscope.hardware.louisxiv_waveform): Updates/Pix,
 Fractional Flyback, Fract. Smoothing, X Single Direction, Dither Triangle
-Pulses, Dither Fract. Flyback, the three galvo/piezo delays, and -- gated by
-the Custom Cycle Time tick -- Cycle time, which is the trigger period itself
-(see main_window's acquire path). Indicators (read-only, refreshed by the
-window): Pixel/ms, Cam exp, Cycle time while Custom is off, the axis
+Pulses, Dither Fract. Flyback, the three galvo/piezo delays.
+
+Cam exp (s), Cycle time (s) and Custom Cycle Time are plain control elements
+of the cluster: always typeable while the cluster is enabled, no per-element
+event in LouisXIV ([104] "Waveform": Value Change just queues Calculate
+Waveforms), and re-imposed by the engine's "Set Camera" through
+``set_engine_times()`` -- Cam exp from the camera's own exposure (signalling:
+emits ``changed``, exactly like LouisXIV's Val(Sgnl)), Cycle time from
+``waveform_config.engine_times()`` (silent, like LouisXIV's plain Value
+write). Typing Cycle time does NOT tick Custom; typing Cam exp does NOT
+change the camera (docs/louisxiv_cycle_time_semantics.md, Q1/Q3).
+
+Indicators (read-only, refreshed by the window): Pixel/ms, the axis
 sub-clusters. Everything else is shown with its LouisXIV default and greyed
 until the corresponding part of "Calculate Waveforms" is ported (see
 docs/utilities_and_waveform_config.md).
@@ -48,7 +57,6 @@ def _r(x, y, w, h):
 
 class WaveformConfigPanel(QWidget):
     changed = Signal(object)          # WaveformConfig, after any live edit
-    exposure_edited = Signal(float)   # seconds: Cam exp typed on THIS page (LouisXIV lets you)
 
     LIVE = ("fractional_flyback", "fract_smoothing", "updates_per_pix", "x_single_direction",
             "dither_triangle_pulses", "dither_fract_flyback")
@@ -188,21 +196,24 @@ class WaveformConfigPanel(QWidget):
             setattr(self, attr, self._dspin(_r(107, y, 38, 18), lo, 1e6, 3, live=live))
             self._rlabel(text, _r(107, y, 38, 18))
         self.n_integrations = self._ispin(_r(107, 299, 38, 18), 1, 1000); self._rlabel("# of Integrations", _r(107, 299, 38, 18))
-        # Cam exp is TYPEABLE here, in seconds, as on LouisXIV's page -- it is
-        # where the user set 0.1 -- and drives the Scan Setup exposure through
-        # `exposure_edited`. The window pushes the exposure back into it under
-        # _updating, so the two never chase each other.
+        # Cam exp is TYPEABLE here, in seconds, as on LouisXIV's page -- but
+        # LouisXIV never sends a typed value to the camera; the engine
+        # overwrites it FROM the camera exposure at every "Set Camera"
+        # (see MainWindow._push_engine_times). A typed value only survives
+        # until the next one.
         self.cam_exp_s = self._dspin(_r(82, 318, 63, 18), 0.0001, 60.0, 4)
         self.cam_exp_s.setEnabled(True)
-        self.cam_exp_s.valueChanged.connect(self._on_cam_exp_edited)
+        self.cam_exp_s.valueChanged.connect(self._on_edit)
         self._rlabel("Cam exp (s)", _r(82, 318, 63, 18), 76)
-        # Cycle time is the trigger period and is ALWAYS typeable. Typing a
-        # value ticks Custom Cycle Time for you -- the tick sits at the bottom
-        # of the page, nowhere near this field, and the user should not have
-        # to find it first. Untick Custom to go back to the computed value.
+        # Cycle time is the trigger period and is ALWAYS typeable, in BOTH
+        # Custom modes -- typing it does not tick Custom for you (LouisXIV
+        # has no such coupling). A value typed with Custom off is transient:
+        # the engine re-imposes the camera-derived floor at the next "Set
+        # Camera" (Acquire, camera reconfigure, ...). Tick Custom yourself
+        # for a typed value to stick.
         self.cycle_time_s = self._dspin(_r(82, 337, 63, 18), 0.0, 60.0, 4)
         self.cycle_time_s.setEnabled(True)
-        self.cycle_time_s.valueChanged.connect(self._on_cycle_time_edited)
+        self.cycle_time_s.valueChanged.connect(self._on_edit)
         self._rlabel("Cycle time (s)", _r(82, 337, 63, 18), 76)
         self.linked = self._toggle(_r(150, 282, 56, 16), "Linked", True)
         self.xz_correct = self._toggle(_r(150, 299, 56, 17), "XZcrrct", True)
@@ -284,49 +295,37 @@ class WaveformConfigPanel(QWidget):
                        x_single_direction=self.x_single_direction.isChecked(),
                        dither_triangle_pulses=self.dither_triangle_pulses.value(),
                        dither_fract_flyback=self.dither_fract_flyback.value(),
+                       cam_exp_s=self.cam_exp_s.value(),
                        custom_cycle_time=self.custom_cycle_time.isChecked(),
                        cycle_time_s=self.cycle_time_s.value())
 
-    def set_indicators(self, *, cam_exp_s: float | None = None, cycle_time_s: float | None = None,
-                       pixel_per_ms: float | None = None, axes: dict[str, AxisSettings] | None = None) -> None:
-        """Refresh the read-only fields from the window (exposure, trigger
-        period, AO rate / Updates per Pixel, and the Scan Setup axes)."""
-        if cam_exp_s is not None:
-            self._cfg = replace(self._cfg, cam_exp_s=cam_exp_s)
-            self._updating = True
-            try:
-                self.cam_exp_s.setValue(cam_exp_s)
-            finally:
-                self._updating = False
-        if cycle_time_s is not None and not self.custom_cycle_time.isChecked():
-            # Never overwrite a period the user typed; this is the computed
-            # one, and it is only an indicator while Custom is off.
-            self._cfg = replace(self._cfg, cycle_time_s=cycle_time_s)
-            self._updating = True
-            try:
-                self.cycle_time_s.setValue(cycle_time_s)
-            finally:
-                self._updating = False
+    def set_engine_times(self, cam_exp_s: float, cycle_time_s: float) -> None:
+        """SPIM MAIN's "Set Camera" (d340): 'Cam exp (s)'.Val(Sgnl) and
+        'Cycle time (s)'.Value, from Camera Recalc Wvfrm?. Call with
+        ``waveform_config.engine_times()``'s result -- it already applied
+        Custom Cycle Time, so this always writes, in BOTH Custom modes.
+        Cam exp signals a recalc when it actually changes (LouisXIV's
+        Val(Sgnl)); Cycle time is silent (LouisXIV's plain Value write)."""
+        signal = abs(cam_exp_s - self.cam_exp_s.value()) > 1e-12
+        self._cfg = replace(self._cfg, cam_exp_s=cam_exp_s, cycle_time_s=cycle_time_s)
+        self._updating = True
+        try:
+            self.cam_exp_s.setValue(cam_exp_s)
+            self.cycle_time_s.setValue(cycle_time_s)
+        finally:
+            self._updating = False
+        if signal:
+            self.changed.emit(self.config())
+
+    def set_indicators(self, *, pixel_per_ms: float | None = None,
+                       axes: dict[str, AxisSettings] | None = None) -> None:
+        """Refresh the read-only fields from the window (AO rate / Updates
+        per Pixel, and the Scan Setup axes)."""
         if pixel_per_ms is not None:
             self._cfg = replace(self._cfg, pixel_per_ms=pixel_per_ms); self.pixel_per_ms.setText(f"{pixel_per_ms:g}")
         for name, a in (axes or {}).items():
             if name in self.ax:
                 self._cfg = replace(self._cfg, **{name: a}); self._show_axis(self.ax[name], a)
-
-    def _on_cam_exp_edited(self, value: float) -> None:
-        if self._updating:
-            return
-        self.exposure_edited.emit(float(value))
-        self._on_edit()
-
-    def _on_cycle_time_edited(self, value: float) -> None:
-        if self._updating:
-            return
-        if not self.custom_cycle_time.isChecked():
-            self.custom_cycle_time.blockSignals(True)
-            self.custom_cycle_time.setChecked(True)
-            self.custom_cycle_time.blockSignals(False)
-        self._on_edit()
 
     def _on_edit(self, *_):
         if self._updating:

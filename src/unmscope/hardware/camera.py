@@ -21,6 +21,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from unmscope.config.waveform_config import camera_cycle_s
 from unmscope.hardware.roi import (
     DEFAULT_POSITION_UNIT, DEFAULT_SIZE_UNIT, Roi, coerce_roi, full_roi, roi_from_subarray,
     subarray_from_roi,
@@ -150,6 +151,19 @@ class Camera(abc.ABC):
         if self.trigger_active == self.TRIGGER_SYNCREADOUT:
             return max(exposure_ms, self.readout_ms() + self.syncreadout_margin_ms())
         return exposure_ms + self.readout_ms() + self.edge_margin_ms()
+
+    def cycle_time_s(self, exposure_ms: float) -> float:
+        """``DCAM - Read cycle times.vi``: the camera's own frame period for
+        this exposure, in the CURRENT trigger mode and ROI -- no safety
+        margin; this is LouisXIV's own number
+        (docs/louisxiv_cycle_time_semantics.md). The port's bench-measured
+        margin stays in ``trigger_period_ms()`` above -- the two are
+        independent floors and both apply (main_window.py combines them
+        with ``max()``, never one in place of the other)."""
+        h = self.info.height if self.info is not None else 2048
+        return camera_cycle_s(exposure_ms / 1000.0, h,
+                              self.trigger_active == self.TRIGGER_SYNCREADOUT,
+                              line_time_s=self.line_time_ms() / 1000.0)
 
     def closing_triggers(self) -> int:
         """Extra triggers a bounded acquisition of n frames needs on top

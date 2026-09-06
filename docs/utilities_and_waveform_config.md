@@ -160,18 +160,37 @@ code would be wrong rather than merely incomplete.
 **NOT verified on the card.** The maths is tested and the block still fits
 its cycle, but no delayed waveform has been put on a scope.
 
-## Cycle time -- live, editable (2026-09-06)
+## Cycle time -- live, editable (2026-09-06; formula revised later the same day)
 
-The trigger period. Behind LouisXIV's **Custom Cycle Time** tick the field is
-typeable and its value is the period; unticked it is an indicator showing the
-computed value, exposure x 1.27 (`DEFAULT_FLYBACK_FRACTION`, the user's
-measured 27 ms on 100 ms). Either way the camera's own minimum period is a
-floor. See `docs/known_issues.md` "Z stack came up short" for why this is the
-number that times the acquisition and the exposure is not.
+The trigger period. Cam exp, Cycle time and Custom Cycle Time are all
+typeable in both Custom modes, matching LouisXIV exactly (no field is ever
+an indicator there); what changes with the tick is only which value the
+engine writes into Cycle time on every "Set Camera" --
+`config.waveform_config.engine_times()`: Custom OFF, the camera's own frame
+period (`camera_cycle_s()`, LouisXIV's `DCAM - Read cycle times` formula, no
+margin); Custom ON, the typed value, floored (never lowered) by that same
+camera cycle. `MainWindow._push_engine_times()` calls this at camera
+connect, every exposure or ROI change, and Acquire set-up, then
+`WaveformConfigPanel.set_engine_times()` writes both fields (Cam exp
+signals a recalc when it changes, exactly like LouisXIV's Val(Sgnl); Cycle
+time is silent, like its plain Value write). Cam exp is NOT settable from
+this page -- LouisXIV writes it FROM the camera, never the other way --
+and typing Cycle time does NOT tick Custom for you, matching LouisXIV; a
+value typed with Custom off is overwritten at the next Set Camera.
 
-**Caveat on the above (2026-09-06).** An unverified source read suggests
-LouisXIV derives Cycle time from the camera's own frame period rather than
-from a flyback fraction, and writes Cam exp from the camera rather than
-letting it set the exposure. See `docs/louisxiv_cycle_time_semantics.md`.
-The behaviour described above is what the port does today and is verified on
-the hardware; it is not yet confirmed to be LouisXIV's rule.
+On top of all that, the port keeps its OWN bench-measured camera floor
+(`Camera.trigger_period_ms()`, spikes/19) as a separate, final, distinctly
+logged minimum -- LouisXIV's formula has no such margin, and this is a
+deliberate port-only deviation, not an oversight: dropping it reintroduced
+dropped frames on this rig's adapter path even where LouisXIV's own
+(unpadded) numbers do not need one. See `docs/known_issues.md` "Z stack
+came up short" and "is our cycle time computed the way LouisXIV computes
+it?" (RESOLVED) for the history, and `docs/louisxiv_cycle_time_semantics.md`
+for the full source read and frame citations.
+
+**Left deliberately unreconciled:** the same source read says the AO-rate
+"rule 1" (`hardware/louisxiv_waveform.py`'s `min_rate_for_exposure`) should
+be fed Cycle time, not Cam exp/Exposure -- a real, live-hardware-facing
+change on this rig's current settings that was flagged rather than applied;
+see that module's `ao_rate_for_line` docstring and the semantics doc's
+"What changed in the port" section.

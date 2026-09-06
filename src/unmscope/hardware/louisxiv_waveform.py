@@ -239,7 +239,21 @@ def dma_ticks(ao_rate_hz: float) -> tuple[int, float]:
 def ao_rate_for_line(line: FastAxisLine, exposure_s: float, cycle_s: float, update_rate: int,
                      z_settle_ms: float = 0.0, skip_images: bool = False) -> RateInfo:
     """``Compute AO rate from Cycle Time``: the larger of the two rules,
-    checked against the max AO rate, rounded to the FPGA tick."""
+    checked against the max AO rate, rounded to the FPGA tick.
+
+    NOT YET RECONCILED (docs/louisxiv_cycle_time_semantics.md, Q1
+    -- established by two independent readers, but NOT bench-checked): a
+    source read says ``HHMI - Min AO rate needed`` leaves the timing
+    cluster's 'Exposure (sec)' input unwired and feeds 'Cycle (sec)' into
+    '# that Ramp needs' instead, i.e. rule 1 should read ``cycle_s`` here,
+    not ``exposure_s``. Left AS IS deliberately: on this rig (cam exp 0.1 s,
+    cycle 0.127 s, both already live and driving the real galvo), switching
+    the two changes actual AO-rate math on the next real acquisition, and
+    given ``on_points <= min_points`` always, it would make rule 1
+    mathematically unable to ever bind against rule 2's Option A/B (always
+    dominated) -- a big enough consequence to want a bench check first, not
+    a silent swap alongside the Cam-exp/Cycle-time widget fix. Flagged for
+    the user; do not change without their sign-off."""
     r_exp = min_rate_for_exposure(line.on_points, exposure_s)
     r_fly, option, extra_counts, extra_imgs = min_rate_for_flyback(
         line.min_points, line.return_points, cycle_s, z_settle_ms, skip_images)

@@ -4,14 +4,48 @@ Source read of 2026-09-06, from the LabVIEW VIs and SPIM MAIN's 392 hidden
 event/state frames. Written up because it **contradicts what the Python port
 currently does**, and the contradiction should not be lost.
 
-> **STATUS: UNVERIFIED.** The adversarial verify pass (two independent
-> checks per claim -- one refuting, one re-deriving) never ran: it died on a
-> model usage limit after the readers and synthesizer finished. So these are
-> **single-path readings with frame citations, not confirmed facts**. Every
-> claim below is falsifiable by opening the cited frame. Do NOT change the
-> widgets on this alone -- re-run the verify pass first. The house rule is
-> that LouisXIV's source is the authority, and an unverified reading of it
-> is not yet a reading of it.
+> **STATUS: RECONCILED AND APPLIED, 2026-09-06 (later the same day).** The
+> adversarial verify pass (two independent checks per claim) never ran --
+> it died on a model usage limit -- so the claims below are still
+> single-path readings with frame citations, not adversarially confirmed.
+> But the one open tension that was blocking action (below) is now closed
+> by a direct answer from the user, not by re-verifying: **Custom Cycle
+> Time IS ticked** on this rig. That resolves every numeric contradiction
+> in the table below without needing to re-derive anything, so the widget
+> and formula changes were applied on the strength of Q1-Q6's citation
+> quality (specific pixel crops, independent-reader agreement, a
+> conflicts-resolved section) rather than a fresh adversarial pass. One
+> adjacent finding was deliberately NOT applied -- see "Explicitly not
+> established" and known_issues.md's RESOLVED section for what and why.
+
+## What changed in the port (2026-09-06)
+
+Applied: `config/waveform_config.py` (`camera_cycle_s()`, `engine_times()`),
+`hardware/camera.py` (`Camera.cycle_time_s()`), `gui/waveform_config_panel.py`
+(`set_engine_times()` replaces the old `set_indicators(cam_exp_s=...,
+cycle_time_s=...)`; no more auto-tick on typing Cycle time; Cam exp no
+longer drives the Scan Setup exposure), `gui/main_window.py`
+(`_push_engine_times()`, called at connect / exposure change / ROI change /
+Acquire set-up). The port's OWN bench-measured safety margin
+(`Camera.trigger_period_ms()`, spikes/19) stays as a separate, later floor,
+logged distinctly when it is the one that bites -- it protects against a
+real, different failure (retriggering during the camera's own readout
+through this driver path) that LouisXIV's formula does not know about and
+that persisted on this hardware even with LouisXIV's own (unpadded) numbers.
+
+**Deliberately NOT applied:** Q1's finding that `HHMI - Min AO rate needed`
+reads Cycle time, not Cam exp/Exposure, which per this same read means
+`ao_rate_for_line`'s rule 1 (`min_rate_for_exposure`) should be fed
+``cycle_s`` instead of ``exposure_s``. Left as-is in
+`hardware/louisxiv_waveform.py` (flagged in its docstring) because, unlike
+the widget-semantics fix, it changes real AO-rate math on THIS rig's live
+settings today (cam exp 0.1 s, cycle 0.127 s -- currently different
+numbers) and, because ``on_points <= min_points`` always, the swap would
+make rule 1 mathematically unable to ever bind against rule 2 again. That
+is exactly the kind of galvo-timing change this project's own rule says
+should be bench-verified before it drives real hardware, not shipped
+alongside a widget fix. Needs the user's sign-off, ideally with a bench
+comparison.
 
 ## Why this matters: three ways the port disagrees
 
@@ -22,13 +56,15 @@ currently does**, and the contradiction should not be lost.
 | **Cycle time, computed** | `exposure x 1.27` | `max(exposure, camera_cycle - 500 ns)` -- the camera's own frame period, no flyback fraction anywhere |
 
 The 1.27 came from the user's own working value (0.1 -> 0.127) and it does
-fix the dropped frames, measured on the Orca. But if this read is right, it
-is not how LouisXIV arrives at a cycle time, and the 27% is a property of
-this rig's galvo rather than a constant in the source. Worth reconciling:
-`camera_cycle` for a 100 ms full-frame SYNCREADOUT exposure is ~100 ms, so
-LouisXIV's floor would give ~100 ms, NOT 127 -- yet 0.127 is what the user
-runs and 0.100 is what halved the count on a sub-array. That tension is
-unresolved and is the first thing the verify pass should attack.
+fix the dropped frames, measured on the Orca. But this read is right, and it
+is not how LouisXIV arrives at a cycle time: the 27% was a property of this
+rig's galvo (and the user's own typed number), not a constant in the source.
+`camera_cycle` for a 100 ms full-frame SYNCREADOUT exposure IS ~100 ms, so
+LouisXIV's Custom-OFF floor gives ~100 ms, not 127 -- the same period that
+had just been shown to halve the sub-array count. **RESOLVED**: Custom Cycle
+Time is ticked on this rig (confirmed by the user, 2026-09-06), so LouisXIV's
+Custom-OFF floor never actually ran here -- the user's own typed 0.127 s has
+floored it since day one. See "What changed in the port" above.
 
 ## Claims, as read (question / status / evidence)
 

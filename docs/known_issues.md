@@ -295,9 +295,11 @@ Cycle time left at 0.2 against a 0.1 exposure, not a structural factor.)
 
 **Fix.** The period is now the cycle time, with Cycle time editable on the
 Low-Level Waveform Config page behind LouisXIV's Custom Cycle Time tick.
-Untitcked it computes as exposure x (1 + `DEFAULT_FLYBACK_FRACTION`), 0.27.
-The camera's own minimum is kept as a floor, logged when it bites, so a
-too-short typed value cannot re-trigger the camera inside its readout.
+Untitcked, it is now LouisXIV's own camera-cycle formula (see the section
+below -- this was revised again on 2026-09-06, later the same day, once the
+open question below was resolved). The camera's own bench-measured minimum
+is kept as a SEPARATE floor, logged when it bites, so a too-short typed
+value cannot re-trigger the camera inside its readout.
 
 **History.** The same failure once came from a hard-coded 9.7 ms readout,
 which dropped every second trigger (see the comment that used to sit above
@@ -355,16 +357,32 @@ during a full-frame stack (Calc, a native file dialog) can overflow MMCore's
 circular buffer (~31 frames at full frame) and lose frames silently. Not
 addressed yet.
 
-## Open: is our cycle time computed the way LouisXIV computes it?
+## RESOLVED (2026-09-06, later the same day): is our cycle time computed the way LouisXIV computes it?
 
-The fix above (period = cycle time; default exposure x 1.27) is verified on
-the hardware -- it cures the halved sub-array count. Whether it is LouisXIV's
-*rule* is a separate question, and a source read on 2026-09-06 suggests it is
-not: LouisXIV appears to use `max(exposure, camera_cycle - 500 ns)` from the
-camera's own frame period, with no flyback fraction anywhere, and to write
-Cam exp FROM the camera rather than the other way round.
+The fix above (period = cycle time) is verified on the hardware -- it cures
+the halved sub-array count. Whether the *default* (Custom Cycle Time off)
+matched LouisXIV's own rule was a separate, open question: a source read
+said LouisXIV uses `max(exposure, camera_cycle - 500 ns)` from the camera's
+own frame period, no flyback fraction anywhere, and writes Cam exp FROM the
+camera rather than the other way round -- flatly contradicting the port's
+`exposure x 1.27` default and its Cam-exp-sets-the-camera wiring. The read
+carried an open tension it could not explain: its own formula, evaluated at
+this rig's numbers, reduces to ~the exposure itself (100 ms) -- exactly the
+period that had just been shown to halve the sub-array frame count.
 
-That read is **unverified** -- its adversarial pass died on a usage limit --
-so nothing was changed on it. It is written up in full, with frame citations
-and the tension it does not yet explain, in `docs/louisxiv_cycle_time_semantics.md`.
-Re-run the verify pass before touching the widgets.
+**Resolved by asking the user directly**, rather than by re-running the
+adversarial verify pass (which had died on a usage limit): Custom Cycle Time
+**is ticked** on this rig, with 0.127 s typed by hand. That single fact
+dissolves the tension -- LouisXIV's Custom-OFF formula never actually runs
+here; the user's own typed value has floored it since day one. Applied:
+`config/waveform_config.py` (`camera_cycle_s`, `engine_times` -- LouisXIV's
+formula, Q1-Q6 in the doc below are "established" with frame citations),
+`hardware/camera.py` (`Camera.cycle_time_s()` -- the camera-cycle floor with
+NO margin, kept separate from the bench-measured `trigger_period_ms()`
+floor, which stays), `gui/waveform_config_panel.py` (Cam exp no longer
+drives the Scan Setup exposure; typing Cycle time no longer auto-ticks
+Custom -- LouisXIV has neither coupling). Full detail, including the one
+finding that was DEFERRED (a source read says the AO-rate "rule 1" should
+read Cycle time rather than Cam exp, which would change real galvo timing
+on this rig's live settings -- left as-is pending a bench check), in
+`docs/louisxiv_cycle_time_semantics.md`.

@@ -32,11 +32,55 @@ X_WAVE = ("Sawtooth", "Triangle")                  # [18] Cam settings sets Sawt
 Z_WAVE = ("Step", "Sweep")                         # Read Waveform cluster: Z wave == Sweep -> Sweep Z?
 AOTF_CYCLE = ("per Z", "per Stack", "None")        # HHMI - SPIM AOTF cycle enum
 
-#: Flyback allowance used when Cycle time is not set by hand: the fraction of
-#: the exposure the X galvo needs to get home before the next cycle. 0.27 is
-#: the user's own working value on this rig (100 ms exposure -> 127 ms cycle),
-#: within the 10-30% they measured empirically.
-DEFAULT_FLYBACK_FRACTION = 0.27
+#: ``HHMI - Camera times to waveform times.vi``: the gap LouisXIV leaves
+#: between the end of the AO waveform and the next camera trigger
+#: ("otherwise X galvo waveform and/or the AOTF waveform will miss the
+#: trigger.") -- docs/louisxiv_cycle_time_semantics.md, Q2.
+CYCLE_GAP_S = 500e-9
+#: Orca4.0 - Calculate SyncReadout/EdgeTrigger Exposure Time.vi: one sensor
+#: line time (1H). ReadoutTime covers height/2 lines (two ports, centre-out).
+ORCA_LINE_TIME_1H_S = 9.74436e-6
+SYNCREADOUT_EXTRA_LINES = 18   # DCAM - Read cycle times -> Orca4.0 Calc SyncRdt Exp
+EDGE_EXTRA_LINES = 10          # DCAM - Read cycle times -> Orca4.0 Calc EdgeTrig ExpTime
+MAX_CAMERA_CYCLE_S = 10.0      # the SyncReadout VI's own upper bound on the camera cycle
+
+
+def camera_cycle_s(exposure_s: float, vsize: int, sync_readout: bool,
+                    line_time_s: float = ORCA_LINE_TIME_1H_S) -> float:
+    """``DCAM - Read cycle times.vi`` (external trigger, Normal Scan): the
+    camera's own frame period for the programmed exposure and ROI height.
+    No margin -- LouisXIV has none here. The port's own hardware-measured
+    safety margin is a separate, later floor: hardware/camera.py
+    ``Camera.trigger_period_ms()`` (docs/known_issues.md; spikes/19) --
+    that one stays; it protects against a different, real failure mode
+    (retriggering during the camera's own readout) that this formula does
+    not know about.
+    """
+    half = int(vsize) // 2
+    if sync_readout:
+        return min(MAX_CAMERA_CYCLE_S, max(exposure_s, (half + SYNCREADOUT_EXTRA_LINES) * line_time_s))
+    return exposure_s + (half + EDGE_EXTRA_LINES) * line_time_s
+
+
+def engine_times(exposure_s: float, camera_cycle: float, typed_cycle_s: float,
+                  custom_cycle_time: bool) -> tuple[float, float]:
+    """``HHMI - Camera times to waveform times.vi`` (the "Normal Scan","Split
+    View" case, which always runs on this rig -- the selector is an enum
+    CONSTANT, the Light Sheet branch is dead code), as called by SPIM MAIN's
+    "Set Camera" state: returns (Cam exp (s), Cycle time (s)).
+
+    Custom Cycle Time OFF: Cycle time tracks the camera exactly, floor =
+    ``max(exposure, camera_cycle - CYCLE_GAP_S)``. ON: the typed value wins
+    as long as it is at or above that floor; a typed value below the floor
+    is raised to it, never lowered further. No 1.27 factor, no AO-point
+    rounding, no maximum, in either mode
+    (docs/louisxiv_cycle_time_semantics.md, Q2 -- established).
+    """
+    floor = max(exposure_s, camera_cycle - CYCLE_GAP_S)
+    cycle = max(floor, typed_cycle_s) if custom_cycle_time else floor
+    return exposure_s, cycle
+
+
 ONE_EXP_PER = ("Z plane",)
 WAIT_FOR_Z_SETTLE = ("No settle",)                 # cases seen: "No settle.", "Skip imgs", "Z settle?"
 DUAL_VIEW = ("No D.V.",)
@@ -68,20 +112,35 @@ class WaveformConfig:
     sweep_period_um: float = 0.0
     duty_pct: float = 0.05
     n_integrations: int = 1
-    cam_exp_s: float = 2.0                  # indicator: the camera exposure
-    #: The trigger-to-trigger period. This is the number that actually times
-    #: the acquisition, NOT the exposure: the X galvo has to fly back to its
-    #: resting position before the next cycle can start, and that mechanical
-    #: return takes real time. On this rig, MEASURED by the user in LouisXIV,
-    #: 27 ms on a 100 ms exposure works; 10-30% is the usual band.
-    #: Read-only unless ``custom_cycle_time``, exactly as LouisXIV has it.
+    #: Control element of the cluster -- typeable, never an indicator, in
+    #: LouisXIV -- but the engine overwrites it with the camera's own Exp(s)
+    #: every time it runs "Set Camera" (camera connect, any Camera-tab
+    #: change, ROI, Configure Stack, Acquire set-up): a typed value never
+    #: reaches the camera and survives only until the next Set Camera. Used
+    #: only for the PSF-mode AO clock (1 exp per = "Point") and the X Wvfrm
+    #: cursor; it does NOT enter the AO rate for the "Z plane" mode this rig
+    #: uses (docs/louisxiv_cycle_time_semantics.md, Q1 -- established).
+    cam_exp_s: float = 2.0
+    #: Control element (typeable in both Custom modes). Overwritten by
+    #: ``engine_times()`` every "Set Camera": tracks the camera exactly when
+    #: Custom Cycle Time is off, or is floored by it when on. The FPGA
+    #: trigger period is max(this, the camera's own cycle) -- see
+    #: ``camera_cycle_s()`` above and docs/louisxiv_cycle_time_semantics.md.
+    #: On THIS rig the user runs Custom Cycle Time ON with 0.127 s typed (27
+    #: ms of X-galvo flyback over a 100 ms exposure -- MEASURED by the user
+    #: in LouisXIV, not derived from any formula here or there).
     cycle_time_s: float = 0.0
     z_motion: str = "Z galvo & piezo"
     n_doe_beams: int = 1
     x_wave: str = "Sawtooth"
     z_bidirectional: bool = False
     virtual_confocal: bool = False          # LED
-    #: Tick to type your own Cycle time instead of taking the computed one.
+    #: Tested in exactly one place in the whole LouisXIV source (Camera times
+    #: to waveform times): keeps a typed Cycle time that is >= the
+    #: camera-derived floor. Typing Cycle time does NOT tick this for you --
+    #: LouisXIV has no such coupling (Q3 -- established) -- and it does not
+    #: gate whether the field is typeable, only whether a typed value
+    #: survives the next "Set Camera".
     custom_cycle_time: bool = False
     z_piezo_selector: int = 1
     linked: bool = True

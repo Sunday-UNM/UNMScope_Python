@@ -524,7 +524,10 @@ invent them. Foundation landed first: a Z-stack is now retained in memory
    + `config/waveform_config.py` (the cluster 1:1, LouisXIV defaults, persisted in
    `~/.unmscope/waveform_config.json`), under Utilities. Live: Fractional Flyback,
    Dither Triangle Pulses, Dither Fract. Flyback (in step with the Scan Setup
-   Dither box); indicators: Pixel/ms, Cam exp, Cycle time, the axes. The rest is
+   Dither box); indicators: Pixel/ms, the axes. (Cam exp / Cycle time were
+   indicators too until 2026-09-06, when they became LouisXIV-faithful
+   engine-written control elements -- see item below and
+   `docs/louisxiv_cycle_time_semantics.md`.) The rest is
    greyed. **"Calculate Waveforms" PORTED 2026-09-05** (`hardware/louisxiv_waveform.py`,
    VI-for-VI from the hidden-frames export of `DAQ/Waveform/*`): cubic-accel /
    linear / cubic-decel fast-axis line + flyback, AO rate computed from exposure

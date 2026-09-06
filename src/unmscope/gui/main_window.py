@@ -84,7 +84,7 @@ from unmscope.gui.hw_config_dialog import show_hw_config_dialog
 from unmscope.gui.sample_stage_dialog import SampleStageDialog
 from unmscope.config.um_per_volt import load_calibration_from_unmscope_ini
 from unmscope.config.waveform_config import (
-    DEFAULT_FLYBACK_FRACTION, AxisSettings, WaveformConfig,
+    AxisSettings, WaveformConfig, engine_times,
 )
 from unmscope.fileio.tiff_stack import read_tiff_stack
 from unmscope.gui.widgets import bring_to_front
@@ -375,10 +375,11 @@ class MainWindow(QMainWindow):
                                           reset_hw=self.on_reset_hw_clicked,
                                           waveform_config=self.waveform_config)
         self.utilities_tab.waveform_panel.changed.connect(self._on_waveform_config_changed)
-        # Cam exp typed on the Low-Level Waveform Config page (seconds) is the
-        # camera exposure, as in LouisXIV; the Scan Setup spin is in ms.
-        self.utilities_tab.waveform_panel.exposure_edited.connect(
-            lambda seconds: self.exposure_spin.setValue(seconds * 1000.0))
+        # LouisXIV: Cam exp (s) never drives the camera -- the camera drives
+        # it (see _push_engine_times). ROI sends "Set Camera" too ([73] ROI),
+        # and the camera's own cycle depends on ROI height (camera_cycle_s's
+        # vsize), so a sub-array change refreshes Cam exp / Cycle time here.
+        self.camera_tab.roi_changed.connect(lambda _roi: self._push_engine_times())
         # The Scan Setup Dither box's sweeps / flyback ARE the cluster's Dither
         # Triangle Pulses / Dither Fract. Flyback: keep the two views in step.
         self.dg_sweeps.valueChanged.connect(self.utilities_tab.waveform_panel.dither_triangle_pulses.setValue)
@@ -1551,6 +1552,7 @@ class MainWindow(QMainWindow):
         finally:
             self.exposure_spin.blockSignals(False)
         self.camera_tab.refresh_from_camera()
+        self._push_engine_times()          # LouisXIV's connect-time "Set Camera"
 
     def on_disconnect_clicked(self):
         if not self._begin_blocking("Camera disconnect"):
@@ -1585,11 +1587,31 @@ class MainWindow(QMainWindow):
         self.status_label.setText("Not connected")
         self.status_label.setStyleSheet("font-weight: bold;")
 
+    def _push_engine_times(self) -> tuple[float, float]:
+        """LouisXIV's engine "Set Camera" -> Camera Recalc Wvfrm? -> Camera
+        times to waveform times: rewrite Cam exp (s) and Cycle time (s) on
+        the Low-Level Waveform Config page from the camera
+        (docs/louisxiv_cycle_time_semantics.md). Call wherever LouisXIV
+        sends "Set Camera": camera connect, every Camera-tab change (here:
+        exposure and ROI -- see __init__'s roi_changed connection), and the
+        Acquire set-up. Returns the (Cam exp (s), Cycle time (s)) it wrote.
+        """
+        panel = self.utilities_tab.waveform_panel
+        cfg = panel.config()
+        exposure_ms = float(self.exposure_spin.value())
+        cam = self.camera
+        cam_cycle = (cam.cycle_time_s(exposure_ms) if cam is not None and cam.is_connected
+                     else exposure_ms / 1000.0)
+        cam_exp_s, cycle_s = engine_times(exposure_ms / 1000.0, cam_cycle,
+                                          cfg.cycle_time_s, cfg.custom_cycle_time)
+        panel.set_engine_times(cam_exp_s, cycle_s)
+        return cam_exp_s, cycle_s
+
     def on_exposure_changed(self, value: float):
-        # Cam exp on the Low-Level Waveform Config page is the same number in
-        # seconds, so it follows the spin whether or not a camera is connected
-        # (the panel takes it under its own guard, so this cannot loop).
-        self.utilities_tab.waveform_panel.set_indicators(cam_exp_s=value / 1000.0)
+        # Cam exp / Cycle time on the Low-Level Waveform Config page follow
+        # the Scan Setup exposure regardless of camera or run state, as
+        # LouisXIV's own "Set Camera" does.
+        self._push_engine_times()
         if self._blocking_op is not None:
             return  # a pumped spin-box event during a blocking driver call
         if self.acquiring:
@@ -1964,38 +1986,49 @@ class MainWindow(QMainWindow):
 
         self.camera_poll_timer.start(30)
 
-        # Trigger period = the CYCLE TIME, which is the exposure plus the
-        # flyback -- the mechanical time the X galvo needs to get back to its
-        # resting position before the next cycle can start. It is NOT the
-        # exposure, and it is not derived from the camera.
+        # Trigger period = the CYCLE TIME, which the X galvo needs to fly
+        # back to its resting position before the next cycle can start. It
+        # is NOT the exposure, and (Custom Cycle Time off) it is LouisXIV's
+        # OWN camera-cycle formula -- docs/louisxiv_cycle_time_semantics.md,
+        # reconciled against the bench 2026-09-06: the user confirmed Custom
+        # Cycle Time IS ticked on this rig, with 0.127 s typed (27 ms of
+        # flyback over a 100 ms exposure; MEASURED, not derived from any
+        # formula). engine_times()/_push_engine_times() apply exactly
+        # LouisXIV's rule in both Custom modes; see config/waveform_config.py.
         #
-        # MEASURED in LouisXIV by the user (2026-09-06): Cam exp 0.1 s with
-        # Cycle time 0.127 s, i.e. 27 ms of flyback on a 100 ms exposure;
-        # 10-30% is the band that works on this rig. LouisXIV makes Cycle
-        # time an editable field gated by a "Custom Cycle Time" tick, and we
-        # now do the same.
+        # We had previously used only the camera's own minimum as the
+        # period. In SYNCREADOUT that is max(exposure, readout + margin) =
+        # the exposure itself for any realistic exposure, so the galvo got
+        # ZERO flyback time and triggers landing during readout were
+        # silently ignored -- fewer images than Slices. (The same class of
+        # bug once came from a hard-coded 9.7 ms readout, which dropped
+        # every second trigger.)
         #
-        # We had been using the camera's own minimum as the period. In
-        # SYNCREADOUT that is max(exposure, readout + margin) = the exposure
-        # itself for any realistic exposure, so the galvo got ZERO flyback
-        # time and triggers landing during readout were silently ignored --
-        # fewer images than Slices. (The same class of bug once came from a
-        # hard-coded 9.7 ms readout, which dropped every second trigger.)
-        #
-        # The camera's minimum is still enforced as a floor, so a too-short
-        # custom Cycle time cannot re-trigger the camera inside its readout.
+        # PORT-ONLY DEVIATION from LouisXIV, kept deliberately: our own
+        # bench-measured safety margin (Camera.trigger_period_ms(),
+        # spikes/19, docs/known_issues.md) is still enforced as a separate,
+        # final floor below. LouisXIV's own formula has no such margin --
+        # it protects against a different failure (retriggering the camera
+        # during ITS OWN readout through this driver path), not the galvo
+        # flyback question, and dropping it reintroduced dropped frames on
+        # this rig's adapter even though it does not in LouisXIV's own
+        # native DCAM path.
         exposure_ms = self.exposure_spin.value()
-        wcfg_period = self.utilities_tab.waveform_panel.config()
-        if wcfg_period.custom_cycle_time and wcfg_period.cycle_time_s > 0:
-            cycle_ms = wcfg_period.cycle_time_s * 1000.0
-        else:
-            cycle_ms = exposure_ms * (1.0 + DEFAULT_FLYBACK_FRACTION)
-        camera_floor_ms = self.camera.trigger_period_ms(exposure_ms)
-        period_ms = max(cycle_ms, camera_floor_ms)
-        if period_ms > cycle_ms + 1e-9:
-            self._log(f"Cycle time {cycle_ms:.3f} ms is below the camera's minimum "
-                      f"{camera_floor_ms:.3f} ms; using the minimum.")
-        period_s = period_ms / 1000.0
+        typed = self.utilities_tab.waveform_panel.config()
+        cam_exp_s, cycle_s = self._push_engine_times()
+        if typed.custom_cycle_time and cycle_s > typed.cycle_time_s + 1e-9:
+            self._log(f"Custom Cycle time {typed.cycle_time_s * 1e3:.3f} ms is below the camera's "
+                      f"own cycle; LouisXIV raises it to {cycle_s * 1e3:.3f} ms.")
+        # HHMI - Generate trigger settings for FPGA: Cycle (ticks) =
+        # max(Waveform.Cycle time (s), camera Cycle(s)) -- established, Q6.
+        period_s = max(cycle_s, self.camera.cycle_time_s(exposure_ms))
+        floor_s = self.camera.trigger_period_ms(exposure_ms) / 1000.0
+        if floor_s > period_s + 1e-9:
+            self._log(f"Trigger period raised from {period_s * 1e3:.3f} to {floor_s * 1e3:.3f} ms "
+                      "(port safety margin over the camera's own readout -- LouisXIV has no such "
+                      "margin; docs/known_issues.md).")
+            period_s = floor_s
+        period_ms = period_s * 1000.0
         sync = self.camera.trigger_active == self.camera.TRIGGER_SYNCREADOUT
         # free_run_timing() only needs exposure <= period; in SYNCREADOUT the
         # interval itself is the exposure.
@@ -2080,10 +2113,11 @@ class MainWindow(QMainWindow):
                   f"flyback rule {lx.rate.rate_for_flyback_hz:.0f} pts/s, option {lx.rate.option}); "
                   f"Pix/ms {lx.rate.pixel_per_ms:.3f}; S-curve {lx.s_curve_points} pts."
                   + ("".join(" NOTE: " + n for n in lx.notes)))
-        # Indicators on the cluster panel: Cam exp, Cycle time, Pixel/ms (Compute
-        # AO rate from Cycle Time.vi) and the axes as Scan Setup has them.
+        # Indicators on the cluster panel: Pixel/ms (Compute AO rate from
+        # Cycle Time.vi) and the axes as Scan Setup has them. Cam exp / Cycle
+        # time were already set from the engine by _push_engine_times() above.
         self.utilities_tab.waveform_panel.set_indicators(
-            cam_exp_s=exposure_s, cycle_time_s=period_s, pixel_per_ms=lx.rate.pixel_per_ms,
+            pixel_per_ms=lx.rate.pixel_per_ms,
             axes={"x": AxisSettings(0, self.xg_offset.value(), self.xg_interval.value(), self.xg_pixels.value()),
                   "xwvfrm": AxisSettings(0, self.xg_offset.value(), self.xg_interval.value(), self.xg_pixels.value()),
                   "z": AxisSettings(0, self.zg_start.value(), self.zg_interval.value(), n_slices),

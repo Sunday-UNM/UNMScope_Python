@@ -317,6 +317,14 @@ def test_trigger_period_is_the_cycle_time_not_the_exposure(app, window):
     Our SYNCREADOUT period had been max(exposure, readout + margin), i.e. the
     exposure itself, so the galvo got zero flyback time and triggers landing
     in readout were silently dropped: fewer images than Slices.
+
+    Reconciled 2026-09-06 against docs/louisxiv_cycle_time_semantics.md: the
+    user confirmed Custom Cycle Time IS ticked on this rig, so 0.127 s is a
+    value they typed, not one LouisXIV computed -- the default (Custom off)
+    is now LouisXIV's own camera-cycle formula (engine_times() /
+    Camera.cycle_time_s()), with the port's own hardware-margin floor
+    (Camera.trigger_period_ms()) still enforced separately, since it
+    protects against a different, real failure mode.
     """
     w = window
     panel = w.utilities_tab.waveform_panel
@@ -332,9 +340,14 @@ def test_trigger_period_is_the_cycle_time_not_the_exposure(app, window):
         pump(app, 0.3)
         return w._trigger_period_s * 1000.0
 
-    # default: exposure plus the rig's measured 27% flyback, NOT the exposure
+    # default (Custom Cycle Time off): LouisXIV's own camera-cycle formula,
+    # NOT a 27% flyback padding -- at a 100 ms full-frame SYNCREADOUT
+    # exposure the camera's own readout term is negligible next to it, so
+    # this lands on the exposure itself (docs/louisxiv_cycle_time_semantics.md).
+    # The 127 ms the rig actually runs at is now something the user sets
+    # explicitly via Custom Cycle Time, exactly as in LouisXIV.
     panel.custom_cycle_time.setChecked(False)
-    assert run() == pytest.approx(127.0, abs=0.5)
+    assert run() == pytest.approx(100.0, abs=0.5)
     assert w.frame_count == w.z_target_frames == 5
 
     # the user's own LouisXIV value, typed
@@ -346,12 +359,28 @@ def test_trigger_period_is_the_cycle_time_not_the_exposure(app, window):
     panel.cycle_time_s.setValue(0.200)
     assert run() == pytest.approx(200.0, abs=0.5)
 
-    # a cycle time under the camera's own minimum is raised to it, with a log line
+    # a cycle time under LouisXIV's own camera-cycle floor is raised to it
+    # (engine_times' own flooring, Q2), with a log line naming the floor
     panel.cycle_time_s.setValue(0.050)
     w.logs.clear()
     period = run()
     assert period >= w.camera.trigger_period_ms(100.0) - 1e-6
-    assert any("below the camera's minimum" in m for m in w.logs)
+    assert any("LouisXIV raises it to" in m for m in w.logs)
+
+    # a MUCH shorter exposure where the camera's own readout floor exceeds
+    # even LouisXIV's camera-cycle rule: the port's bench-measured safety
+    # margin (Camera.trigger_period_ms, spikes/19) is what raises it here,
+    # not engine_times() -- a separate, distinctly-labelled log line, since
+    # LouisXIV itself has no such margin.
+    w.exposure_spin.setValue(5.0)
+    panel.cycle_time_s.setValue(0.001)
+    w.logs.clear()
+    period = run()
+    assert period == pytest.approx(10.376, abs=0.01)
+    assert period == pytest.approx(w.camera.trigger_period_ms(5.0), abs=1e-6)
+    assert any("port safety margin" in m for m in w.logs)
+
+    w.exposure_spin.setValue(100.0)
     panel.custom_cycle_time.setChecked(False)
 
 

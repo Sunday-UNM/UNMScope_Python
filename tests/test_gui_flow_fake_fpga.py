@@ -275,3 +275,35 @@ def test_save_files_off_saves_nothing_and_save_image_writes_the_last_frame(app, 
     import tifffile
     with tifffile.TiffFile(str(out)) as tf:
         assert len(tf.pages) == 1 and tf.pages[0].dtype.name == "uint16"
+
+
+def test_save_stack_honours_the_base_name_timepoint_and_position(app, window, tmp_path):
+    """Build Image Path.vi's three indices, end to end through _save_stack.
+
+    Nothing drives timepoint or position past 0 yet (Timepoints and
+    Multi-location are greyed by the user's decision), so this is what proves
+    the plumbing is real rather than decorative.
+    """
+    import numpy as np
+    w = window
+    w._data_dir = tmp_path                       # bypass the save dialog
+    w._save_base = "beads"                       # what the dialog would have set
+    stack = np.zeros((3, 8, 8), np.uint16)
+
+    p1 = w._save_stack(stack)
+    assert p1 is not None and p1.name == "beads_CH00_000000.tif"
+
+    p2 = w._save_stack(stack, timepoint=42)
+    assert p2.name == "beads_CH00_000042.tif"
+
+    # no position folder while the LouisXIV global is off
+    p3 = w._save_stack(stack, position=0)
+    assert p3.parent.name.startswith("Cell"), p3
+
+    w.separate_position_folders = True
+    p4 = w._save_stack(stack, timepoint=1, position=0)
+    assert p4.parent.name == "position 1"        # 1-based, as Build Image Path is
+    assert p4.name == "beads_CH00_000001.tif"
+
+    p5 = w._save_stack(stack, position=3)
+    assert p5.parent.name == "position 4"

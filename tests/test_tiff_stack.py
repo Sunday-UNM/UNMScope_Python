@@ -3,8 +3,8 @@ import numpy as np
 import tifffile
 
 from unmscope.fileio.tiff_stack import (
-    COMPANION_FILENAME, read_tiff_stack, save_tiff_stack, stack_filename, stack_path, to_u16,
-    write_acq_info,
+    COMPANION_FILENAME, clean_base_filename, position_folder_name, read_tiff_stack,
+    save_tiff_stack, stack_filename, stack_path, to_u16, write_acq_info,
 )
 
 
@@ -15,9 +15,19 @@ def test_filename_follows_build_image_path():
 
 def test_position_folder_only_when_separate_folders_is_on(tmp_path):
     p = stack_path(tmp_path, "exp", 0, 0, position=2, separate_position_folders=True)
-    assert p.parent.name == "position 2" and p.name == "exp_CH00_000000.tif"
+    assert p.parent.name == "position 3" and p.name == "exp_CH00_000000.tif"
     q = stack_path(tmp_path, "exp", 0, 0, position=2, separate_position_folders=False)
     assert q.parent == tmp_path
+
+
+def test_the_position_folder_is_one_based():
+    """`Build Image Path.vi` increments Position Index before "position %d".
+
+    So index 0 is the folder "position 1". We had been writing the raw index,
+    one folder number low the whole way.
+    """
+    assert position_folder_name(0) == "position 1"
+    assert position_folder_name(9) == "position 10"
 
 
 def test_saved_stack_is_u16_uncompressed_multipage_with_ome_on_first_page(tmp_path):
@@ -72,8 +82,9 @@ def test_companion_acq_info_is_louisxivs_format(tmp_path):
     assert "Multi-positionAcq = FALSE" in lines          # LabVIEW's spelling
     # skip?: the four position fields are omitted unless multi-position
     assert not any(l.startswith(("PositionX_mm", "StageAngle_deg")) for l in lines)
-    # and the order is the enum's, which is not the cluster's
-    assert lines.index("Channels = 1") < lines.index("TimeIncrement_s = 0.133300")         if "Channels = 1" in lines else True
+    # the order is the enum's, not the cluster's: Timepoints comes before
+    # TimeIncrement_s here, where the cluster has TimeIncrement_s much earlier
+    assert lines.index("Timepoints = 1") < lines.index("TimeIncrement_s = 0.133300")
 
 
 def test_position_fields_appear_only_for_a_multi_position_acquisition(tmp_path):
@@ -102,3 +113,18 @@ def test_our_extras_go_in_their_own_block_below_louisxivs_fields(tmp_path):
 def test_no_extras_means_no_block(tmp_path):
     out = write_acq_info(tmp_path, {"SizeX_px": 2048})
     assert "[UNMScope]" not in out.read_text(encoding="utf-8")
+
+
+def test_base_filename_is_cleaned_from_whatever_the_save_dialog_returns():
+    """LouisXIV asks for a FILE; Build Image Path appends to the name typed."""
+    assert clean_base_filename("H:/Data/beads.tif") == "beads"
+    assert clean_base_filename("H:/Data/beads_200nm.tiff") == "beads_200nm"
+    assert clean_base_filename("beads") == "beads"
+    # re-picking a previously written stack should give the base back, not
+    # "beads_CH00_000000", which would then gain a second suffix
+    assert clean_base_filename("beads_CH00_000000.tif") == "beads"
+    # never produce an empty or unusable name
+    assert clean_base_filename("") == "img"
+    assert clean_base_filename("   ") == "img"
+    assert clean_base_filename('bad:name?.tif') == "badname"
+    assert clean_base_filename(".tif", fallback="cells") == "cells"

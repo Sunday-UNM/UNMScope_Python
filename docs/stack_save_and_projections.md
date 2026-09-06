@@ -35,8 +35,33 @@ projection as `..._<XY|YZ|XZ>MIP.tif`; the Images tab's "Save Image" prompts
 for a path and writes the newest frame. The user manual: "Save File Type:
 TIFF (default) ... Save OME-XML: only valid when File Type = TIFF."
 
-Not yet matched: the `Base file` name (fixed to `img`; LouisXIV takes it from
-the dialog), multi-timepoint numbering, and multi-position folders.
+### File naming, done 2026-09-05
+
+All three of the gaps that used to be listed here are closed.
+
+* **Base file name.** LouisXIV's `Prompt for Save Path.vi` asks for a
+  *file*, and `Build Image Path.vi` appends `_CH%02d_%06d.tif` to the name
+  typed. Ours prompted for a folder and hard-coded `img`. It is now a
+  save-file dialog: the folder becomes the data directory, the file name
+  becomes the base for every stack, projection and companion file.
+  `clean_base_filename` strips the extension, strips a `_CH00_000000`
+  suffix if you re-pick a stack we wrote, drops characters Windows forbids,
+  and never returns empty.
+* **Multi-timepoint numbering** and **multi-position folders** are plumbed
+  through `MainWindow._save_stack(stack, timepoint=, position=)` and covered
+  end to end. Nothing drives either past 0 yet -- Timepoints and
+  Multi-location stay greyed by the user's decision -- so wiring those panel
+  controls is the only step left.
+* **`position %d` is 1-based**, and we had it wrong. `Build Image Path.vi`
+  increments the Position Index before formatting, so index 0 is the folder
+  `position 1`; we had been writing the raw index, one folder number low the
+  whole way. Fixed, with `position_folder_name` and a test naming the cause.
+  The switch that gates those folders is
+  `MainWindow.separate_position_folders`, LouisXIV's "Save Multi-position
+  separate folders" global.
+
+Not ported: the VI's `Raw?` input, which inserts a `RAW` element into the
+path for LouisXIV's autosave-raw feature. We do not save raw images.
 
 ## AcqInfo.txt: LouisXIV's format, read and matched 2026-09-05
 

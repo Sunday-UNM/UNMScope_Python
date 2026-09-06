@@ -71,7 +71,9 @@ from unmscope.hardware.waveform import COUNTS_PER_VOLT
 from unmscope.hardware.louisxiv_waveform import build_louisxiv_waveform
 from unmscope.config.calibration import load_calibration
 from unmscope.analysis.projections import DEFAULT_STAGE_ANGLE_DEG, stack_projections
-from unmscope.fileio.tiff_stack import save_tiff_stack, stack_path, write_acq_info
+from unmscope.fileio.tiff_stack import (
+    TIFF_EXTENSION, clean_base_filename, save_tiff_stack, stack_path, write_acq_info,
+)
 from unmscope.gui.scope_view import FpgaScopePanel
 from unmscope.gui.camera_tab import CameraTab
 from unmscope.gui.display import FrameAverager, display_range, render_frame
@@ -242,7 +244,11 @@ class MainWindow(QMainWindow):
         # stack (Find Next Experiment Folder Number.vi, prefix 'Cell').
         self._data_dir: Path | None = None
         self._current_exp_dir: Path | None = None
-        self._save_base = "img"
+        self._save_base = "img"          # replaced by what the save dialog is given
+        #: LouisXIV's "Save Multi-position separate folders" global. Nothing
+        #: sets it yet -- Multi-location is greyed -- but stack_path honours
+        #: it, so wiring the panel switch later is the only step left.
+        self.separate_position_folders = False
         self.acquiring = False
 
         self._build_ui()
@@ -1104,12 +1110,26 @@ class MainWindow(QMainWindow):
         return 0
 
     def _ensure_data_dir(self) -> Path | None:
-        """Prompt once per session for where to save (Prompt for Save Path.vi)."""
+        """Prompt once per session for where to save, and under what name.
+
+        LouisXIV's ``Prompt for Save Path.vi`` asks for a *file*, and
+        ``Build Image Path.vi`` then appends ``_CH%02d_%06d.tif`` to the
+        name typed. So this is a save-file dialog, not a folder picker: the
+        folder becomes the data directory and the file name becomes the base
+        that every stack, projection and companion file is named from.
+        """
         if self._data_dir is None:
-            chosen = QFileDialog.getExistingDirectory(self, "Choose the data folder")
+            start = str(Path.home() / f"{self._save_base}.{TIFF_EXTENSION}")
+            chosen, _ = QFileDialog.getSaveFileName(
+                self, "Choose the data folder and base file name", start,
+                f"TIFF stacks (*.{TIFF_EXTENSION});;All files (*)",
+                options=QFileDialog.DontConfirmOverwrite,   # the name is a base, not a file
+            )
             if not chosen:
                 return None
-            self._data_dir = Path(chosen)
+            self._data_dir = Path(chosen).parent
+            self._save_base = clean_base_filename(chosen, fallback=self._save_base)
+            self._log(f"Saving to {self._data_dir} with base file name '{self._save_base}'.")
         return self._data_dir
 
     @staticmethod
@@ -1211,7 +1231,15 @@ class MainWindow(QMainWindow):
         if self.save_files_chk.isChecked() and complete:
             self._save_stack(stack)
 
-    def _save_stack(self, stack) -> Path | None:
+    def _save_stack(self, stack, timepoint: int = 0, position: int | None = None) -> Path | None:
+        """Write one stack the way LouisXIV lays them out.
+
+        ``timepoint`` and ``position`` are the Build Image Path.vi indices.
+        Both are plumbed through and tested, but nothing drives them past 0
+        yet: Timepoints and Multi-location are still greyed on Scan Setup by
+        the user's decision, so every acquisition today is a single timepoint
+        at a single position.
+        """
         data_dir = self._ensure_data_dir()
         if data_dir is None:
             self._log("Save cancelled: no data folder chosen.")
@@ -1219,7 +1247,8 @@ class MainWindow(QMainWindow):
         exp = self.next_experiment_folder(data_dir)
         cal = self.calibration
         ch = self._selected_channel_index()
-        path = stack_path(exp, self._save_base, ch, 0)
+        path = stack_path(exp, self._save_base, ch, timepoint, position,
+                          self.separate_position_folders)
         try:
             save_tiff_stack(path, stack, ome=True, pixel_size_um=cal.detection.xy_pixel_um,
                             z_step_um=self.z_interval_spin.value(),

@@ -21,6 +21,7 @@ From the LabVIEW source (block diagrams in H:\\UNM_Lightsheet\\VI_Diagrams):
 from __future__ import annotations
 
 import datetime
+import re
 from pathlib import Path
 
 import numpy as np
@@ -31,18 +32,58 @@ COMPANION_FILENAME = "AcqInfo.txt"
 
 
 def stack_filename(base: str, channel: int, timepoint: int, ext: str = TIFF_EXTENSION) -> str:
-    """LouisXIV's ``_CH%02d_%06d`` naming (Build Image Path.vi)."""
+    """LouisXIV's ``<base>_CH%02d_%06d.<ext>`` naming (Build Image Path.vi)."""
     return f"{base}_CH{int(channel):02d}_{int(timepoint):06d}.{ext}"
+
+
+def position_folder_name(position: int) -> str:
+    """``position %d`` -- **1-based**.
+
+    `Build Image Path.vi` increments the Position Index before formatting it,
+    so position index 0 is the folder ``position 1``. We had been writing the
+    index straight through, one folder number low the whole way.
+    """
+    return f"position {int(position) + 1}"
 
 
 def stack_path(folder: str | Path, base: str, channel: int, timepoint: int,
                position: int | None = None, separate_position_folders: bool = False) -> Path:
-    """Full path for a stack; ``position %d`` subfolder only when the
-    multi-position-separate-folders setting is on, as in LouisXIV."""
+    """Full path for a stack.
+
+    The ``position %d`` subfolder appears only when the multi-position
+    separate-folders setting is on, as in LouisXIV, where that folder is
+    gated on the "Save Multi-position separate folders" global.
+
+    Not ported: the VI's ``Raw?`` input, which inserts a ``RAW`` element into
+    the path for LouisXIV's autosave-raw feature. We do not save raw images.
+    """
     folder = Path(folder)
     if position is not None and separate_position_folders:
-        folder = folder / f"position {int(position)}"
+        folder = folder / position_folder_name(position)
     return folder / stack_filename(base, channel, timepoint)
+
+
+#: Characters Windows forbids in a filename, plus the ones that would collide
+#: with the ``_CH00_000000`` suffix if a user typed them.
+_BAD_BASE_CHARS = '<>:"/\\|?*'
+
+
+def clean_base_filename(name: str, *, fallback: str = "img") -> str:
+    """A usable base from whatever the save dialog returned.
+
+    The user types a file name, so it usually arrives with an extension and
+    may arrive with a suffix this code is about to add again. Strip both, and
+    refuse to produce an empty base.
+    """
+    stem = Path(str(name).strip()).name
+    for ext in (".tif", ".tiff", ".ome.tif"):
+        if stem.lower().endswith(ext):
+            stem = stem[: -len(ext)]
+            break
+    # a re-picked file like "beads_CH00_000000" should give back "beads"
+    stem = re.sub(r"_CH\d{2}_\d{6}$", "", stem)
+    stem = "".join(c for c in stem if c not in _BAD_BASE_CHARS).strip()
+    return stem or fallback
 
 
 def to_u16(stack: np.ndarray) -> np.ndarray:

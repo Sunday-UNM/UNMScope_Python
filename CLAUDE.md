@@ -77,6 +77,23 @@ in front, which has already happened here.
   (recurse `QSplitter` via `.widget(i)`, `QTabWidget` via `.widget(i)`,
   else `.layout()`). This finds the culprit in minutes.
 
+## Never read the same VI twice
+
+`docs/vi_notes.md` is the index of every LouisXIV VI already read, with what
+each one settles and where the full write-up lives. **Check it before opening
+anything under `VI_Diagrams`**, and **add a row after reading a VI that is not
+in it.**
+
+Diagram renders are the most expensive thing in this project to look at:
+LabVIEW's 9 px text has to be read at 2-8x zoom, and a single investigation
+can run to hundreds of image reads. Re-deriving a fact this file already holds
+costs real money and buys nothing. Exporting frames is cheap; *reading* them
+is not.
+
+Prefer, in order: the index -> the existing write-up it points to -> the
+already-exported hidden frames -> a new export. Say what you are about to
+open and why before opening a batch of renders.
+
 ## Honesty about what is real
 
 Controls that are laid out to match the real panel but are not wired to

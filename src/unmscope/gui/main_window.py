@@ -1125,26 +1125,76 @@ class MainWindow(QMainWindow):
                     highest = max(highest, int(m.group(1)))
         return data_dir / f"{prefix}{highest + 1}"
 
-    def _acq_info(self) -> dict:
+    def _acq_info(self, stack=None) -> tuple[dict, dict]:
+        """(LouisXIV's AcqInfo fields, our extras block).
+
+        The keys and their order are LouisXIV's, from `Companion Metadata
+        Cluster to String.vi` -- see `fileio/tiff_stack.ACQ_INFO_FIELDS`.
+        Fields whose panel controls were never ported are written empty
+        rather than omitted, because LouisXIV writes them unconditionally
+        and an empty panel field there gives an empty value here; only the
+        position fields have a real skip.
+
+        The extras block carries what this acquisition used that LouisXIV's
+        format has nowhere to put. Dropping it would lose information the
+        file used to record, so the user chose to keep it, clearly fenced
+        off under its own heading.
+        """
         cal = self.calibration
         sel = self._selected_channel_index()
         chk, wl, spin = self.excitation_rows[sel]
-        info = {
+        exposure_ms = float(self.exposure_spin.value())
+        # Frame size from the stack actually being saved where we have it;
+        # the camera is the fallback for callers that pass none.
+        if stack is not None and getattr(stack, "ndim", 0) == 3:
+            slices, height, width = (int(n) for n in stack.shape)
+        else:
+            info = self.camera.info if self.camera is not None else None
+            width = int(info.width) if info else 0
+            height = int(info.height) if info else 0
+            slices = int(self.frame_count)
+        pixel_um = float(cal.detection.xy_pixel_um)
+        period_ms = (self.camera.trigger_period_ms(exposure_ms)
+                     if self.camera is not None else exposure_ms)
+
+        fields = {
+            "SizeX_px": width,
+            "SizeY_px": height,
+            "SizeZ_px": slices,
+            "PhysicalSizeX_um": pixel_um,
+            "PhysicalSizeY_um": pixel_um,
+            "PhysicalSizeZ_um": float(self.z_interval_spin.value()),
+            "Timepoints": 1,
+            "Cameras": 1,
+            "Channels": 1,                      # one laser at a time, as LouisXIV gates it
+            "AOTFCycleMode": "per Z",           # the cluster's default; we do not cycle
+            "TimeIncrement_s": period_ms / 1000.0,
+            "Username": "",                     # no panel field ported
+            "CellLabeling": "",                 # no panel field ported
+            "CellType": "",                     # no panel field ported
+            "ExperimentDescription": "",        # no panel field ported
+            "Fluor": [],                        # no panel field ported
+            "ExcitationWavelength_nm": [int(wl)],
+            "EmissionWavelength_nm": [],        # no panel field ported
+            "FilterType": "",                   # no panel field ported
+            "CamExposure_s": exposure_ms / 1000.0,
+            "Multi-positionAcq": False,         # multi-position is not wired
+            # PositionX/Y/Z_mm and StageAngle_deg are skipped while
+            # Multi-positionAcq is false, exactly as the VI's skip? does.
+            "StageAngle_deg": float(DEFAULT_STAGE_ANGLE_DEG),
+        }
+
+        extras = {
             "Mode": self.mode_combo.currentText(),
-            "Exposure (ms)": self.exposure_spin.value(),
             "Trigger mode": "SYNCREADOUT" if self.sync_readout_chk.isChecked() else "EDGE",
-            "Slices": self.frame_count,
-            "Z Piezo Interval (um)": self.z_interval_spin.value(),
+            "Excitation (%)": f"{spin.value():g}",
             "Z Piezo Start (um)": self.z_start_spin.value(),
             "Z Piezo End (um)": self.z_end_spin.value(),
-            "Excitation": f"{wl} nm at {spin.value():g} %",
-            "XY pixel size (um)": round(cal.detection.xy_pixel_um, 5),
-            "Stage angle (deg)": DEFAULT_STAGE_ANGLE_DEG,
         }
         if self.camera is not None and self.camera.info is not None:
-            i = self.camera.info
-            info["Camera"] = {"Model": i.name, "Serial": i.serial, "Width": i.width, "Height": i.height}
-        return info
+            extras["Camera model"] = self.camera.info.name
+            extras["Camera serial"] = self.camera.info.serial
+        return fields, extras
 
     def _on_stack_finished(self):
         """After any stop: offer the stack to Calc, and save it if Save Files
@@ -1174,7 +1224,7 @@ class MainWindow(QMainWindow):
             save_tiff_stack(path, stack, ome=True, pixel_size_um=cal.detection.xy_pixel_um,
                             z_step_um=self.z_interval_spin.value(),
                             channel_name=self.excitation_rows[ch][1])
-            write_acq_info(exp, self._acq_info())
+            write_acq_info(exp, *self._acq_info(stack))
         except Exception as e:
             self._log(f"Stack save FAILED: {type(e).__name__}: {e}")
             QMessageBox.warning(self, "Save failed", str(e))

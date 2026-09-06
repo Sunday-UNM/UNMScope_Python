@@ -84,24 +84,105 @@ def save_tiff_stack(path: str | Path, stack: np.ndarray, *, ome: bool = True,
     return path
 
 
-def write_acq_info(folder: str | Path, settings: dict) -> Path:
-    """The ``AcqInfo.txt`` companion: one ``key = value`` line per setting,
-    with a timestamp header. Nested dicts become ``[section]`` blocks, the
-    style of SPIMProject.ini."""
+# -- AcqInfo.txt -------------------------------------------------------------
+#
+# LouisXIV's format, read field by field off the 26 hidden case frames of
+# `Companion Metadata Cluster to String.vi` (2026-09-05). The VI is a
+# for-each over `Companion Metadata File Fields Enum`, one line per field,
+# in the order below -- which is NOT the order of the cluster it reads, and
+# two of whose key names differ from their cluster fields (`AOTFCycleMode`
+# for "AOTF cycle mode", `StageAngle_deg` for `Angle_deg`).
+#
+# The per-field format really does vary; do not "tidy" these into one:
+#   %d      integers
+#   %.3f    physical sizes and stage positions
+#   %.4f    the stage angle, and only that
+#   %f      LabVIEW's default 6 decimals, for the two time fields
+#   "%s"    strings, quoted
+#   arrays  elements formatted individually and joined with a COMMA, quoted
+#           for strings ("%s") and bare for the wavelengths (%d)
+#   TRUE/FALSE  booleans, as LabVIEW's Format Into String renders them
+#
+#: (key, kind) in the enum's order. See ``_format_acq_value`` for the kinds.
+ACQ_INFO_FIELDS: tuple[tuple[str, str], ...] = (
+    ("SizeX_px", "int"), ("SizeY_px", "int"), ("SizeZ_px", "int"),
+    ("PhysicalSizeX_um", "f3"), ("PhysicalSizeY_um", "f3"), ("PhysicalSizeZ_um", "f3"),
+    ("Timepoints", "int"), ("Cameras", "int"), ("Channels", "int"),
+    ("AOTFCycleMode", "text"), ("TimeIncrement_s", "f6"),
+    ("Username", "str"), ("CellLabeling", "str"), ("CellType", "str"),
+    ("ExperimentDescription", "str"),
+    ("Fluor", "strs"), ("ExcitationWavelength_nm", "ints"),
+    ("EmissionWavelength_nm", "ints"), ("FilterType", "str"),
+    ("CamExposure_s", "f6"), ("Multi-positionAcq", "bool"),
+    ("PositionX_mm", "f3"), ("PositionY_mm", "f3"), ("PositionZ_mm", "f3"),
+    ("StageAngle_deg", "f4"),
+)
+
+#: Written only when ``Multi-positionAcq`` is true. Each of these four cases
+#: wires Multi-positionAcq through a NOT into the VI's ``skip?`` output, so
+#: a single-position acquisition omits the lines rather than writing zeros.
+ACQ_INFO_POSITION_FIELDS = frozenset(
+    {"PositionX_mm", "PositionY_mm", "PositionZ_mm", "StageAngle_deg"})
+
+#: Heading for the block of our own settings that LouisXIV's format has no
+#: home for. Kept clearly separate so the file above it stays LouisXIV's.
+ACQ_INFO_EXTRAS_SECTION = "UNMScope"
+
+
+def _format_acq_value(value, kind: str) -> str:
+    if kind == "int":
+        return f"{int(value)}"
+    if kind == "f3":
+        return f"{float(value):.3f}"
+    if kind == "f4":
+        return f"{float(value):.4f}"
+    if kind == "f6":
+        return f"{float(value):f}"          # LabVIEW's %f: six decimals
+    if kind == "str":
+        return f'"{value}"'
+    if kind == "text":                      # an enum's text, unquoted
+        return f"{value}"
+    if kind == "bool":
+        return "TRUE" if value else "FALSE"
+    if kind == "strs":
+        return ",".join(f'"{v}"' for v in value)
+    if kind == "ints":
+        return ",".join(f"{int(v)}" for v in value)
+    raise ValueError(f"unknown AcqInfo kind {kind!r}")
+
+
+def render_acq_info(fields: dict, extras: dict | None = None) -> str:
+    """LouisXIV's AcqInfo.txt text, optionally followed by our own block.
+
+    ``fields`` are LouisXIV's keys; any the caller omits are left out. The
+    four position fields are dropped unless ``Multi-positionAcq`` is true,
+    which is what the VI's ``skip?`` flag does.
+    """
+    multi = bool(fields.get("Multi-positionAcq", False))
+    lines: list[str] = []
+    for key, kind in ACQ_INFO_FIELDS:
+        if key not in fields:
+            continue
+        if key in ACQ_INFO_POSITION_FIELDS and not multi:
+            continue
+        lines.append(f"{key} = {_format_acq_value(fields[key], kind)}")
+    if extras:
+        lines.append("")
+        lines.append(f"[{ACQ_INFO_EXTRAS_SECTION}]")
+        lines.append("# Not part of LouisXIV's AcqInfo format: settings this")
+        lines.append("# acquisition used that its fields have no home for.")
+        lines.append(f"# Written {datetime.datetime.now().isoformat(timespec='seconds')}")
+        for key, value in extras.items():
+            lines.append(f"{key} = {value}")
+    return "\n".join(lines) + "\n"
+
+
+def write_acq_info(folder: str | Path, fields: dict, extras: dict | None = None) -> Path:
+    """Write the ``AcqInfo.txt`` companion beside the images."""
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
     out = folder / COMPANION_FILENAME
-    lines = [f"# UNMScope acquisition info  {datetime.datetime.now().isoformat(timespec='seconds')}"]
-    flat = {k: v for k, v in settings.items() if not isinstance(v, dict)}
-    for k, v in flat.items():
-        lines.append(f"{k} = {v}")
-    for k, v in settings.items():
-        if isinstance(v, dict):
-            lines.append("")
-            lines.append(f"[{k}]")
-            for k2, v2 in v.items():
-                lines.append(f"{k2} = {v2}")
-    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    out.write_text(render_acq_info(fields, extras), encoding="utf-8")
     return out
 
 

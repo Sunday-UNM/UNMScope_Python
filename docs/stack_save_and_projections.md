@@ -53,22 +53,22 @@ cycle mode", `StageAngle_deg` for `Angle_deg`):
 | # | key | format | do we have it? |
 |---|---|---|---|
 | 1-3 | `SizeX_px` `SizeY_px` `SizeZ_px` | `%s = %d` | yes (ROI width/height, slice count) |
-| 4-6 | `PhysicalSizeX_um` `PhysicalSizeY_um` `PhysicalSizeZ_um` | `%s = %.4f` | yes (xy pixel size; Z interval) |
+| 4-6 | `PhysicalSizeX_um` `PhysicalSizeY_um` `PhysicalSizeZ_um` | `%s = %.3f` | yes (xy pixel size; Z interval) |
 | 7 | `Timepoints` | `%s = %d` | yes (always 1 today) |
 | 8 | `Cameras` | `%s = %d` | yes (1) |
 | 9 | `Channels` | `%s = %d` | yes (1, one laser at a time) |
 | 10 | `AOTFCycleMode` | `%s = %s` | enum, "per Z" default |
-| 11 | `TimeIncrement_s` | `%s = %.4f` | yes (trigger period) |
+| 11 | `TimeIncrement_s` | `%s = %f` (6 dp) | yes (trigger period) |
 | 12 | `Username` | `%s = "%s"` | **no panel field** |
 | 13 | `CellLabeling` | `%s = "%s"` | **no panel field** |
 | 14 | `CellType` | `%s = "%s"` | **no panel field** |
 | 15 | `ExperimentDescription` | `%s = "%s"` | **no panel field** |
-| 16 | `Fluor` | `%s = %s`, elements as `"%s"` joined | **no panel field** |
-| 17-18 | `ExcitationWavelength_nm` `EmissionWavelength_nm` | array, per element | excitation yes, emission no |
+| 16 | `Fluor` | elements `"%s"`, COMMA-joined | **no panel field**, written empty |
+| 17-18 | `ExcitationWavelength_nm` `EmissionWavelength_nm` | elements `%d`, COMMA-joined, unquoted | excitation yes, emission empty |
 | 19 | `FilterType` | `%s = "%s"` | **no panel field** |
-| 20 | `CamExposure_s` | `%s = %.4f` | yes (note: SECONDS, ours is ms) |
-| 21 | `Multi-positionAcq` | `%s = %s` (boolean as text) | no (always false) |
-| 22-24 | `PositionX_mm` `PositionY_mm` `PositionZ_mm` | `%s = %.4f` | stage is simulated |
+| 20 | `CamExposure_s` | `%s = %f` (6 dp) | yes, converted from ms |
+| 21 | `Multi-positionAcq` | `TRUE` / `FALSE` | no, always FALSE |
+| 22-24 | `PositionX_mm` `PositionY_mm` `PositionZ_mm` | `%s = %.3f` | skipped (single position) |
 | 25 | `StageAngle_deg` | `%s = %.4f` | yes |
 
 Formats by type: integers `%d`, floats `%.4f`, strings **quoted** `"%s"`,
@@ -76,13 +76,32 @@ string arrays as quoted elements joined, booleans as text. Each case also
 carries a `skip?` flag, so a field can be left out of the file entirely
 rather than written empty.
 
-**Not changed yet — needs a decision.** Matching LouisXIV exactly would drop
-things we currently record and LouisXIV has no home for (trigger mode
-EDGE/SYNCREADOUT, the Z start/end range, camera model and serial), and would
-add eight fields we cannot fill because the panel fields behind them were
-never ported. The options are: (a) emit LouisXIV's keys for what we have and
-skip the rest, losing our extras; (b) emit LouisXIV's keys plus a clearly
-separate block for the extras; (c) leave ours as is. See ROADMAP.
+**Implemented 2026-09-05, option (b), the user's choice**: LouisXIV's keys
+and order, then our own settings under a `[UNMScope]` heading.
+
+`fileio/tiff_stack.ACQ_INFO_FIELDS` is the field table; `render_acq_info`
+formats it. Points worth keeping in mind:
+
+* **The per-field formats really do differ.** `%.3f` for the physical sizes
+  and stage positions, `%.4f` for `StageAngle_deg` and nothing else, `%f`
+  (six decimals) for the two time fields, `%d` for integers. An early guess
+  that everything was `%.4f` was wrong on most fields.
+* **`skip?` is wired to `Multi-positionAcq`.** `PositionX/Y/Z_mm` and
+  `StageAngle_deg` each run that boolean through a NOT into the VI's skip
+  output, so a single-position acquisition omits those four lines rather
+  than writing zeros. We do the same.
+* **Fields whose panel controls were never ported are written empty**, not
+  omitted -- LouisXIV writes them unconditionally, and an empty panel field
+  there produces an empty value here. Only the position fields really skip.
+* **Arrays are comma-joined**, elements quoted for strings (`"GFP","RFP"`)
+  and bare for the wavelengths (`488,561`).
+* **`CamExposure_s` is seconds**; the panel's exposure is ms.
+
+The `[UNMScope]` block below carries Mode, Trigger mode, the excitation
+percentage, the Z start/end range and the camera model and serial -- what
+this acquisition used that LouisXIV's fields have nowhere to put. Keeping
+them rather than dropping them was the user's call; fencing them under
+their own heading keeps everything above it LouisXIV's.
 
 ## Projections (item 2)
 

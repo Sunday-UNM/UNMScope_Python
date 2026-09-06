@@ -237,7 +237,17 @@ def test_calc_projects_the_retained_stack_and_save_files_writes_louisxiv_layout(
     assert (exp1 / "AcqInfo.txt").exists()
     with tifffile.TiffFile(str(tif)) as tf:
         assert len(tf.pages) == 10 and tf.pages[0].dtype.name == "uint16" and tf.is_ome
-    assert "Slices = 10" in (exp1 / "AcqInfo.txt").read_text(encoding="utf-8")
+    # AcqInfo.txt carries LouisXIV's keys, then our own block under [UNMScope]
+    acq = (exp1 / "AcqInfo.txt").read_text(encoding="utf-8")
+    assert "SizeZ_px = 10" in acq                      # LouisXIV's name for the slice count
+    assert "Multi-positionAcq = FALSE" in acq
+    assert "PositionX_mm" not in acq                   # skipped while not multi-position
+    assert "StageAngle_deg" not in acq                 # likewise
+    head, sep, extras = acq.partition("[UNMScope]")
+    assert sep, "the extras block should be present"
+    # "Mode = ..." is ours; "AOTFCycleMode = ..." is LouisXIV's, hence startswith
+    assert not any(l.startswith("Mode = ") for l in head.splitlines())
+    assert "Trigger mode = " in extras and "Camera serial = " in extras
 
     # projection save goes next to the stack
     w._on_save_projection("XY")

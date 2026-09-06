@@ -374,6 +374,10 @@ class MainWindow(QMainWindow):
                                           reset_hw=self.on_reset_hw_clicked,
                                           waveform_config=self.waveform_config)
         self.utilities_tab.waveform_panel.changed.connect(self._on_waveform_config_changed)
+        # Cam exp typed on the Low-Level Waveform Config page (seconds) is the
+        # camera exposure, as in LouisXIV; the Scan Setup spin is in ms.
+        self.utilities_tab.waveform_panel.exposure_edited.connect(
+            lambda seconds: self.exposure_spin.setValue(seconds * 1000.0))
         # The Scan Setup Dither box's sweeps / flyback ARE the cluster's Dither
         # Triangle Pulses / Dither Fract. Flyback: keep the two views in step.
         self.dg_sweeps.valueChanged.connect(self.utilities_tab.waveform_panel.dither_triangle_pulses.setValue)
@@ -1581,6 +1585,10 @@ class MainWindow(QMainWindow):
         self.status_label.setStyleSheet("font-weight: bold;")
 
     def on_exposure_changed(self, value: float):
+        # Cam exp on the Low-Level Waveform Config page is the same number in
+        # seconds, so it follows the spin whether or not a camera is connected
+        # (the panel takes it under its own guard, so this cannot loop).
+        self.utilities_tab.waveform_panel.set_indicators(cam_exp_s=value / 1000.0)
         if self._blocking_op is not None:
             return  # a pumped spin-box event during a blocking driver call
         if self.camera is None or not self.camera.is_connected:

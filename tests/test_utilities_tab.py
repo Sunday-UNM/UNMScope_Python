@@ -93,15 +93,28 @@ def test_load_stack_from_file_presents_it_as_an_acquired_stack(window, tmp_path)
 # structural -- Cycle time is a field you SET (exposure + flyback), gated by a
 # "Custom Cycle Time" tick. These pin that arrangement.
 
-def test_cycle_time_is_typeable_only_while_custom_is_ticked(window):
+def test_typing_a_cycle_time_ticks_custom_for_you(window):
+    """The user could not type in the field: it had been gated behind the
+    Custom Cycle Time tick at the bottom of the page. Now it is always
+    typeable, and typing ticks Custom."""
     panel = window.utilities_tab.waveform_panel
     panel.custom_cycle_time.setChecked(False)
-    assert not panel.cycle_time_s.isEnabled()
-    panel.custom_cycle_time.setChecked(True)
     assert panel.cycle_time_s.isEnabled()
     panel.cycle_time_s.setValue(0.127)
+    assert panel.custom_cycle_time.isChecked()
     cfg = panel.config()
     assert cfg.custom_cycle_time is True and cfg.cycle_time_s == pytest.approx(0.127)
+
+
+def test_cam_exp_typed_on_the_waveform_page_sets_the_exposure(window):
+    """LouisXIV lets you set Cam exp on this page; it is where 0.1 was set."""
+    panel = window.utilities_tab.waveform_panel
+    assert panel.cam_exp_s.isEnabled()
+    panel.cam_exp_s.setValue(0.1)
+    assert window.exposure_spin.value() == pytest.approx(100.0)
+    # and the window pushing the exposure back does not bounce it around
+    window.exposure_spin.setValue(50.0)
+    assert panel.cam_exp_s.value() == pytest.approx(0.05)
 
 
 def test_the_computed_cycle_time_never_overwrites_a_typed_one(window):

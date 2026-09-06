@@ -48,6 +48,7 @@ def _r(x, y, w, h):
 
 class WaveformConfigPanel(QWidget):
     changed = Signal(object)          # WaveformConfig, after any live edit
+    exposure_edited = Signal(float)   # seconds: Cam exp typed on THIS page (LouisXIV lets you)
 
     LIVE = ("fractional_flyback", "fract_smoothing", "updates_per_pix", "x_single_direction",
             "dither_triangle_pulses", "dither_fract_flyback")
@@ -187,11 +188,21 @@ class WaveformConfigPanel(QWidget):
             setattr(self, attr, self._dspin(_r(107, y, 38, 18), lo, 1e6, 3, live=live))
             self._rlabel(text, _r(107, y, 38, 18))
         self.n_integrations = self._ispin(_r(107, 299, 38, 18), 1, 1000); self._rlabel("# of Integrations", _r(107, 299, 38, 18))
-        self.cam_exp_s = self._ro(_r(82, 318, 63, 18)); self._rlabel("Cam exp (s)", _r(82, 318, 63, 18), 76)
-        # Cycle time is the trigger period, and it is EDITABLE -- LouisXIV's
-        # arrangement, and the user's call. It reads as an indicator until
-        # Custom Cycle Time is ticked, then you type the period you want.
+        # Cam exp is TYPEABLE here, in seconds, as on LouisXIV's page -- it is
+        # where the user set 0.1 -- and drives the Scan Setup exposure through
+        # `exposure_edited`. The window pushes the exposure back into it under
+        # _updating, so the two never chase each other.
+        self.cam_exp_s = self._dspin(_r(82, 318, 63, 18), 0.0001, 60.0, 4)
+        self.cam_exp_s.setEnabled(True)
+        self.cam_exp_s.valueChanged.connect(self._on_cam_exp_edited)
+        self._rlabel("Cam exp (s)", _r(82, 318, 63, 18), 76)
+        # Cycle time is the trigger period and is ALWAYS typeable. Typing a
+        # value ticks Custom Cycle Time for you -- the tick sits at the bottom
+        # of the page, nowhere near this field, and the user should not have
+        # to find it first. Untick Custom to go back to the computed value.
         self.cycle_time_s = self._dspin(_r(82, 337, 63, 18), 0.0, 60.0, 4)
+        self.cycle_time_s.setEnabled(True)
+        self.cycle_time_s.valueChanged.connect(self._on_cycle_time_edited)
         self._rlabel("Cycle time (s)", _r(82, 337, 63, 18), 76)
         self.linked = self._toggle(_r(150, 282, 56, 16), "Linked", True)
         self.xz_correct = self._toggle(_r(150, 299, 56, 17), "XZcrrct", True)
@@ -219,9 +230,7 @@ class WaveformConfigPanel(QWidget):
         self.virtual_confocal.setStyleSheet("background: #204020; border-radius: 7px; border: 1px solid #333;")
         self.custom_cycle_time = QCheckBox(self); self.custom_cycle_time.setGeometry(*_r(169, 536, 13, 13))
         self._rlabel("Custom Cycle Time", _r(169, 536, 13, 13), 110)
-        self.custom_cycle_time.toggled.connect(self._on_custom_cycle_toggled)
         self.custom_cycle_time.toggled.connect(self._on_edit)
-        self._on_custom_cycle_toggled(self.custom_cycle_time.isChecked())
         self._label("Z Piezo Selector", _r(10, 552, 92, 21))
         self.z_piezo_1 = self._toggle(_r(105, 552, 44, 21), "1", True)
         self.z_piezo_2 = self._toggle(_r(153, 552, 44, 21), "2")
@@ -244,7 +253,7 @@ class WaveformConfigPanel(QWidget):
                 getattr(self, attr).setValue(getattr(cfg, attr))
             self.n_integrations.setValue(cfg.n_integrations)
             self.n_doe_beams.setValue(cfg.n_doe_beams)
-            self.cam_exp_s.setText(f"{cfg.cam_exp_s:g}")
+            self.cam_exp_s.setValue(cfg.cam_exp_s)
             self.cycle_time_s.setValue(cfg.cycle_time_s)
             for attr in ("aotf_cycle", "one_exp_per", "wait_for_z_settle", "z_wave", "dual_view",
                          "z_motion", "x_wave", "aotf_sweep_mode"):
@@ -283,7 +292,12 @@ class WaveformConfigPanel(QWidget):
         """Refresh the read-only fields from the window (exposure, trigger
         period, AO rate / Updates per Pixel, and the Scan Setup axes)."""
         if cam_exp_s is not None:
-            self._cfg = replace(self._cfg, cam_exp_s=cam_exp_s); self.cam_exp_s.setText(f"{cam_exp_s:g}")
+            self._cfg = replace(self._cfg, cam_exp_s=cam_exp_s)
+            self._updating = True
+            try:
+                self.cam_exp_s.setValue(cam_exp_s)
+            finally:
+                self._updating = False
         if cycle_time_s is not None and not self.custom_cycle_time.isChecked():
             # Never overwrite a period the user typed; this is the computed
             # one, and it is only an indicator while Custom is off.
@@ -299,9 +313,20 @@ class WaveformConfigPanel(QWidget):
             if name in self.ax:
                 self._cfg = replace(self._cfg, **{name: a}); self._show_axis(self.ax[name], a)
 
-    def _on_custom_cycle_toggled(self, on: bool) -> None:
-        """Cycle time is typeable only while Custom Cycle Time is ticked."""
-        self.cycle_time_s.setEnabled(bool(on))
+    def _on_cam_exp_edited(self, value: float) -> None:
+        if self._updating:
+            return
+        self.exposure_edited.emit(float(value))
+        self._on_edit()
+
+    def _on_cycle_time_edited(self, value: float) -> None:
+        if self._updating:
+            return
+        if not self.custom_cycle_time.isChecked():
+            self.custom_cycle_time.blockSignals(True)
+            self.custom_cycle_time.setChecked(True)
+            self.custom_cycle_time.blockSignals(False)
+        self._on_edit()
 
     def _on_edit(self, *_):
         if self._updating:

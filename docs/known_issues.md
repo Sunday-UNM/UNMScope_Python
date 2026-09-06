@@ -303,3 +303,54 @@ too-short typed value cannot re-trigger the camera inside its readout.
 which dropped every second trigger (see the comment that used to sit above
 this code). Different constant, same mistake: deriving the period from the
 camera instead of from the cycle.
+
+## A second way to lose a slice: the stale filter ate the warm-up frame (fixed 2026-09-06)
+
+Found by an adversarially verified code hunt (39 agents, three independent
+lenses converging on the same lines) after the cycle-time fix, and
+reproduced on the fake backends before it was fixed.
+
+**Mechanism.** `_poll_camera_for_frame` ran two discards in series on each
+popped frame: first the *stale pre-trigger* test (any pop less than half a
+trigger period after the FPGA was armed), then the *warm-up* count (the
+frame `Camera.prepare_sequence` says to drop). In SYNCREADOUT, every run
+after the first has an exposure left open by the previous run's closing
+edge; the first edge of the new run reads it out as a garbage frame, and the
+warm-up count is 1 for exactly that frame. If that garbage frame popped
+inside the stale window it was discarded as *stale* -- without touching the
+warm-up count -- so the next frame, **real slice 1, was then discarded as
+warm-up**. N-1 frames, the completion test never passed, the run ended on
+the timeout, and `_on_stack_finished` saw an incomplete stack and silently
+did not save it.
+
+**When.** SYNCREADOUT, second or later stack since Connect, and the garbage
+frame arriving within half a period of the arm. At 100 ms / 127 ms full
+frame the window is 63.5 ms against a ~60-100 ms arrival -- marginal, which
+is why the hardware sweep passed. It becomes likely with a longer cycle
+time (0.2 s -> 100 ms window) or a sub-array ROI (readout ~8 ms instead of
+33, so the garbage frame arrives much sooner).
+
+**Fix.** One physical frame, one discard: a pop classified stale while a
+warm-up is pending is charged to the warm-up count. Stale discards are now
+counted (`_stale_discarded`) and reported on the Final line, so a short run
+can be attributed instead of guessed at.
+
+**Three siblings fixed at the same time, same hunt:**
+
+- The stale window was half the *period*. With a 20 ms exposure and a
+  0.6 s Custom Cycle Time that is 300 ms, and the first *real* slice --
+  arriving ~exposure + readout after the arm -- was thrown away. The window
+  is now capped at half of exposure + readout, which no real frame can beat.
+- `repair_exposure_if_lost` re-initialises the camera in place, which leaves
+  no exposure open, but `_sync_exposure_open` stayed True, so the next
+  SYNCREADOUT run discarded real slice 1 as a warm-up that never came. The
+  flag is now cleared on that path.
+- `on_exposure_changed` pushed a new exposure to the camera mid-run. The
+  trigger period is fixed for the run, so a longer exposure under it makes
+  the camera ignore edges. Mid-run edits are now noted and applied at the
+  next Acquire.
+
+**Still open from the same hunt:** a multi-second stall of the GUI thread
+during a full-frame stack (Calc, a native file dialog) can overflow MMCore's
+circular buffer (~31 frames at full frame) and lose frames silently. Not
+addressed yet.

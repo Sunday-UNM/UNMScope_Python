@@ -203,6 +203,7 @@ class MainWindow(QMainWindow):
         self._run_closing = 0          # extra closing triggers this run (1 in SYNCREADOUT)
         self._warmup_remaining = 0     # leading frames to discard this run
         self._warmup_discarded = 0
+        self._stale_discarded = 0
         self._sim_fed = 0              # "simulate on FPGA": FPGA trigger count already fed to the sim camera
         # SYNCREADOUT bookkeeping: True when the camera holds an exposure
         # that the next trigger will read out as a garbage frame -- after
@@ -1591,6 +1592,12 @@ class MainWindow(QMainWindow):
         self.utilities_tab.waveform_panel.set_indicators(cam_exp_s=value / 1000.0)
         if self._blocking_op is not None:
             return  # a pumped spin-box event during a blocking driver call
+        if self.acquiring:
+            # The trigger period is fixed for the run; pushing a longer
+            # exposure under it would make the camera ignore edges. The
+            # value is kept and applied at the next Acquire.
+            self._log(f"Exposure {value:.3f} ms noted; it applies at the next Acquire.")
+            return
         if self.camera is None or not self.camera.is_connected:
             return
         try:
@@ -1891,6 +1898,10 @@ class MainWindow(QMainWindow):
                     self._log("Camera had lost its exposure after the previous sequence stop "
                               "(Micro-Manager Hamamatsu adapter quirk, docs/known_issues.md); "
                               "re-initialised the camera in place and re-applied settings.")
+                    # A re-initialised device has no exposure open, so the next
+                    # SYNCREADOUT run must not expect (and discard) a warm-up
+                    # frame that will never come -- that cost a real slice.
+                    self._sync_exposure_open = False
                 got = self.camera.get_exposure_ms()
                 if abs(got - self.exposure_spin.value()) > 0.01 * self.exposure_spin.value():
                     self._log(f"WARNING: camera exposure reads {got:.3f} ms after setting "
@@ -1930,6 +1941,7 @@ class MainWindow(QMainWindow):
             # exposure, not a slice. Measured, spikes/24 E4/E3.
             self._warmup_remaining += 1
         self._warmup_discarded = 0
+        self._stale_discarded = 0
         stale = self.camera.discard_buffered_frames()
         if stale:
             self._log(f"Discarded {stale} leftover frame(s) from the camera buffer before arming.")
@@ -2243,6 +2255,7 @@ class MainWindow(QMainWindow):
         self.camera_poll_timer.stop()
         self._log(f"Final: {self.frame_count} frames from {self._triggers_fired} triggers"
                   + (f" ({self._warmup_discarded} warm-up frame discarded)" if self._warmup_discarded else "")
+                  + (f" ({self._stale_discarded} stale pre-trigger frame discarded)" if self._stale_discarded else "")
                   + ".")
 
     def _finish_if_still_waiting(self):
@@ -2253,13 +2266,24 @@ class MainWindow(QMainWindow):
 
     def _is_stale_pre_trigger_frame(self) -> bool:
         """True while it is physically too early for a triggered frame to
-        exist: less than half a trigger period since the FPGA was armed.
-        Only a real camera can have stale frames; the simulated one gets
-        its edges in software and delivers instantly."""
+        exist. Only a real camera can have stale frames; the simulated one
+        gets its edges in software and delivers instantly.
+
+        The window used to be half the trigger period. That is wrong once
+        the cycle time is much longer than a frame: with a 20 ms exposure
+        and a 0.6 s Custom Cycle Time the first REAL slice lands ~55 ms
+        after the arm, inside a 300 ms window, and was thrown away (found
+        2026-09-06). A real frame cannot exist before an exposure and a
+        readout have both happened after the first edge, so the window is
+        capped at half of that, whatever the cycle time.
+        """
         if self.camera is None or not self.camera.reacts_to_dio4:
             return False
-        return (self._arm_time > 0 and self._trigger_period_s > 0
-                and time.perf_counter() - self._arm_time < 0.5 * self._trigger_period_s)
+        if self._arm_time <= 0 or self._trigger_period_s <= 0:
+            return False
+        physical_s = (self.exposure_spin.value() + self.camera.readout_ms()) / 1000.0
+        window_s = min(0.5 * self._trigger_period_s, 0.5 * physical_s)
+        return time.perf_counter() - self._arm_time < window_s
 
     def _on_fpga_error(self, msg: str):
         self._log(f"FPGA error: {msg}")
@@ -2301,7 +2325,23 @@ class MainWindow(QMainWindow):
                     # sequence starts in EXTERNAL mode (measured: it lands
                     # ~10 ms after arming, which no real exposure can).
                     # Counting it put every frame count off by one.
-                    self._log("Discarded a stale pre-trigger frame from the camera buffer.")
+                    #
+                    # In SYNCREADOUT that leftover IS the warm-up frame the
+                    # backend told us to expect (the previous run's open
+                    # exposure, read out by the first edge). Discarding it
+                    # here WITHOUT charging the warm-up count meant the next
+                    # frame -- slice 1 -- was then discarded as warm-up:
+                    # N-1 frames, a timeout, and no save (2026-09-06, found
+                    # by the frame-loss hunt, reproduced on the fake
+                    # backends). One physical frame, one discard.
+                    if self._warmup_remaining > 0:
+                        self._warmup_remaining -= 1
+                        self._warmup_discarded += 1
+                        self._log("Discarded the expected warm-up frame (it arrived inside "
+                                  "the pre-trigger window).")
+                    else:
+                        self._stale_discarded += 1
+                        self._log("Discarded a stale pre-trigger frame from the camera buffer.")
                     continue
                 if self._warmup_remaining > 0:
                     # Leading frame the camera backend told us to drop

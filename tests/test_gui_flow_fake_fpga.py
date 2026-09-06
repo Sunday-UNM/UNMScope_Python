@@ -353,3 +353,86 @@ def test_trigger_period_is_the_cycle_time_not_the_exposure(app, window):
     assert period >= w.camera.trigger_period_ms(100.0) - 1e-6
     assert any("below the camera's minimum" in m for m in w.logs)
     panel.custom_cycle_time.setChecked(False)
+
+
+# -- frame accounting: the double discard (2026-09-06) --------------------------
+# Found by the adversarially-verified frame-loss hunt, three lenses agreeing:
+# the stale-pre-trigger filter discarded the SYNCREADOUT warm-up frame without
+# charging the warm-up count, so the next frame -- real slice 1 -- was then
+# discarded as warm-up. N-1 frames, a timeout, no save. The simulated camera
+# delivers instantly, so with reacts_to_dio4 forced on (it is True on the real
+# Orca) every leading frame lands inside the pre-trigger window: the worst case.
+
+def _five_slice_sync(app, w):
+    w.sync_readout_chk.setChecked(True)
+    w.exposure_spin.setValue(100.0)
+    w.z_start_spin.setValue(0); w.z_end_spin.setValue(4); w.z_interval_spin.setValue(1)
+    w.mode_combo.setCurrentText(mw.MODE_ZSTACK)
+    pump(app, 0.05)
+    w.on_acquire_clicked()
+    assert pump(app, 30.0, until=lambda: not w.acquiring), "stack did not finish"
+    pump(app, 0.4)
+
+
+def test_second_sync_stack_keeps_every_slice_when_the_warmup_frame_is_early(app, window):
+    """Deterministic: the stale predicate is stubbed to fire on exactly the
+    first pop of run 2 -- the warm-up frame arriving inside the window --
+    so the test does not depend on the simulated camera's (instant, and
+    therefore unphysical) delivery timing."""
+    w = window
+    _five_slice_sync(app, w)                   # run 1: fresh camera, nothing open
+    assert w.frame_count == 5 and w._warmup_discarded == 0
+
+    pops = {"n": 0}
+    def first_pop_looks_stale():
+        pops["n"] += 1
+        return pops["n"] == 1
+    w._is_stale_pre_trigger_frame = first_pop_looks_stale
+    try:
+        _five_slice_sync(app, w)               # run 2: the closing edge left an exposure open
+    finally:
+        del w._is_stale_pre_trigger_frame      # back to the class method
+    assert w._warmup_discarded == 1            # exactly one physical frame discarded ...
+    assert w._stale_discarded == 0             # ... charged to warm-up, not counted twice
+    assert w.frame_count == w.z_target_frames == 5   # ... and every slice kept
+    assert w.acquired_stack().shape[0] == 5
+    assert not any("timed out" in m for m in w.logs)
+
+
+def test_stale_window_never_reaches_a_real_frame_however_long_the_cycle(app, window):
+    """EDGE, 20 ms exposure, Custom Cycle Time 0.6 s: the first real slice
+    lands about exposure + readout after the arm. The old half-period
+    window (300 ms) swallowed it; the window is now capped at half of
+    exposure + readout."""
+    import time as _t
+    w = window
+    w.camera.reacts_to_dio4 = True
+    w.sync_readout_chk.setChecked(False)
+    w.exposure_spin.setValue(20.0)
+    w._trigger_period_s = 0.6
+    physical_ms = 20.0 + w.camera.readout_ms()
+    w._arm_time = _t.perf_counter() - physical_ms / 1000.0      # a real frame's earliest arrival
+    assert not w._is_stale_pre_trigger_frame(), "a real first slice must not be called stale"
+    w._arm_time = _t.perf_counter() - 0.001                      # 1 ms after arming: leftover territory
+    assert w._is_stale_pre_trigger_frame()
+    w._arm_time = 0.0
+    w.camera.reacts_to_dio4 = False
+
+
+def test_exposure_edits_mid_run_do_not_reach_the_camera(app, window):
+    w = window
+    w.sync_readout_chk.setChecked(False)
+    w.exposure_spin.setValue(20.0)
+    pump(app, 0.05)
+    w.mode_combo.setCurrentText(mw.MODE_CONTINUOUS)
+    pump(app, 0.05)
+    w.on_acquire_clicked()
+    assert w.acquiring
+    before = w.camera.get_exposure_ms()
+    w.logs.clear()
+    w.exposure_spin.setValue(200.0)             # a wheel or arrow nudge mid-run
+    pump(app, 0.05)
+    assert w.camera.get_exposure_ms() == pytest.approx(before)
+    assert any("applies at the next Acquire" in m for m in w.logs)
+    w.on_acquire_clicked()
+    pump(app, 0.3)

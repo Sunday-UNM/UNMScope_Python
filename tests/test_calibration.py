@@ -12,6 +12,10 @@ def test_defaults_when_ini_missing(tmp_path):
     assert cal.z_galvo.um_to_v(7.0) == pytest.approx(1.0)
     assert cal.z_piezo.v_to_um(1.0) == pytest.approx(8.0)
     assert (cal.z_piezo.v_min, cal.z_piezo.v_max) == (-2.5, 10.0)
+    # Fixed in LouisXIV, not per-rig: `HHMI - Z Piezo AOTF voltage limits.vi`
+    # wires literal 0 and 10 to Minimum/Maximum S Piezo Voltage, and there is
+    # no ini section for it. It is 0 .. 10, never negative.
+    assert (cal.sample_piezo.v_min, cal.sample_piezo.v_max) == (0.0, 10.0)
 
 
 def test_reads_real_style_ini(tmp_path):

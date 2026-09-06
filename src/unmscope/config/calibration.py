@@ -167,7 +167,14 @@ def load_calibration(ini_path: str | Path | None = None) -> Calibration:
                      _get(cp, "Z Piezo Limits (V)", "Min (V)", -2.5), _get(cp, "Z Piezo Limits (V)", "Max (V)", 10.0)),
         dither_galvo=Axis("Dither Galvo", mtv.dither_galvo,
                           _get(cp, "D Galvo Limits (V)", "Min (V)", -5.5), _get(cp, "D Galvo Limits (V)", "Max (V)", 5.5)),
-        sample_piezo=Axis("Sample Piezo", mtv.sample_piezo, -10.0, 10.0),
+        # 0 .. 10 V, not +-10: `HHMI - Z Piezo AOTF voltage limits.vi` wires
+        # literal constants 0 and 10 to "Minimum/Maximum S Piezo Voltage".
+        # Unlike the axes above there is no ini section for it, so this is
+        # LouisXIV's fixed limit, not a per-rig setting.
+        sample_piezo=Axis("Sample Piezo", mtv.sample_piezo, 0.0, 10.0),
+        # ASSUMED. LouisXIV has no X-tile limits constant and SPIMProject.ini
+        # has no section for it; +-10 V is the DAQ's own range, not a value
+        # read off the source.
         x_tile=Axis("X Tile", mtv.xtile, -10.0, 10.0),
         source=source,
         um_per_volt=mtv,

@@ -610,6 +610,21 @@ below is being implemented until the user picks.
    items unknown beyond the default.
 9. Scope extras from LouisXIV declined for now (ordered channel list, two
    cursors, 29 ch at 200 kS/s) -- revisit if wanted.
+20. **AcqInfo.txt does not match LouisXIV's** (found 2026-09-05 while
+    verifying it). `Companion Metadata Cluster to String.vi` was read in full
+    (26 hidden case frames): 25 fields in enum order, integers `%d`, floats
+    `%.4f`, strings quoted `"%s"`, arrays as quoted elements joined, booleans
+    as text, each with a `skip?` flag. **Ours shares not one key name with
+    it** -- it was invented, against the "file formats come from the source"
+    directive. Not changed yet because matching exactly is a trade: we would
+    lose fields LouisXIV has no home for (trigger mode, Z start/end, camera
+    model + serial) and gain eight we cannot fill (Username, CellLabeling,
+    CellType, ExperimentDescription, Fluor, FilterType, EmissionWavelength,
+    Multi-position) because those panel fields were never ported. Also note
+    `CamExposure_s` is SECONDS where ours is ms. Options: (a) LouisXIV's keys
+    only, skipping what we lack; (b) LouisXIV's keys plus a separate block
+    for our extras; (c) leave as is. Full field table in
+    `docs/stack_save_and_projections.md`.
 
 **Verification still owed (hardware / real data)**
 10. **DONE 2026-09-05** DCAM "SENSOR MODE" values and the subarray units, on

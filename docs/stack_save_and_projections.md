@@ -36,9 +36,53 @@ for a path and writes the newest frame. The user manual: "Save File Type:
 TIFF (default) ... Save OME-XML: only valid when File Type = TIFF."
 
 Not yet matched: the `Base file` name (fixed to `img`; LouisXIV takes it from
-the dialog), multi-timepoint numbering, multi-position folders, and the exact
-line format of `AcqInfo.txt` (the `Companion Metadata Cluster to String.vi`
-was not read; ours is `key = value` in ini style).
+the dialog), multi-timepoint numbering, and multi-position folders.
+
+## AcqInfo.txt: read 2026-09-05, and ours does not match
+
+`Companion Metadata Cluster to String.vi` has now been read (26 hidden case
+frames). The finding is blunt: **our `AcqInfo.txt` shares not one key name
+with LouisXIV's.** Ours was invented; the 2026-09-04 directive says file
+formats come from the source.
+
+The file is a for-each over `Companion Metadata File Fields Enum`, one line
+per field, in this order — note the enum's order is not the cluster's, and
+two key names differ from their cluster fields (`AOTFCycleMode` for "AOTF
+cycle mode", `StageAngle_deg` for `Angle_deg`):
+
+| # | key | format | do we have it? |
+|---|---|---|---|
+| 1-3 | `SizeX_px` `SizeY_px` `SizeZ_px` | `%s = %d` | yes (ROI width/height, slice count) |
+| 4-6 | `PhysicalSizeX_um` `PhysicalSizeY_um` `PhysicalSizeZ_um` | `%s = %.4f` | yes (xy pixel size; Z interval) |
+| 7 | `Timepoints` | `%s = %d` | yes (always 1 today) |
+| 8 | `Cameras` | `%s = %d` | yes (1) |
+| 9 | `Channels` | `%s = %d` | yes (1, one laser at a time) |
+| 10 | `AOTFCycleMode` | `%s = %s` | enum, "per Z" default |
+| 11 | `TimeIncrement_s` | `%s = %.4f` | yes (trigger period) |
+| 12 | `Username` | `%s = "%s"` | **no panel field** |
+| 13 | `CellLabeling` | `%s = "%s"` | **no panel field** |
+| 14 | `CellType` | `%s = "%s"` | **no panel field** |
+| 15 | `ExperimentDescription` | `%s = "%s"` | **no panel field** |
+| 16 | `Fluor` | `%s = %s`, elements as `"%s"` joined | **no panel field** |
+| 17-18 | `ExcitationWavelength_nm` `EmissionWavelength_nm` | array, per element | excitation yes, emission no |
+| 19 | `FilterType` | `%s = "%s"` | **no panel field** |
+| 20 | `CamExposure_s` | `%s = %.4f` | yes (note: SECONDS, ours is ms) |
+| 21 | `Multi-positionAcq` | `%s = %s` (boolean as text) | no (always false) |
+| 22-24 | `PositionX_mm` `PositionY_mm` `PositionZ_mm` | `%s = %.4f` | stage is simulated |
+| 25 | `StageAngle_deg` | `%s = %.4f` | yes |
+
+Formats by type: integers `%d`, floats `%.4f`, strings **quoted** `"%s"`,
+string arrays as quoted elements joined, booleans as text. Each case also
+carries a `skip?` flag, so a field can be left out of the file entirely
+rather than written empty.
+
+**Not changed yet — needs a decision.** Matching LouisXIV exactly would drop
+things we currently record and LouisXIV has no home for (trigger mode
+EDGE/SYNCREADOUT, the Z start/end range, camera model and serial), and would
+add eight fields we cannot fill because the panel fields behind them were
+never ported. The options are: (a) emit LouisXIV's keys for what we have and
+skip the rest, losing our extras; (b) emit LouisXIV's keys plus a clearly
+separate block for the extras; (c) leave ours as is. See ROADMAP.
 
 ## Projections (item 2)
 

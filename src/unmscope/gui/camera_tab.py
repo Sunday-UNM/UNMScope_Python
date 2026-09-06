@@ -75,7 +75,7 @@ class CameraTab(QWidget):
         self.setStyleSheet(f"CameraTab {{ background: {PANEL_BG}; }}")
         # The live page is 810 px tall (y 111..921); ours is shorter by the
         # Hardware Connection bar, so the host wraps this in a scroll area.
-        self.setMinimumSize(392, 775)      # lowest widget: ROI center box bottom at page y 763
+        self.setMinimumSize(392, 541)      # lowest widget: ROI center box bottom at page y 529
         self._build()
         self._show_roi(self._roi)
 
@@ -130,7 +130,12 @@ class CameraTab(QWidget):
 
         # Camera Settings box (interior is the panel colour, not white)
         self._label("Camera Settings", _rect(23, 151, 130, 18), bold=True)
-        self._box(_rect(23, 171, 216, 366), white=False)
+        # 132, not LouisXIV's 366: the box held SubROIs / Full ROI / Dual View /
+        # Split pix # between Sync readout and Sensor Mode, all removed in the
+        # 2026-09-05 cleanup. Keeping the measured height left ~230 px of dead
+        # space that pushed the ROI controls below the fold and forced a
+        # scrollbar on a tab with room to spare.
+        self._box(_rect(23, 171, 216, 132), white=False)
         self._label("Exposure (ms)", _rect(30, 198, 90, 18))
         self.exposure_spin = QDoubleSpinBox(self)
         self.exposure_spin.setGeometry(*_rect(125, 198, 106, 18))
@@ -143,9 +148,9 @@ class CameraTab(QWidget):
         self.sync_readout_chk = QCheckBox("Sync readout (frame = exposure)", self)
         self.sync_readout_chk.setGeometry(*_rect(30, 232, 206, 18))
         self.sync_readout_chk.setChecked(True)
-        self._label("Sensor Mode", _rect(30, 394, 90, 21))
+        self._label("Sensor Mode", _rect(30, 266, 90, 21))
         self.sensor_mode_combo = QComboBox(self)
-        self.sensor_mode_combo.setGeometry(*_rect(125, 394, 110, 21))   # +4 px: Qt's arrow is wider than LabVIEW's
+        self.sensor_mode_combo.setGeometry(*_rect(125, 266, 110, 21))   # +4 px: Qt's arrow is wider than LabVIEW's
         self.sensor_mode_combo.addItems(list(Camera.SENSOR_MODES))
         self.sensor_mode_combo.currentTextChanged.connect(self._on_sensor_mode)
 
@@ -159,50 +164,50 @@ class CameraTab(QWidget):
             f.setAlignment(Qt.AlignRight)
 
         # ROI box
-        self._label("ROI", _rect(28, 540, 40, 16))
-        self._box(_rect(28, 558, 115, 107), white=True)
+        self._label("ROI", _rect(28, 306, 40, 16))
+        self._box(_rect(28, 324, 115, 107), white=True)
         right = Qt.AlignRight | Qt.AlignVCenter
-        self._label("Left", _rect(32, 564, 44, 20), align=right)
-        self._label("Right", _rect(32, 586, 44, 20), align=right)
-        self._label("Top", _rect(32, 617, 44, 20), align=right)
-        self._label("Bottom", _rect(32, 639, 44, 20), align=right)
-        self.roi_left = self._spin(_rect(81, 564, 56, 20), 1, 2048, 1)
-        self.roi_right = self._spin(_rect(81, 586, 56, 20), 1, 2048, 2048)
-        self.roi_top = self._spin(_rect(81, 617, 56, 20), 1, 2048, 1)
-        self.roi_bottom = self._spin(_rect(81, 639, 56, 20), 1, 2048, 2048)
+        self._label("Left", _rect(32, 330, 44, 20), align=right)
+        self._label("Right", _rect(32, 352, 44, 20), align=right)
+        self._label("Top", _rect(32, 383, 44, 20), align=right)
+        self._label("Bottom", _rect(32, 405, 44, 20), align=right)
+        self.roi_left = self._spin(_rect(81, 330, 56, 20), 1, 2048, 1)
+        self.roi_right = self._spin(_rect(81, 352, 56, 20), 1, 2048, 2048)
+        self.roi_top = self._spin(_rect(81, 383, 56, 20), 1, 2048, 1)
+        self.roi_bottom = self._spin(_rect(81, 405, 56, 20), 1, 2048, 2048)
         for s in (self.roi_left, self.roi_right, self.roi_top, self.roi_bottom):
             s.valueChanged.connect(self._on_roi_edited)
 
         # # of pixels box
-        self._label("# of pixels", _rect(157, 541, 70, 16))
-        self._box(_rect(157, 557, 79, 84), white=True)
-        self._label("X", _rect(161, 563, 14, 18))
-        self._label("Y", _rect(161, 617, 14, 18))
-        self.pix_x = self._spin(_rect(177, 563, 53, 18), 4, 2048, 2048)
-        self.pix_y = self._spin(_rect(177, 617, 53, 18), 4, 2048, 2048)
+        self._label("# of pixels", _rect(157, 307, 70, 16))
+        self._box(_rect(157, 323, 79, 84), white=True)
+        self._label("X", _rect(161, 329, 14, 18))
+        self._label("Y", _rect(161, 383, 14, 18))
+        self.pix_x = self._spin(_rect(177, 329, 53, 18), 4, 2048, 2048)
+        self.pix_y = self._spin(_rect(177, 383, 53, 18), 4, 2048, 2048)
         self.pix_x.valueChanged.connect(self._on_pixels_edited)
         self.pix_y.valueChanged.connect(self._on_pixels_edited)
 
         # FOV box
-        self._label("FOV", _rect(158, 658, 40, 16))
-        self._box(_rect(158, 674, 84, 84), white=True)
-        self._label("X", _rect(162, 680, 14, 18))
-        self._label("Y", _rect(162, 734, 14, 18))
-        self.fov_x = self._readback(_rect(178, 680, 58, 18))
-        self.fov_y = self._readback(_rect(178, 734, 58, 18))
+        self._label("FOV", _rect(158, 424, 40, 16))
+        self._box(_rect(158, 440, 84, 84), white=True)
+        self._label("X", _rect(162, 446, 14, 18))
+        self._label("Y", _rect(162, 500, 14, 18))
+        self.fov_x = self._readback(_rect(178, 446, 58, 18))
+        self.fov_y = self._readback(_rect(178, 500, 58, 18))
 
         # ROI center box + buttons
-        self._label("ROI center", _rect(159, 804, 70, 16))
-        self._box(_rect(159, 820, 82, 53), white=True)
-        self._label("X", _rect(163, 826, 14, 18))
-        self._label("Y", _rect(163, 849, 14, 18))
-        self.roi_center_x = self._spin(_rect(179, 826, 56, 18), 0, 2048, 0)
-        self.roi_center_y = self._spin(_rect(179, 849, 56, 18), 0, 2048, 0)
-        self.center_roi_btn = self._button("Center  ROI", _rect(37, 670, 92, 31), self.on_center_roi)
-        self.use_all_btn = self._button("Use all pixels", _rect(37, 706, 92, 31), self.on_use_all_pixels)
-        self.roi_1024_btn = self._button("1024x1024", _rect(37, 747, 92, 31), lambda: self.on_preset(1024))
-        self.roi_512_btn = self._button("512x512", _rect(37, 783, 92, 31), lambda: self.on_preset(512))
-        self.center_at_btn = self._button("Center  ROI at", _rect(37, 823, 92, 31), self.on_center_roi_at)
+        self._label("ROI center", _rect(159, 570, 70, 16))
+        self._box(_rect(159, 586, 82, 53), white=True)
+        self._label("X", _rect(163, 592, 14, 18))
+        self._label("Y", _rect(163, 615, 14, 18))
+        self.roi_center_x = self._spin(_rect(179, 592, 56, 18), 0, 2048, 0)
+        self.roi_center_y = self._spin(_rect(179, 615, 56, 18), 0, 2048, 0)
+        self.center_roi_btn = self._button("Center  ROI", _rect(37, 436, 92, 31), self.on_center_roi)
+        self.use_all_btn = self._button("Use all pixels", _rect(37, 472, 92, 31), self.on_use_all_pixels)
+        self.roi_1024_btn = self._button("1024x1024", _rect(37, 513, 92, 31), lambda: self.on_preset(1024))
+        self.roi_512_btn = self._button("512x512", _rect(37, 549, 92, 31), lambda: self.on_preset(512))
+        self.center_at_btn = self._button("Center  ROI at", _rect(37, 589, 92, 31), self.on_center_roi_at)
 
     # -- state -------------------------------------------------------------------
     @property

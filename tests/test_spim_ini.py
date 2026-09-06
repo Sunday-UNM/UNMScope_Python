@@ -76,7 +76,9 @@ def test_write_keys_appends_missing_keys_and_sections(tmp_path):
     p.write_bytes(b"[A]\r\nk1 = v1\r\n\r\n[B]\r\nk2=v2\r\n")
     write_keys(p, "A", {"k1": "new", "k3": "v3"})
     write_keys(p, "C", {"c": "1"})
-    assert p.read_bytes() == b"[A]\r\nk1 = new\r\nk3 = v3\r\n\r\n[B]\r\nk2=v2\r\n\r\n[C]\r\nc = 1\r\n\r\n"
+    # No trailing blank line: the shared writer (config/ini_text.py) ends the
+    # file after the last key it wrote, as LouisXIV's own ini does.
+    assert p.read_bytes() == b"[A]\r\nk1 = new\r\nk3 = v3\r\n\r\n[B]\r\nk2=v2\r\n\r\n[C]\r\nc = 1\r\n"
     cfg = read_ini(p)
     assert cfg["A"]["k3"] == "v3" and cfg["B"]["k2"] == "v2" and cfg["C"]["c"] == "1"
 

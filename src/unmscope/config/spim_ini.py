@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from unmscope.config.calibration import DEFAULT_INI
+from unmscope.config.ini_text import write_keys as _write_keys
 
 #: The UNMScope-owned copy. Tests monkeypatch ``user_ini_path``.
 USER_INI = Path.home() / ".unmscope" / "SPIMProject.ini"   # default; user_ini_path() honours UNMSCOPE_HOME
@@ -85,65 +86,16 @@ _KEY_RE = re.compile(r"^(?P<key>[^=;#\[\]][^=]*?)(?P<sep>\s*=\s*)(?P<val>.*?)(?P
 
 def write_keys(path: Path, section: str, values: dict[str, str]) -> None:
     """Replace (or append) ``values`` in ``[section]`` of the ini at ``path``,
-    touching nothing else: other lines are copied verbatim, the file's line
-    ending (CRLF in LouisXIV's file) and each existing key's ``Key = Value``
-    spacing are kept; new keys use ``Key = Value``; a missing section is
-    appended at the end."""
-    path = Path(path)
-    raw = path.read_bytes().decode("utf-8", errors="replace") if path.exists() else ""
-    eol = "\r\n" if "\r\n" in raw or not raw else "\n"
-    lines = raw.splitlines(keepends=True)
-    out: list[str] = []
-    pending = dict(values)
-    in_section = False
-    section_seen = False
+    touching nothing else.
 
-    def flush_pending():
-        # append the keys the section did not have, before the blank line /
-        # next header that ends the section
-        while out and out[-1].strip() == "":
-            blank = out.pop()
-            for k, v in pending.items():
-                out.append(f"{k} = {v}{eol}")
-            pending.clear()
-            out.append(blank)
-            return
-        for k, v in pending.items():
-            out.append(f"{k} = {v}{eol}")
-        pending.clear()
+    Kept as this module's spelling of the operation; the implementation is
+    :func:`unmscope.config.ini_text.write_keys`, shared with ``hw_config``
+    and ``um_per_volt``. This module used to have its own copy that decoded
+    the file as UTF-8 with ``errors="replace"``, which would have replaced
+    any non-UTF-8 byte LouisXIV wrote with U+FFFD.
+    """
+    _write_keys(path, section, values)
 
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
-            if in_section and pending:
-                flush_pending()
-            in_section = stripped[1:-1] == section
-            section_seen = section_seen or in_section
-            out.append(line)
-            continue
-        if in_section:
-            m = _KEY_RE.match(line)
-            if m and m.group("key").strip() in pending:
-                key = m.group("key").strip()
-                out.append(f"{m.group('key')}{m.group('sep')}{pending.pop(key)}{m.group('eol') or eol}")
-                continue
-        out.append(line)
-    if in_section and pending:
-        flush_pending()
-    if not section_seen:
-        if out and not out[-1].endswith(("\n", "\r")):
-            out[-1] += eol
-        if out and out[-1].strip() != "":
-            out.append(eol)
-        out.append(f"[{section}]{eol}")
-        for k, v in pending.items():
-            out.append(f"{k} = {v}{eol}")
-        out.append(eol)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes("".join(out).encode("utf-8"))
-
-
-# -- value formatting the LabVIEW way ------------------------------------------
 def _bool(s: str, default: bool) -> bool:
     s = s.strip().strip('"').lower()
     if s in ("true", "t", "1", "yes"):

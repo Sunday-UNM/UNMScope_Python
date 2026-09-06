@@ -50,6 +50,7 @@ from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from unmscope.config.ini_text import write_keys
 from unmscope.config.paths import LOUISXIV_SUPPORT_DIR
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -194,10 +195,7 @@ class MicronsToVolt:
         their ``Key = Value`` spacing; keys the section lacks are appended to
         it; a missing section is appended at the end of the file."""
         p = Path(path) if path is not None else ensure_unmscope_ini()
-        p.parent.mkdir(parents=True, exist_ok=True)
-        text = {k: format_ini_double(v) for k, v in self.values().items()}
-        raw = p.read_bytes() if p.exists() else b""
-        p.write_bytes(_rewrite_section(raw, INI_SECTION, text))
+        write_keys(p, INI_SECTION, {k: format_ini_double(v) for k, v in self.values().items()})
         return p
 
     # -- Calibration bridge ----------------------------------------------------
@@ -222,73 +220,3 @@ def load_calibration_from_unmscope_ini(path: Path | None = None) -> "Calibration
     from unmscope.config.calibration import load_calibration
     p = Path(path) if path is not None else ensure_unmscope_ini()
     return load_calibration(p)
-
-
-# -- surgical section writer -------------------------------------------------------
-_SECTION_RE = re.compile(rb"^\s*\[(?P<name>[^\]]*)\]\s*$")
-_KEY_RE = re.compile(rb"^(?P<key>[^=\r\n]*?)(?P<sep>\s*=\s*)(?P<val>.*?)(?P<trail>\s*)$")
-
-
-def _rewrite_section(raw: bytes, section: str, values: dict[str, str]) -> bytes:
-    """Return ``raw`` with ``values`` applied inside ``[section]`` only.
-    Line endings are whatever the file uses (CRLF for LouisXIV's file, kept
-    per line); untouched lines are copied verbatim."""
-    nl = b"\r\n" if b"\r\n" in raw or not raw else b"\n"
-    lines = raw.split(b"\n")
-    ends_with_newline = raw.endswith(b"\n")
-    if lines and lines[-1] == b"":
-        lines.pop()                      # trailing newline -> no phantom empty line
-    out: list[bytes] = []
-    pending = dict(values)               # keys still to write
-    in_section = False
-    last_key_line = -1                   # index in out of the section's last key line
-    section_seen = False
-
-    def flush_pending() -> None:
-        nonlocal last_key_line
-        if pending and 0 <= last_key_line < len(out) and not out[last_key_line].endswith(b"\n"):
-            out[last_key_line] += nl     # the file's last line had no newline: give it one
-        for k, v in pending.items():
-            line = k.encode("utf-8") + b" = " + v.encode("utf-8") + nl
-            out.insert(last_key_line + 1, line)
-            last_key_line += 1
-        pending.clear()
-
-    for i, line in enumerate(lines):
-        body = line[:-1] if line.endswith(b"\r") else line
-        eol = b"\r\n" if line.endswith(b"\r") else b"\n"
-        if i == len(lines) - 1 and not ends_with_newline:
-            eol = b""                    # keep a file without a final newline as it was
-        m = _SECTION_RE.match(body)
-        if m:
-            if in_section:
-                flush_pending()
-            in_section = m.group("name").decode("utf-8", "replace") == section
-            if in_section:
-                section_seen = True
-                last_key_line = len(out)
-            out.append(body + eol)
-            continue
-        if in_section:
-            km = _KEY_RE.match(body)
-            if km and km.group("key").strip():
-                key = km.group("key").strip().decode("utf-8", "replace")
-                if key in pending:
-                    body = (km.group("key") + km.group("sep") + pending.pop(key).encode("utf-8")
-                            + km.group("trail"))
-                last_key_line = len(out)
-        out.append(body + eol)
-    if in_section:
-        flush_pending()
-    if not section_seen:
-        if out and not out[-1].endswith(b"\n"):
-            out[-1] += nl
-        if out and out[-1].strip():
-            out.append(nl)               # LouisXIV's file separates sections with a blank line
-        out.append(b"[" + section.encode("utf-8") + b"]" + nl)
-        last_key_line = len(out) - 1
-        flush_pending()
-    result = b"".join(out)
-    if raw and not ends_with_newline and result.endswith(nl):
-        result = result[:-len(nl)]       # keep the file's no-final-newline convention
-    return result

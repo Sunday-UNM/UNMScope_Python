@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Iterable
 
 from unmscope.config.calibration import DEFAULT_INI as LOUISXIV_INI
+from unmscope.config.ini_text import IniText, read_text, write_text
 
 #: The UNMScope-owned copy of SPIMProject.ini (LouisXIV's stays read-only).
 USER_INI = Path.home() / ".unmscope" / "SPIMProject.ini"
@@ -292,7 +293,7 @@ def load_hw_config(path: str | Path | None = None) -> HwConfig:
     """Read the owned copy (created from LouisXIV's file on first use)."""
     p = user_ini_path(path)
     cp = _parser()
-    cp.read_string(_read(p))
+    cp.read_string(read_text(p))
     cfg = HwConfig()
     for section, cluster in cfg.sections():
         _fill(cluster, cp, section)
@@ -300,83 +301,6 @@ def load_hw_config(path: str | Path | None = None) -> HwConfig:
 
 
 # -- writing (line-preserving) -----------------------------------------------------
-class IniText:
-    """A byte-faithful ini editor: only the value of a key that is set is
-    touched (its 'Key = ' prefix, trailing whitespace and line ending stay);
-    missing keys are appended to their section, missing sections to the
-    file. Everything else round-trips untouched."""
-
-    def __init__(self, text: str):
-        self.nl = "\r\n" if "\r\n" in text else "\n"
-        self.lines = text.splitlines(keepends=True)
-
-    def text(self) -> str:
-        return "".join(self.lines)
-
-    def _section_span(self, section: str) -> tuple[int, int] | None:
-        start = None
-        for i, line in enumerate(self.lines):
-            s = line.strip()
-            if s.startswith("[") and s.endswith("]"):
-                if start is not None:
-                    return start, i
-                if s[1:-1].strip() == section:
-                    start = i
-        return None if start is None else (start, len(self.lines))
-
-    @staticmethod
-    def _split(line: str) -> tuple[str, str, str, str] | None:
-        """'Key = Value   \\r\\n' -> (prefix 'Key = ', value, trailing ws, eol)."""
-        body = line.rstrip("\r\n")
-        eol = line[len(body):]
-        if "=" not in body or body.lstrip().startswith("["):
-            return None     # '#' is NOT a comment here: "# Pts (Default) = 5" is a key
-        k, _, rest = body.partition("=")
-        stripped = rest.lstrip()
-        prefix = k + "=" + rest[:len(rest) - len(stripped)]
-        value = stripped.rstrip()
-        trailing = stripped[len(value):]
-        return prefix, value, trailing, eol
-
-    def get(self, section: str, key: str) -> str | None:
-        span = self._section_span(section)
-        if span is None:
-            return None
-        for i in range(span[0] + 1, span[1]):
-            parts = self._split(self.lines[i])
-            if parts and parts[0].split("=")[0].strip() == key:
-                return parts[1]
-        return None
-
-    def set(self, section: str, key: str, value: str) -> None:
-        span = self._section_span(section)
-        if span is None:
-            self._ensure_final_newline()
-            if self.lines and self.lines[-1].strip():
-                self.lines.append(self.nl)
-            self.lines.append(f"[{section}]{self.nl}")
-            self.lines.append(f"{key} = {value}{self.nl}")
-            return
-        start, end = span
-        for i in range(start + 1, end):
-            parts = self._split(self.lines[i])
-            if parts and parts[0].split("=")[0].strip() == key:
-                prefix, _old, trailing, eol = parts
-                self.lines[i] = f"{prefix}{value}{trailing}{eol}"
-                return
-        # key missing: insert after the section's last non-blank line
-        insert = end
-        while insert - 1 > start and not self.lines[insert - 1].strip():
-            insert -= 1
-        if insert == len(self.lines):
-            self._ensure_final_newline()
-        self.lines.insert(insert, f"{key} = {value}{self.nl}")
-
-    def _ensure_final_newline(self) -> None:
-        if self.lines and not self.lines[-1].endswith(("\n", "\r")):
-            self.lines[-1] += self.nl
-
-
 def _all_keys(cfg: HwConfig, on_disk: HwConfig) -> Iterable[tuple[str, str, str, object, object]]:
     """(section, key, kind, value in cfg, value in the file) for every owned key."""
     for (section, new), (_, old) in zip(cfg.sections(), on_disk.sections()):
@@ -388,7 +312,7 @@ def save_hw_config(cfg: HwConfig, path: str | Path | None = None) -> Path:
     """Write ``cfg`` into the owned copy, changing only the keys that differ
     from the file (and adding the ones it lacks). Returns the path."""
     p = user_ini_path(path)
-    raw = _read(p)
+    raw = read_text(p)
     ini = IniText(raw)
     on_disk = load_hw_config(p)
     for section, key, kind, new, old in _all_keys(cfg, on_disk):
@@ -396,14 +320,8 @@ def save_hw_config(cfg: HwConfig, path: str | Path | None = None) -> Path:
             ini.set(section, key, format_value(new, kind))
     out = ini.text()
     if out != raw:
-        with open(p, "w", encoding="latin-1", newline="") as fh:   # latin-1: bytes in == bytes out; CRLF as-is
-            fh.write(out)
+        write_text(p, out)
     return p
-
-
-def _read(p: Path) -> str:
-    with open(p, encoding="latin-1", newline="") as fh:   # latin-1 round-trips every byte; no newline translation
-        return fh.read()
 
 
 # -- the owned copy ------------------------------------------------------------------

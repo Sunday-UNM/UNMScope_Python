@@ -621,8 +621,19 @@ below is being implemented until the user picks.
 13. The bench serial protocol of the MP-285 (fake transport only so far).
 
 **Code hygiene**
-14. Three ini-copy writers coexist (config/spim_ini.py, hw_config.py,
-    um_per_volt.py) on the same file -- unify behind one writer.
+14. **DONE 2026-09-05** The three ini writers are now one,
+    `config/ini_text.py` (`IniText` + `write_keys`), used by spim_ini,
+    hw_config and um_per_volt alike. They had disagreed: one worked on bytes,
+    one on latin-1 text, and spim_ini's decoded the file as UTF-8 with
+    `errors="replace"`, which would have replaced any non-UTF-8 byte with
+    U+FFFD -- latent only because the rig's ini is pure ASCII today.
+    Verified against the real SPIMProject.ini and locked in by
+    `tests/test_ini_text.py`: a save that changes no value leaves the file
+    byte-identical, changing one key alters exactly one line, and key
+    spacing, mixed line endings and the file's missing final newline all
+    survive. Also MEASURED while there: LouisXIV's ini has no blank line
+    between sections and no final newline (we still put a blank line before
+    a section we append, for readability; it is inert).
 15. **DONE** Agents' renders copied into VI_Diagrams (`GUI/HW Configuration GUI/hidden_and_pages`,
     `GUI/Microns per Volt Settings GUI/hidden_and_pages`, `Motion/.../Sample Stage Control GUI/hidden_and_pages_stage`).
 16. **DONE** Worktrees and tool/* branches pruned after the merges.

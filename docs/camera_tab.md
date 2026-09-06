@@ -128,24 +128,3 @@ Deliberate differences from the live panel: the page scrolls (our Hardware
 Connection bar above the tabs costs 119 px of page height), and the "Sync
 readout" checkbox sits in the Camera Settings box's empty band (LouisXIV keeps
 it in the ini).
-
-## Camera Settings box height (2026-09-06)
-
-Deliberate divergence from the measured layout, on the user's report that the
-tab needed a scrollbar with obvious empty space in it.
-
-LouisXIV's Camera Settings box is 366 px tall because it holds SubROIs /
-Full ROI, Dual View and Split pix # between Sync readout and Sensor Mode.
-All of those were removed in the 2026-09-05 cleanup, but the box kept its
-measured height, leaving ~230 px of dead space -- a gap between Sync readout
-and Sensor Mode, and more below Sensor Mode. That pushed the ROI controls
-past the bottom of the tab, so a panel with room to spare scrolled.
-
-The box is now 132 px, Sensor Mode moved up to y 266 (the box's own 34 px
-row pitch: Exposure 198, Sync readout 232, Sensor Mode 266), and everything
-from the ROI group down shifted up by 234 px. The tab's minimum height drops
-from 775 to 541, which fits without a scrollbar.
-
-Every other rectangle is unchanged, so the widths, the right-hand Actual
-column and all the inner boxes still match the measurements. Only the empty
-vertical space came out.

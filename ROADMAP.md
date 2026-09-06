@@ -649,9 +649,18 @@ below is being implemented until the user picks.
     OME-XML TIFs and Shift Vslit calibration. Kept (11): um per V
     calibration, View Z Lookup Table, Sample Stage Control, X&Z Galvo offsets per AOTF ch, Camera
     Debug Panel, FPGA Scope, FPGA Monitor, Reset HW, X Galvo Z Corrections, HW
-    Config, Imagine Optics). Re-measure the grid rows after the removal
-    (keep LouisXIV's order and button size; close the gaps). Keep
-    `load_stack_from_file` only if the Calc path (item 18) still wants it.
+    Config, Imagine Optics).
+    **Grid re-measure: nothing to do, checked 2026-09-05.** The layout is
+    index-driven (`COL_X[i % 2]`, `ROW_Y0 + (i // 2) * ROW_PITCH`), so
+    dropping tools closed the gaps by itself: the 11 buttons sit in reading
+    order over 6 rows at a uniform 72 px pitch, 16 px apart, still at
+    LouisXIV's measured button size of 152x56.
+    **`load_stack_from_file` is now unreferenced** -- item 18 settled Calc as
+    "always enabled, project whatever is in memory", so it no longer needs
+    it, and "View TIF stack" was the only caller. Deliberately KEPT rather
+    than deleted as dead code: it is the working, tested body of the View TIF
+    stack feature, and removing it would quietly foreclose re-adding that
+    button. Delete it if the user confirms the feature is gone for good.
 
 ## Code cleanup pass (2026-09-05, adversarially-verified audit)
 

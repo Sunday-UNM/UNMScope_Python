@@ -33,13 +33,74 @@ before the exposure push (stopping is what loses the exposure, see
   of even sizes, then coerced); [1] "# of image pixels" = the Adjust-ROI VI.
   All then fire [73] "ROI": Value Change (coerce, update # of image pixels,
   "Set Camera" to the engine). `roi.py` now implements exactly these.
-- **DCAM "SENSOR MODE" values** for the three mode names
-  (`OrcaFlash4Camera.SENSOR_MODE_VALUES`): check with
-  `getAllowedPropertyValues("SENSOR MODE")` on the real camera.
-- **Subarray units** assumed 4 px for position and size (Orca Flash 4.0); the
-  driver's `hposunit/vposunit/hunit/vunit` should be read and used instead.
-- The **sensor-mode enum's full item list**: only the three names above were
-  recoverable.
+- ~~DCAM "SENSOR MODE" values~~, ~~the sensor-mode enum's full item list~~ and
+  ~~the subarray units~~ -- **all resolved 2026-09-05**, see below.
+
+## Sensor mode and subarray units -- resolved 2026-09-05
+
+Two sources, and they disagree about what is possible.
+
+**What LouisXIV does.** From the hidden case frames of `DCAM - Set Sensor
+Mode.vi` and `DCAM - Get Sensor Mode.vi` (exported 2026-09-05; the visible
+frame only ever showed "Split View"). The two VIs agree in both directions,
+so the mapping is certain. Note four names set the DCAM `SENSOR MODE`
+property and two set `READOUT DIRECTION`, leaving the sensor mode alone:
+
+| LouisXIV name | DCAM property | value | DCAM SDK name for that number |
+|---|---|---|---|
+| Normal Scan | SENSOR MODE | 1 | AREA |
+| Light Sheet | SENSOR MODE | 12 | PROGRESSIVE |
+| Split View | SENSOR MODE | 14 | DUALLIGHTSHEET (**not** SPLITVIEW, which is 9) |
+| Dual LS | SENSOR MODE | 16 | -- |
+| Rolling Top | READOUT DIRECTION | 1 | FORWARD |
+| Rolling Bottom | READOUT DIRECTION | 2 | BACKWARD |
+
+So the enum has six items, not the three we had recovered, and LouisXIV's
+name for 14 is not the SDK's.
+
+**What this camera will accept.** Measured by `spikes/34_*.py` and
+`spikes/35_*.py` on S/N 102668 (C11440-42U32, Hamamatsu adapter 2.2.1.71):
+
+- `SENSOR MODE` allows exactly `AREA` and `SPLIT VIEW`. Writing
+  `PROGRESSIVE` is refused. **LouisXIV's Light Sheet (12) and Dual LS (16)
+  have no route through this adapter at all**, so `OrcaFlash4Camera` lists
+  them in `UNSUPPORTED_SENSOR_MODES` and raises a `CameraError` naming the
+  reason rather than writing something wrong.
+- `READOUT DIRECTION` is conditional: `DIVERGE` only while the sensor mode
+  is `AREA`, but `FORWARD` / `BACKWARD` once it is `SPLIT VIEW`. So Rolling
+  Top and Rolling Bottom are reachable only from Split View, which the error
+  message says.
+- `ScanMode` 1 vs 2 changes neither `ReadoutTime` (0.0333 s either way) nor
+  the allowed values.
+- **Open:** which DCAM number the adapter's `"SPLIT VIEW"` string writes. It
+  is probably 9, where LouisXIV writes 14. Not readable from the adapter.
+
+**Subarray units: 4 for position and 4 for size, confirmed.** ROIs requested
+at awkward offsets, read back:
+
+| requested (hpos, vpos, hsize, vsize) | driver returned |
+|---|---|
+| 1, 1, 2046, 2046 | 0, 0, 2044, 2044 |
+| 2, 2, 1022, 1022 | 0, 0, 1020, 1020 |
+| 3, 3, 510, 510 | 0, 0, 508, 508 |
+| 5, 5, 254, 254 | 4, 4, 252, 252 |
+| 7, 7, 130, 130 | 4, 4, 128, 128 |
+| 9, 9, 66, 66 | 8, 8, 64, 64 |
+| 100, 200, 301, 401 | 100, 200, 300, 400 |
+| 1023, 1023, 1025, 1025 | 1020, 1020, 1024, 1024 |
+
+Positions snap **down** to a multiple of 4, sizes round **down** to a
+multiple of 4 -- exactly what `coerce_roi` already did.
+
+One difference worth knowing: the driver coerces position and size
+*independently*, while `coerce_roi` coerces a *rectangle* the way LouisXIV's
+`DCAM - Coerce ROI.vi` does, holding Right/Bottom while Left/Top snap down.
+Requesting (2, 2, 1022, 1022) therefore gives (0, 0, **1024**, 1024) from us
+and (0, 0, **1020**, 1020) from the driver. Both are valid; ours keeps the
+edge the user dragged where they put it. It does not cause a mismatch,
+because our output is always 4-aligned, in bounds and idempotent, so the
+driver takes it unchanged -- checked over 20,000 random ROIs and locked in
+by `tests/test_roi.py`.
 
 ## Removed (user's cleanup call, 2026-09-05)
 

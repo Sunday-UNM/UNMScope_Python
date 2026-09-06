@@ -2,7 +2,7 @@
 ROI / binning / sensor-mode behaviour on the simulated camera."""
 import pytest
 
-from unmscope.hardware.camera import SimulatedCamera
+from unmscope.hardware.camera import Camera, OrcaFlash4Camera, SimulatedCamera
 from unmscope.hardware.roi import (
     Roi, adjust_roi_for_pixels, binning_from_xy, center_roi, center_roi_at, centered_roi,
     coerce_roi, fov_um, full_roi, pixels_for_um, roi_from_subarray, subarray_from_roi,
@@ -99,3 +99,63 @@ def test_simulated_camera_sensor_mode():
     assert cam.set_sensor_mode("Split View") == "Split View"
     with pytest.raises(ValueError):
         cam.set_sensor_mode("Banana")
+
+
+# -- what the real camera and the LabVIEW source actually say ----------------
+# Both measured / read on 2026-09-05, ROADMAP item 10. These lock in facts
+# that were guesses until then; a change here means the hardware or the
+# LouisXIV source disagrees with us, not that the test needs relaxing.
+
+def test_louisxiv_sensor_mode_enum_is_the_six_cases_in_the_set_vi():
+    """DCAM - Set Sensor Mode.vi / DCAM - Get Sensor Mode.vi hidden frames."""
+    assert Camera.SENSOR_MODES == ("Normal Scan", "Light Sheet", "Split View",
+                                   "Dual LS", "Rolling Top", "Rolling Bottom")
+
+
+def test_sensor_modes_split_between_two_dcam_properties():
+    """Four names set SENSOR MODE; Rolling Top/Bottom set READOUT DIRECTION."""
+    props = OrcaFlash4Camera.SENSOR_MODE_PROPERTIES
+    assert props["Normal Scan"] == ("SENSOR MODE", "AREA")
+    assert props["Split View"] == ("SENSOR MODE", "SPLIT VIEW")
+    assert props["Rolling Top"] == ("READOUT DIRECTION", "FORWARD")
+    assert props["Rolling Bottom"] == ("READOUT DIRECTION", "BACKWARD")
+    # Measured: this camera + adapter refuses PROGRESSIVE, so LouisXIV's
+    # Light Sheet (12) and Dual LS (16) have no route through pymmcore.
+    assert set(OrcaFlash4Camera.UNSUPPORTED_SENSOR_MODES) == {"Light Sheet", "Dual LS"}
+    assert set(props) | set(OrcaFlash4Camera.UNSUPPORTED_SENSOR_MODES) == set(Camera.SENSOR_MODES)
+
+
+def test_coerced_rois_are_fixed_points_of_the_real_driver():
+    """coerce_roi must hand the driver something it will not change again.
+
+    MEASURED 2026-09-05 (spike 34): this camera snaps subarray positions
+    DOWN to a multiple of 4 and rounds sizes DOWN to a multiple of 4. So the
+    guarantee we need is that our output is already 4-aligned, in bounds,
+    and unchanged by coercing a second time.
+
+    Note our coercion is NOT the driver's. coerce_roi coerces a rectangle
+    the way LouisXIV's DCAM - Coerce ROI.vi does, holding Right/Bottom while
+    Left/Top snap down, so the width can grow by one unit; the driver
+    coerces position and size independently and keeps the requested size.
+    Requesting (2, 2, 1022, 1022) gives (0, 0, 1024, 1024) here and
+    (0, 0, 1020, 1020) from the driver. Both are valid; ours is the one that
+    keeps the edge the user dragged where they put it.
+    """
+    requested = [(1, 1, 2046, 2046), (2, 2, 1022, 1022), (3, 3, 510, 510),
+                 (5, 5, 254, 254), (7, 7, 130, 130), (9, 9, 66, 66),
+                 (100, 200, 301, 401), (1023, 1023, 1025, 1025)]
+    for x, y, w, h in requested:
+        got = subarray_from_roi(coerce_roi(roi_from_subarray(x, y, w, h), 2048, 2048))
+        assert all(v % 4 == 0 for v in got), f"({x},{y},{w},{h}) -> {got} not 4-aligned"
+        assert got[0] + got[2] <= 2048 and got[1] + got[3] <= 2048
+        again = subarray_from_roi(coerce_roi(roi_from_subarray(*got), 2048, 2048))
+        assert again == got, f"coercing {got} again moved it to {again}"
+
+
+def test_the_two_cases_where_we_agree_with_the_driver_exactly():
+    """Where Left/Top are already on the unit, ours and the driver's agree."""
+    for req, driver in [((5, 5, 254, 254), (4, 4, 252, 252)),
+                        ((9, 9, 66, 66), (8, 8, 64, 64)),
+                        ((100, 200, 301, 401), (100, 200, 300, 400)),
+                        ((1, 1, 2046, 2046), (0, 0, 2044, 2044))]:
+        assert subarray_from_roi(coerce_roi(roi_from_subarray(*req), 2048, 2048)) == driver

@@ -595,7 +595,17 @@ below is being implemented until the user picks.
    cursors, 29 ch at 200 kS/s) -- revisit if wanted.
 
 **Verification still owed (hardware / real data)**
-10. DCAM "SENSOR MODE" value strings and the 4-px subarray units on the Orca.
+10. **DONE 2026-09-05** DCAM "SENSOR MODE" values and the subarray units, on
+    S/N 102668. Hidden frames of `DCAM - Set/Get Sensor Mode.vi` give the real
+    six-item enum and the numbers LouisXIV writes (Normal Scan 1, Light Sheet
+    12, Split View 14, Dual LS 16 on SENSOR MODE; Rolling Top 1, Rolling Bottom
+    2 on READOUT DIRECTION). Measured on the camera (`spikes/34`, `spikes/35`):
+    the adapter accepts only AREA and SPLIT VIEW, so **Light Sheet and Dual LS
+    are unreachable through pymmcore** and now raise a `CameraError` saying so;
+    READOUT DIRECTION is DIVERGE-only in AREA and FORWARD/BACKWARD in SPLIT
+    VIEW. Subarray units are 4 and 4, confirmed, matching `coerce_roi`. Still
+    open: which DCAM number the adapter's "SPLIT VIEW" writes (probably 9,
+    where LouisXIV writes 14). See `docs/camera_tab.md`.
 11. Deskew shift direction on a real slanted stack (point feature must collapse).
 12. Z piezo (AO2) / Wvfrm2 DMA path at a pin (0/1/2.5/5 V staircase).
 13. The bench serial protocol of the MP-285 (fake transport only so far).

@@ -184,13 +184,27 @@ class Camera(abc.ABC):
         return False
 
     # -- ROI / binning / sensor mode: the LouisXIV Camera tab -----------------
-    #: LouisXIV's DCAM sensor modes (DCAM - Sensor Mode enum). "Normal Scan"
-    #: is the panel default and "Light Sheet" the other case SPIM MAIN's
-    #: [18] "Cam settings" handler switches on (it also sets X wave =
-    #: Sawtooth, duty 0.05 for Light Sheet -- a waveform-config knob, not
-    #: ported); "Split View" and "Rolling Bottom" are the cases seen in DCAM -
-    #: Set Sensor Mode.vi. The typedef's full item list was not readable.
-    SENSOR_MODES = ("Normal Scan", "Light Sheet", "Split View", "Rolling Bottom")
+    #: LouisXIV's DCAM sensor modes (DCAM - Sensor Mode enum), READ OFF the
+    #: case frames of `DCAM - Set Sensor Mode.vi` and `DCAM - Get Sensor
+    #: Mode.vi` (hidden frames exported 2026-09-05), which agree in both
+    #: directions. Four of the six set the DCAM "SENSOR MODE" property, two
+    #: set "READOUT DIRECTION" and leave the sensor mode alone:
+    #:
+    #:     Normal Scan   SENSOR MODE       = 1    (the Get VI's default case)
+    #:     Light Sheet   SENSOR MODE       = 12   (DCAM PROGRESSIVE)
+    #:     Split View    SENSOR MODE       = 14   (DCAM DUALLIGHTSHEET -- note
+    #:                                             LouisXIV's name for 14 is
+    #:                                             not the SDK's, where 9 is
+    #:                                             SPLITVIEW)
+    #:     Dual LS       SENSOR MODE       = 16
+    #:     Rolling Top   READOUT DIRECTION = 1    (FORWARD)
+    #:     Rolling Bot.  READOUT DIRECTION = 2    (BACKWARD)
+    #:
+    #: SPIM MAIN's [18] "Cam settings" handler additionally sets X wave =
+    #: Sawtooth, duty 0.05 for Light Sheet (a waveform-config knob, not
+    #: ported). See OrcaFlash4Camera for which of these this camera accepts.
+    SENSOR_MODES = ("Normal Scan", "Light Sheet", "Split View", "Dual LS",
+                    "Rolling Top", "Rolling Bottom")
     SENSOR_WIDTH = 2048
     SENSOR_HEIGHT = 2048
 
@@ -523,12 +537,31 @@ class OrcaFlash4Camera(Camera):
             raise CameraError("Camera not connected")
         return self._mmc.getExposure()
 
-    #: DCAM "SENSOR MODE" values for LouisXIV's mode names. UNVERIFIED on
-    #: hardware: the Orca Flash 4.0 reports AREA (normal) and PROGRESSIVE
-    #: (rolling / light-sheet readout); split view is a separate DCAM
-    #: feature on some firmware. Check with getAllowedPropertyValues.
-    SENSOR_MODE_VALUES = {"Normal Scan": "AREA", "Light Sheet": "PROGRESSIVE",
-                          "Rolling Bottom": "PROGRESSIVE", "Split View": "SPLIT VIEW"}
+    #: How LouisXIV's sensor-mode names reach this camera, as
+    #: (property, value). MEASURED 2026-09-05 on S/N 102668 (C11440-42U32,
+    #: Hamamatsu adapter 2.2.1.71) by spikes 34 and 35: the adapter accepts
+    #: only AREA and SPLIT VIEW for "SENSOR MODE", and "READOUT DIRECTION"
+    #: is DIVERGE-only in AREA but offers FORWARD/BACKWARD once the camera
+    #: is in SPLIT VIEW. Writing "PROGRESSIVE" is refused outright, so
+    #: LouisXIV's Light Sheet (12) and Dual LS (16) are NOT reachable
+    #: through this adapter -- see UNSUPPORTED_SENSOR_MODES.
+    #:
+    #: CAVEAT: the adapter's "SPLIT VIEW" string maps to a DCAM number we
+    #: cannot read from here. LouisXIV writes 14 (which the SDK calls
+    #: DUALLIGHTSHEET); the adapter may well be writing 9 (SPLITVIEW).
+    SENSOR_MODE_PROPERTIES = {
+        "Normal Scan": ("SENSOR MODE", "AREA"),
+        "Split View": ("SENSOR MODE", "SPLIT VIEW"),
+        "Rolling Top": ("READOUT DIRECTION", "FORWARD"),
+        "Rolling Bottom": ("READOUT DIRECTION", "BACKWARD"),
+    }
+
+    #: Modes LouisXIV offers that this camera refuses, with why.
+    UNSUPPORTED_SENSOR_MODES = {
+        "Light Sheet": 'the adapter refuses "PROGRESSIVE"; SENSOR MODE offers '
+                       "only AREA and SPLIT VIEW on this camera",
+        "Dual LS": "no DCAM value for 16 is offered by this camera",
+    }
 
     def _apply_roi(self, roi: Roi) -> None:
         # MMCore's setROI is 0-based (x, y, w, h) in the current binning; the
@@ -549,7 +582,22 @@ class OrcaFlash4Camera(Camera):
         self._mmc.setProperty(self.DEVICE_LABEL, "Binning", f"{binning}x{binning}")
 
     def _apply_sensor_mode(self, mode: str) -> None:
-        self._mmc.setProperty(self.DEVICE_LABEL, "SENSOR MODE", self.SENSOR_MODE_VALUES[mode])
+        why = self.UNSUPPORTED_SENSOR_MODES.get(mode)
+        if why:
+            raise CameraError(f"Sensor mode {mode!r} is not available on this camera: {why}")
+        prop, value = self.SENSOR_MODE_PROPERTIES[mode]
+        try:
+            self._mmc.setProperty(self.DEVICE_LABEL, prop, value)
+        except Exception as e:
+            # READOUT DIRECTION is DIVERGE-only while SENSOR MODE is AREA, so
+            # Rolling Top / Bottom are reachable only from Split View. Say so
+            # rather than letting the adapter's bare refusal surface.
+            extra = ""
+            if prop == "READOUT DIRECTION":
+                current = self._mmc.getProperty(self.DEVICE_LABEL, "SENSOR MODE")
+                extra = (f" (SENSOR MODE is {current!r}; this camera only offers "
+                         f"FORWARD/BACKWARD in 'SPLIT VIEW')")
+            raise CameraError(f"Could not set {prop} = {value!r} for mode {mode!r}: {e}{extra}") from e
 
     def repair_exposure_if_lost(self, tolerance: float = 0.01) -> bool:
         """Work around a Micro-Manager Hamamatsu adapter quirk.

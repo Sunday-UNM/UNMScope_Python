@@ -39,8 +39,14 @@ import math
 from dataclasses import dataclass
 
 #: Orca Flash 4.0 DCAM subarray steps (hposunit/vposunit and hunit/vunit
-#: from the driver's subarray info). The real backend reads the driver's
-#: values when it can; these are the documented defaults for this camera.
+#: from the driver's subarray info).
+#:
+#: MEASURED 2026-09-05 on S/N 102668 (spike 34): ROIs were requested at
+#: awkward offsets and sizes and read back to see what the driver snapped
+#: them to. Positions snap DOWN to a multiple of 4 (1 and 3 -> 0, 5 and 7
+#: -> 4, 9 -> 8, 1023 -> 1020) and sizes round DOWN to a multiple of 4
+#: (2046 -> 2044, 301 -> 300, 1025 -> 1024) -- exactly what coerce_roi
+#: does. Both units are 4, confirmed, not assumed.
 DEFAULT_POSITION_UNIT = 4
 DEFAULT_SIZE_UNIT = 4
 

@@ -354,3 +354,17 @@ can be attributed instead of guessed at.
 during a full-frame stack (Calc, a native file dialog) can overflow MMCore's
 circular buffer (~31 frames at full frame) and lose frames silently. Not
 addressed yet.
+
+## Open: is our cycle time computed the way LouisXIV computes it?
+
+The fix above (period = cycle time; default exposure x 1.27) is verified on
+the hardware -- it cures the halved sub-array count. Whether it is LouisXIV's
+*rule* is a separate question, and a source read on 2026-09-06 suggests it is
+not: LouisXIV appears to use `max(exposure, camera_cycle - 500 ns)` from the
+camera's own frame period, with no flyback fraction anywhere, and to write
+Cam exp FROM the camera rather than the other way round.
+
+That read is **unverified** -- its adversarial pass died on a usage limit --
+so nothing was changed on it. It is written up in full, with frame citations
+and the tension it does not yet explain, in `docs/louisxiv_cycle_time_semantics.md`.
+Re-run the verify pass before touching the widgets.

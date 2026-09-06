@@ -168,3 +168,10 @@ computed value, exposure x 1.27 (`DEFAULT_FLYBACK_FRACTION`, the user's
 measured 27 ms on 100 ms). Either way the camera's own minimum period is a
 floor. See `docs/known_issues.md` "Z stack came up short" for why this is the
 number that times the acquisition and the exposure is not.
+
+**Caveat on the above (2026-09-06).** An unverified source read suggests
+LouisXIV derives Cycle time from the camera's own frame period rather than
+from a flyback fraction, and writes Cam exp from the camera rather than
+letting it set the exposure. See `docs/louisxiv_cycle_time_semantics.md`.
+The behaviour described above is what the port does today and is verified on
+the hardware; it is not yet confirmed to be LouisXIV's rule.

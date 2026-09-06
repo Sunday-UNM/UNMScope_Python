@@ -125,6 +125,16 @@ over NI-RIO rather than reimplementing the FPGA logic.
 
 ## Phase 1 — Core skeleton (no hardware)
 
+**Superseded in part, 2026-09-05.** This was the plan on day one. What
+actually got built follows the hardware-abstraction and testing bullets
+closely, and deliberately did not follow the other three: there is no
+asyncio task/queue layer (Qt's own signals and a worker thread carry the
+GUI/acquisition split), no explicit state-machine framework, and config is
+plain dataclasses over `configparser` rather than pydantic. The empty
+`messaging/` and `state_machine/` packages left over from this plan were
+deleted; nothing had ever imported them. Kept below as the record of what
+was originally intended.
+
 Port the *architecture*, not any device logic yet, so every later phase
 plugs into a working, tested skeleton instead of bolting concurrency and
 config handling on after the fact.

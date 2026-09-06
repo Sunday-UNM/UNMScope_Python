@@ -38,6 +38,8 @@ from typing import Callable
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QFrame, QLabel, QLineEdit, QWidget
 
+from unmscope.gui.widgets import set_bold
+
 BG = "#dddddd"            # measured (221,221,221)
 BEVEL = "#aaaaaa"         # measured (170,170,170)
 CELL_INTERIOR = "#dddddd"
@@ -92,7 +94,7 @@ class CameraDebugPanel(QWidget):
         lab.setGeometry(*rect)
         lab.setAlignment(align)
         if bold:
-            f = lab.font(); f.setBold(True); lab.setFont(f)
+            set_bold(lab)
         if color:
             lab.setStyleSheet(f"color: {color};")
         return lab

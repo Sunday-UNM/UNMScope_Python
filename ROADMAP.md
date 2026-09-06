@@ -703,11 +703,25 @@ the um/V calibration docs, fpga_trigger.py's tail).
 
 **Deferred (in the audit's report, not applied -- lower value or higher
 risk for the size of the change):**
-- A shared `gui/widgets.py` (`make_label`/`make_button`/`make_spin`/
-  `make_readonly`/`bring_to_front`/`page_rect`) to de-duplicate the six
-  GUI panel modules' near-identical constructor helpers -- well specified
-  in the audit but touches 5-6 files and dozens of call sites; do as its
-  own reviewed pass, not mixed into other work.
+- ~~A shared `gui/widgets.py`~~ -- **done 2026-09-05, but deliberately
+  narrower than the audit proposed.** Reading the six modules' helpers side
+  by side, the audit's premise does not hold: the `_label`s are not
+  near-identical. calibration_tab paints a transparent background,
+  camera_debug_panel sets a colour but no background, sample_stage_dialog
+  sets both, hw_config_dialog word-wraps and applies its own rect transform
+  plus a vertical nudge, waveform_config_panel right-aligns. One helper for
+  all six would take five keyword flags and read worse than the six
+  six-line functions. So `gui/widgets.py` holds only what is genuinely
+  identical: `set_bold` (the three-line Qt font dance, written out 8x),
+  `rect_mapper` (the measured-rect-to-page-rect one-liner, 4 copies
+  differing only in origin constants -- waveform_config_panel's `_r` ADDS a
+  frame offset and is a different transform, left alone), and
+  `bring_to_front` (show/raise/activateWindow, 4 copies). 165 call sites
+  were NOT touched: each module keeps its own `_label`/`_button` spelling,
+  and only the bodies collapse. Verified layout-neutral by fingerprinting
+  every child widget's class and geometry in four panels before and after
+  -- identical. Named `set_bold`, not `bold`, because every `_label` has a
+  `bold=` keyword that would shadow it.
 - Merging `spim_ini.RotationStageSettings` into `hw_config.py`'s copy of
   the same `[Rotation Stage (PI U651) Settings]` section (two writers of
   one section today) -- touches a test's code, not just its bytes.

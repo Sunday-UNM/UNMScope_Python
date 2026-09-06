@@ -53,6 +53,7 @@ from PySide6.QtCore import QPoint
 from unmscope.config.um_per_volt import (
     MicronsToVolt, ensure_unmscope_ini, load_calibration_from_unmscope_ini,
 )
+from unmscope.gui.widgets import rect_mapper
 
 #: Page origin in the render (ASSUMED, see module docstring).
 OX, OY = 0, 320
@@ -82,8 +83,8 @@ MIN_WIDTH, MIN_HEIGHT = INDICATOR_LABEL[0] + INDICATOR_LABEL[2] + 1 - OX, SAVE_B
 _FLOAT_RE = QRegularExpression(r"^[+-]?((\d+\.?\d*|\.\d+)([eE][+-]?\d+)?|[Nn][Aa][Nn]|[Ii][Nn][Ff])$")
 
 
-def _rect(x: int, y: int, w: int, h: int) -> tuple[int, int, int, int]:
-    return (x - OX, y - OY, w, h)
+#: Measured full-capture rect -> page rect.
+_rect = rect_mapper(OX, OY)
 
 
 def format_value(v: float) -> str:

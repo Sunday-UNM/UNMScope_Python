@@ -30,6 +30,7 @@ from unmscope.config.waveform_config import (
     AOTF_CYCLE, AOTF_SWEEP_MODE, DUAL_VIEW, ONE_EXP_PER, WAIT_FOR_Z_SETTLE, WAVEFORM_TYPES, X_WAVE,
     Z_MOTION, Z_WAVE, AxisSettings, WaveformConfig,
 )
+from unmscope.gui.widgets import set_bold
 
 CLUSTER_BG = "#cccccc"
 SUB_BG = "#aaaaaa"
@@ -64,7 +65,7 @@ class WaveformConfigPanel(QWidget):
         lab.setGeometry(*rect)
         lab.setAlignment((Qt.AlignRight if right else Qt.AlignLeft) | Qt.AlignVCenter)
         if bold:
-            f = lab.font(); f.setBold(True); lab.setFont(f)
+            set_bold(lab)
         return lab
 
     def _rlabel(self, text, field_rect, width=100):

@@ -56,6 +56,7 @@ from unmscope.config.hw_config import (
     Z_UM_PX_SOURCES, HwConfig, copy_config, format_value, labview_path_to_windows,
     load_hw_config, save_hw_config, user_ini_path, windows_path_to_labview,
 )
+from unmscope.gui.widgets import bring_to_front, rect_mapper
 
 WINDOW_TITLE = "HW Configuration GUI"      # ASSUMED: the VI's name (no TITL resource was read)
 DIALOG_SIZE = (486, 490)                   # tab control 0..485 x 0..440, buttons end at y 479 (+10 px)
@@ -97,9 +98,8 @@ QPushButton#hwSquare:checked {{ background: #40c040; }}
 """
 
 
-def _r(x: int, y: int, w: int, h: int) -> tuple[int, int, int, int]:
-    """Measured render rect -> page rect."""
-    return (x - PAGE_OX, y - PAGE_OY, w, h)
+#: Measured render rect -> page rect.
+_r = rect_mapper(PAGE_OX, PAGE_OY)
 
 
 class _FixedTabBar(QTabBar):
@@ -513,7 +513,5 @@ def show_hw_config_dialog(parent: QWidget | None = None, ini_path: str | Path | 
     dlg = existing
     if dlg is None or not dlg.isVisible():
         dlg = HwConfigDialog(ini_path, parent)
-    dlg.show()
-    dlg.raise_()
-    dlg.activateWindow()
+    bring_to_front(dlg)
     return dlg

@@ -37,6 +37,7 @@ from unmscope.hardware.roi import (
     Roi, adjust_roi_for_pixels, center_roi, center_roi_at, centered_roi, coerce_roi, fov_um,
     full_roi,
 )
+from unmscope.gui.widgets import rect_mapper, set_bold
 
 #: Tab-page origin in the full-panel capture. The tab body's outer border is
 #: at x=8 and the strip top at y=88 (+-1 px); (9, 110) is what makes every box
@@ -49,9 +50,8 @@ PANEL_BG = "#fafafa"       # measured (250,250,250): tab page / Camera Settings 
 BOX_BORDER = "#000000"     # measured (0,0,0): every box border on the live tab is 1 px black
 
 
-def _rect(x: int, y: int, w: int, h: int) -> tuple[int, int, int, int]:
-    """Measured full-capture rect -> page rect."""
-    return (x - OX, y - OY, w, h)
+#: Measured full-capture rect -> page rect.
+_rect = rect_mapper(OX, OY)
 
 
 class CameraTab(QWidget):
@@ -85,7 +85,7 @@ class CameraTab(QWidget):
         lab.setGeometry(*rect)
         lab.setAlignment(align)
         if bold:
-            f = lab.font(); f.setBold(True); lab.setFont(f)
+            set_bold(lab)
         return lab
 
     def _box(self, rect, *, white: bool) -> QFrame:

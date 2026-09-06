@@ -83,6 +83,7 @@ from unmscope.gui.sample_stage_dialog import SampleStageDialog
 from unmscope.config.um_per_volt import load_calibration_from_unmscope_ini
 from unmscope.config.waveform_config import AxisSettings, WaveformConfig
 from unmscope.fileio.tiff_stack import read_tiff_stack
+from unmscope.gui.widgets import bring_to_front
 
 MODE_CONTINUOUS = "Continuous Scan"
 MODE_ZSTACK = "Z stack"
@@ -1610,9 +1611,7 @@ class MainWindow(QMainWindow):
     def _show_calibration_tab(self) -> None:
         """Utilities > um per V calibration: LouisXIV's [31] 'Edit um/V Cal'
         launches the settings GUI as its own window."""
-        self.calibration_window.show()
-        self.calibration_window.raise_()
-        self.calibration_window.activateWindow()
+        bring_to_front(self.calibration_window)
 
     def on_reset_hw_clicked(self) -> None:
         """Utilities > Reset HW. LouisXIV's [69] "Reset HW" sends the engine to
@@ -1672,9 +1671,7 @@ class MainWindow(QMainWindow):
             self.sample_stage_dialog.rel_offset_recalled.connect(self.rel_offset_spin.setValue)
             self.sample_stage_dialog.sequence_changed.connect(self._refresh_locations_table)
             self._refresh_locations_table()
-        self.sample_stage_dialog.show()
-        self.sample_stage_dialog.raise_()
-        self.sample_stage_dialog.activateWindow()
+        bring_to_front(self.sample_stage_dialog)
 
     def _refresh_locations_table(self) -> None:
         """SPIM MAIN 'Update Positions': the Scan Setup table mirrors the
@@ -1713,9 +1710,7 @@ class MainWindow(QMainWindow):
         """Utilities > Camera Debug Panel: one non-modal window, raised if open."""
         if self.camera_debug_panel is None:
             self.camera_debug_panel = CameraDebugPanel(self._camera_debug_status, parent=self)
-        self.camera_debug_panel.show()
-        self.camera_debug_panel.raise_()
-        self.camera_debug_panel.activateWindow()
+        bring_to_front(self.camera_debug_panel)
 
     def _show_fpga_scope(self):
         """Utilities > FPGA Scope: the Waveforms tab is the FPGA scope."""

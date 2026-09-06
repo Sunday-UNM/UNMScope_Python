@@ -99,6 +99,7 @@ from unmscope.fileio.stage_locations import (
 from unmscope.hardware.stage import (
     RotationStage, SimulatedMP285, SimulatedRotationStage, StageError, Vec3, XYZStage,
 )
+from unmscope.gui.widgets import rect_mapper
 
 # -- measured colours (render, 2026-09-05) ------------------------------------------
 PANEL_BG = "#dddddd"        # (221,221,221) window background
@@ -125,9 +126,8 @@ ROW_H, HEADER_H = 18, 19
 LOCK_GLYPH, UNLOCK_GLYPH = "■ ", "□ "   # stand-ins for the lock / unlock item symbols
 
 
-def _pg(x: int, y: int, w: int, h: int) -> tuple[int, int, int, int]:
-    """Render rect -> tab-page rect."""
-    return (x - PX, y - PY, w, h)
+#: Render rect -> tab-page rect.
+_pg = rect_mapper(PX, PY)
 
 
 def _label(parent, text, rect, *, bold=False, align=Qt.AlignLeft | Qt.AlignVCenter, color=None) -> QLabel:

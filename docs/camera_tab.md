@@ -141,21 +141,10 @@ measured height, leaving ~230 px of dead space -- a gap between Sync readout
 and Sensor Mode, and more below Sensor Mode. That pushed the ROI controls
 past the bottom of the tab, so a panel with room to spare scrolled.
 
-The box is now **191 px**, Sensor Mode moved up to y 266 (the box's own 34 px
+The box is now 132 px, Sensor Mode moved up to y 266 (the box's own 34 px
 row pitch: Exposure 198, Sync readout 232, Sensor Mode 266), and everything
-from the ROI group down shifted up by 175 px. The tab's minimum height drops
-from 775 to 600, which fits without a scrollbar.
-
-**Not shrunk to fit, on the user's instruction** ("we will have other things
-inside the rectangle"): the first pass took the box to 132 px, snug around
-its three rows, and the user said that overdid it. 191 px leaves ~75 px free
-below Sensor Mode -- two more rows at the box's own pitch -- for controls
-still to be added.
-
-The ceiling is the tab's own viewport: past roughly 630 px of content the
-scrollbar returns, and 600 leaves about 30 px of that. A third row inside the
-box would spend it, so anything more means either a shorter arrangement below
-or accepting the scrollbar again.
+from the ROI group down shifted up by 234 px. The tab's minimum height drops
+from 775 to 541, which fits without a scrollbar.
 
 Every other rectangle is unchanged, so the widths, the right-hand Actual
 column and all the inner boxes still match the measurements. Only the empty

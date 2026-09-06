@@ -258,13 +258,33 @@ scope (Waveforms tab), or over 50+ triggers, not from `achieved_hz` on a
 **Symptom.** Fewer images than the Slices field says, in Z stack mode, on
 the real camera. The simulated camera never showed it.
 
+**Reproduced on the Orca, 2026-09-06 (`spikes/36`, `spikes/37`).** It needs
+a **sub-array ROI**. With a 512x512 ROI, SYNCREADOUT, 100 ms exposure, 51
+slices and the period = exposure (100 ms): **25 of 51 frames -- exactly
+half**, the every-second-trigger signature. Same case with the period at
+127 ms: 51 of 51. At **full frame** the count did NOT come up short at
+100 ms -- 51/51 and 201/201 -- nor at 30 ms or 10 ms exposures (where the
+camera's floor raises the period), nor in EDGE mode. The full sweep is in
+`spikes/37_zstack_count_sweep_real_orca.result.txt`.
+
 **Cause.** The FPGA trigger period was taken from the camera:
 `trigger_period_ms()` = `max(exposure, readout + margin)` in SYNCREADOUT,
 which for any realistic exposure is the exposure itself. So the next trigger
 landed the instant the previous exposure ended -- zero time for the X galvo
-to fly back to its resting position, and a trigger that lands during readout
-is silently ignored by the camera. The 100 ms exposure the panel defaults
-to gave a 100.000 ms period: 0% slack.
+to fly back to its resting position, and no slack at all around the camera.
+The 100 ms exposure the panel defaults to gave a 100.000 ms period: 0% slack.
+Why the sub-array is what tips it into dropping every other frame, when the
+full frame survives the same zero-slack period, is NOT yet established --
+the readout of a 512-row sub-array is several times shorter, and the
+mechanism is under investigation. What is established is that the cycle
+time cures it.
+
+**Separate anomaly seen in the same sweep, open.** The FIRST run after a
+mode or ROI change (EDGE 100 ms; the 512x512 ROI at 127 ms) took ~1.3 s per
+trigger of wall time for a 127-134 ms period -- about a minute for 51
+slices -- yet delivered every frame. Later runs at the same settings ran at
+the expected rate. Looks like a wait or timeout in the settings-change path
+rather than lost frames; not chased yet.
 
 **What LouisXIV does.** The period is the **Cycle time**, a field the operator
 SETS, and it is exposure + flyback. The user's own working values, read off

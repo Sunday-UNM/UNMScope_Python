@@ -1,0 +1,45 @@
+camera C11440-42U32 S/N: 102668, readout 33.30 ms
+
+SYNC 100 ms, 201 slices (LouisXIV default size) | fix: exposure x 1.27
+    Slices field 201   period  127.000 ms
+    triggers  202  frames  201/201  stack  201  warm-up 0  observed  134.11 ms/trigger  finished=True  OK
+SYNC 100 ms, 201 slices (LouisXIV default size) | old: period = exposure
+    Slices field 201   period  100.000 ms
+    triggers  202  frames  201/201  stack  201  warm-up 1  observed  106.25 ms/trigger  finished=True  OK
+
+SYNC  30 ms, 51 (at the readout floor) | fix: exposure x 1.27
+    Slices field 51   period   38.100 ms
+    triggers   52  frames   51/51  stack   51  warm-up 1  observed   51.79 ms/trigger  finished=True  OK
+SYNC  30 ms, 51 (at the readout floor) | old: period = exposure
+    Slices field 51   period   34.085 ms  (raised to camera floor)
+    triggers   52  frames   51/51  stack   51  warm-up 1  observed   45.35 ms/trigger  finished=True  OK
+
+SYNC  10 ms, 51 (well under readout) | fix: exposure x 1.27
+    Slices field 51   period   34.085 ms  (raised to camera floor)
+    triggers   52  frames   51/51  stack   51  warm-up 1  observed   48.86 ms/trigger  finished=True  OK
+SYNC  10 ms, 51 (well under readout) | old: period = exposure
+    Slices field 51   period   34.085 ms  (raised to camera floor)
+    triggers   52  frames   51/51  stack   51  warm-up 1  observed   48.86 ms/trigger  finished=True  OK
+
+EDGE 100 ms, 51 | fix: exposure x 1.27
+    Slices field 51   period  133.825 ms  (raised to camera floor)
+    triggers   51  frames   51/51  stack   51  warm-up 0  observed 1349.15 ms/trigger  finished=True  OK
+EDGE 100 ms, 51 | old: period = exposure
+    Slices field 51   period  133.825 ms  (raised to camera floor)
+    triggers   51  frames   51/51  stack   51  warm-up 0  observed  144.96 ms/trigger  finished=True  OK
+
+EDGE  30 ms, 51 | fix: exposure x 1.27
+    Slices field 51   period   63.825 ms  (raised to camera floor)
+    triggers   51  frames   51/51  stack   51  warm-up 0  observed   74.84 ms/trigger  finished=True  OK
+EDGE  30 ms, 51 | old: period = exposure
+    Slices field 51   period   63.825 ms  (raised to camera floor)
+    triggers   51  frames   51/51  stack   51  warm-up 0  observed   75.29 ms/trigger  finished=True  OK
+
+SYNC 100 ms, 51, ROI 512x512 | fix: exposure x 1.27
+    Slices field 51   period  127.000 ms
+    triggers   52  frames   51/51  stack   51  warm-up 1  observed 1300.15 ms/trigger  finished=True  OK
+SYNC 100 ms, 51, ROI 512x512 | old: period = exposure
+    Slices field 51   period  100.000 ms
+    triggers   52  frames   25/51  stack   25  warm-up 1  observed  120.26 ms/trigger  finished=True  *** SHORT ***
+
+short counts: 1

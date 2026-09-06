@@ -1,0 +1,22 @@
+exposure 100.0 ms, SYNCREADOUT, 51 slices, camera C11440-42U32 S/N: 102668
+
+A  period = exposure (old behaviour)
+    period set    100.000 ms
+    triggers       52   (slices + closing 1)
+    frames kept    51 / 51   stack 51
+    warm-up discarded 0   stale discarded ?
+    wall   6.18 s  ->  118.88 ms per trigger observed
+    finished cleanly: True
+    log: Waveform: 198 points/trigger (100.0 ms) x 51 slice(s) = 20196 words; X sweep +50.0 mV around +0.0 mV (100 um @
+
+B  period = 0.127 s (the fix)
+    period set    127.000 ms
+    triggers       52   (slices + closing 1)
+    frames kept    51 / 51   stack 51
+    warm-up discarded 1   stale discarded ?
+    wall   7.17 s  ->  137.83 ms per trigger observed
+    finished cleanly: True
+    log: SYNCREADOUT: an exposure is already open; the first 1 frame(s) will be discarded as warm-up.
+         Waveform: 198 points/trigger (110.0 ms) x 51 slice(s) = 20196 words; X sweep +50.0 mV around +0.0 mV (100 um @
+         Discarded a leading warm-up frame (undefined exposure).
+         Final: 51 frames from 52 triggers (1 warm-up frame discarded).

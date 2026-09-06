@@ -569,6 +569,27 @@ invent them. Foundation landed first: a Z-stack is now retained in memory
 Scale note: items 1, 4 and 5 are a multi-week surface (each Utilities tool is
 its own sub-GUI). The one-laser-at-a-time rule stays as LouisXIV has it.
 
+## Bucket-2 decisions (the user, 2026-09-05) -- these are settled
+
+The user sorted the roadmap into can-do-now / needs-their-input /
+needs-hardware, worked bucket 1 to completion, then took every bucket-2
+decision below. **Agreed order: file naming, then waveform fields, then the
+Utilities sub-GUIs.** Each lands as its own commit.
+
+| # | Decision |
+|---|---|
+| 1 | **HW Config Apply = full Reset HW**, as LouisXIV does: stop the run, disconnect/reopen camera + FPGA, re-apply. Reuse the Reset HW path already wired to the Utilities button. |
+| 1 | **Connect honours all four camera keys**: Sync Readout (stop hard-coding it on), Binning, Simulate, and Serial Number as a WARN-only check -- the DCAM adapter cannot select by serial. |
+| 4 | **Camera Debug Panel keeps all five Cam rows.** No change; it already matches LouisXIV. |
+| 9 | **Scope: leave as is.** The ordered channel list, two cursors and 29 ch at 200 kS/s all stay declined. |
+| 17 | **Timepoints and Multi-location stay greyed** on Scan Setup. Note this does NOT block the file-naming work below -- build the numbering and folder support, leave the panel controls disabled. |
+| -- | **Port all four remaining Utilities tools**, in this order: FPGA Monitor, X&Z Galvo offsets per AOTF ch, View Z Lookup Table, X Galvo Z Corrections. |
+| -- | **Make all four waveform groups live**, in this order: AOTF/galvo/piezo delays, AOTF pulse/sweep/cycle mode, Z wave Sweep + Wait for Zsettle, then Duty/DOE/Sine (this last needs more source reading -- the enum items beyond the panel default are still unknown). |
+| -- | **File naming, all three**: editable base filename (LouisXIV takes it from the save dialog; ours is fixed to `img`), multi-timepoint `_%06d` numbering, and multi-position `position %d` folders. |
+
+Scale note: this is a multi-week surface, not one sitting. Items above the
+line are done; the ones below record the original per-item context.
+
 ## Action items for the user's review (2026-09-05, not started -- decide first)
 
 Collected from the tool builds, their reviews and the day's findings. Nothing

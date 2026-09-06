@@ -38,12 +38,13 @@ TIFF (default) ... Save OME-XML: only valid when File Type = TIFF."
 Not yet matched: the `Base file` name (fixed to `img`; LouisXIV takes it from
 the dialog), multi-timepoint numbering, and multi-position folders.
 
-## AcqInfo.txt: read 2026-09-05, and ours does not match
+## AcqInfo.txt: LouisXIV's format, read and matched 2026-09-05
 
-`Companion Metadata Cluster to String.vi` has now been read (26 hidden case
-frames). The finding is blunt: **our `AcqInfo.txt` shares not one key name
-with LouisXIV's.** Ours was invented; the 2026-09-04 directive says file
-formats come from the source.
+`Companion Metadata Cluster to String.vi` was read across all 26 hidden
+case frames. The finding was blunt: **the `AcqInfo.txt` we wrote until then
+shared not one key name with LouisXIV's** -- it had been invented, against
+the 2026-09-04 directive that file formats come from the source. It now
+matches; what follows is the format and how we fill it.
 
 The file is a for-each over `Companion Metadata File Fields Enum`, one line
 per field, in this order — note the enum's order is not the cluster's, and
@@ -70,11 +71,6 @@ cycle mode", `StageAngle_deg` for `Angle_deg`):
 | 21 | `Multi-positionAcq` | `TRUE` / `FALSE` | no, always FALSE |
 | 22-24 | `PositionX_mm` `PositionY_mm` `PositionZ_mm` | `%s = %.3f` | skipped (single position) |
 | 25 | `StageAngle_deg` | `%s = %.4f` | yes |
-
-Formats by type: integers `%d`, floats `%.4f`, strings **quoted** `"%s"`,
-string arrays as quoted elements joined, booleans as text. Each case also
-carries a `skip?` flag, so a field can be left out of the file entirely
-rather than written empty.
 
 **Implemented 2026-09-05, option (b), the user's choice**: LouisXIV's keys
 and order, then our own settings under a `[UNMScope]` heading.

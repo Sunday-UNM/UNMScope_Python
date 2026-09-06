@@ -128,8 +128,29 @@ both are read, `True`/`False` is written.
 - 'Auto Referesh MP' and 'Wait for Moves' exist in the VI (the Timeout
   frame reads them; 'Set Position' reads Wait for Moves) but are not visible
   on any of the three rendered pages (hidden controls). They are shown in the
-  empty band right of Go -- position assumed -- Auto Refresh on and Wait for
-  Moves off by default (their LouisXIV defaults are not recoverable).
+  empty band right of Go -- **position** still assumed.
+
+  Their **default state is no longer assumed**. Read out of the VI over COM
+  on 2026-09-05 (`vi.GetControlValue`, which reports a loaded VI's control
+  defaults -- the way to recover a hidden control's default when no render
+  can show it):
+
+  | control | LouisXIV default | ours |
+  |---|---|---|
+  | `Auto Referesh MP` | `True` | on |
+  | `Wait for Moves` | `False` | off |
+  | `Stage Velocity` | `2500` | 2500 um/s |
+  | `Settling Time` | `0.0` | 300 ms, see below |
+  | `Simulate` | `False` | False |
+  | `Enable Stage` | `False` | False |
+  | `COM Port` | `("", 0)` | COM8 from the ini |
+
+  Both guesses were right. The one to watch is Settling Time: the VI's
+  control default is 0, but `[SIMP-285 3D Stage] Settling Time (ms) = 300`
+  in SPIMProject.ini overrides it at load, so 300 ms is the effective
+  default and the control's 0 never takes effect. Velocity, COM port,
+  Simulate, Enable and XYZ Assignment are ini-backed the same way; the two
+  hidden checkboxes are not, so their VI defaults are the real ones.
 - 'MP COM Error - monitor' is likewise hidden until an error; ours is a red
   "COM ERROR" label under the two checkboxes.
 - The lock / unlock item symbols are LabVIEW images; we prefix the name with

@@ -47,6 +47,13 @@ Behaviour, event case by consumer case (hidden-frames export of the GUI,
   MP' and 'Wait for Moves' are controls that are NOT visible on any of the
   three rendered pages (hidden in LouisXIV); they are shown here in the
   empty band right of Go, position ASSUMED.
+  Their default STATE is not assumed: read out of the VI over COM
+  (2026-09-05), 'Auto Referesh MP' is TRUE and 'Wait for Moves' is FALSE,
+  which is what we default them to. Neither is ini-backed, so those VI
+  defaults are the effective ones. The same read gives Stage Velocity 2500,
+  Simulate False, Enable Stage False, COM Port ("", 0) -- and Settling Time
+  0.0, which the ini's `Settling Time (ms) = 300` overrides at runtime, so
+  300 ms is the right default for us and 0 is a dead control default.
 * [14] Update Settings ('Save Settings' on the XYZ Stage Settings page) ->
   SIMP-285 INI FG 'Write INI (input)' of Enable Stage / COM Port / Stage
   Velocity / Settling Time / Simulate / XYZ Assignment, then 'Init HW' =

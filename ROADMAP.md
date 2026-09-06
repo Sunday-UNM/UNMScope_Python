@@ -594,7 +594,14 @@ below is being implemented until the user picks.
 6. **DONE** um/V Cal is no longer a left tab: it opens as its own window from
    the Utilities grid (user, 2026-09-05), so the 466 px width is moot. Its
    Revert button is still an addition (LouisXIV has Close).
-7. Sample Stage: Auto Refresh (on) / Wait for Moves (off) defaults assumed; the
+7. Sample Stage: **defaults CONFIRMED 2026-09-05** -- read out of the VI with
+   `vi.GetControlValue` over COM, which reports a loaded VI's control defaults
+   and so recovers a hidden control's default when no render can show it.
+   Auto Referesh MP = True, Wait for Moves = False (both guesses right),
+   Stage Velocity 2500, Simulate/Enable Stage False, COM Port ("", 0). The VI's
+   Settling Time default of 0.0 is overridden at load by the ini's 300 ms, so
+   300 is the effective default and ours. Only their on-screen POSITION is
+   still assumed. The rest of the item stands: the
    window drops LouisXIV's error clusters (701x735 vs 701x805); Gen. Grid
    Sequence greyed; multi-position acquisition coupling deferred. When the MP-285
    is cabled: COM8, 9600 8-N-1, low-resolution mode at 2500 um/s to confirm.

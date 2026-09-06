@@ -11,3 +11,7 @@ build/
 .vscode/
 .idea/
 .claude/
+
+# raw window grabs: regenerate with docs/teaching/make/capture_*.ps1
+# (they can catch whatever else happened to be open behind the window)
+docs/teaching/make/shots_raw/

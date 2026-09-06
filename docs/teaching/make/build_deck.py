@@ -25,11 +25,16 @@ CSS = """
 [data-slide][hidden] { display: none !important; }
 
 /* real screenshots, mounted on the dark slide */
-figure.shot { margin: 0; background: var(--panel-2); border: 1px solid var(--rule-lit); border-radius: 10px; padding: 8px; display: flex; flex-direction: column; align-items: center; }
+figure.shot { margin: 0; background: var(--panel-2); border: 1px solid var(--rule-lit); border-radius: 10px; padding: 8px; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; }
 figure.shot img { display: block; max-width: 100%; height: auto; max-height: 62vh; border-radius: 4px; }
 figure.shot figcaption { width: 100%; font-family: "IBM Plex Mono", monospace; font-size: .72rem; letter-spacing: .04em; color: var(--ink-dim); padding: 9px 3px 1px; }
 figure.shot figcaption b { color: var(--ink-soft); font-weight: 500; }
-.shots-2 { display: grid; grid-template-columns: 1fr 1fr; gap: clamp(14px, 2vw, 26px); align-items: start; margin-top: 4px; }
+.shots-2 { display: grid; grid-template-columns: 1fr 1fr; gap: clamp(14px, 2vw, 26px); align-items: stretch; margin-top: 4px; }
+/* equal-height mounts, so a caption or a panel under one screenshot sits on the
+   same line as the one beside it even when the two images differ in shape */
+.shots-2 > div { display: flex; flex-direction: column; }
+.shots-2 > div > figure.shot { flex: 1; }
+.shots-2.pair figure.shot img { max-height: 40vh; }
 @media (max-width: 880px) { .shots-2 { grid-template-columns: 1fr; } }
 .cards.stack { grid-template-columns: 1fr; }
 .two.shot-right { grid-template-columns: 1.02fr 1fr; }
@@ -43,6 +48,41 @@ html = html.replace("</style>", CSS, 1)
 def slide(body):
     return '<section class="slide" data-slide hidden>\n' + body.strip() + '\n</section>\n'
 
+
+s2 = slide("""
+  <p class="eyebrow">Before anything else</p>
+  <h2>A program is just <em>text files in folders</em></h2>
+  <p class="sub">There is nothing hidden or compiled here. Every part of this software is a plain
+  text file you can open in Notepad, and the folder names <strong>are</strong> the organisation.
+  Learning your way around it is exactly like learning your way around someone's filing cabinet.
+  Two words worth knowing, because they turn up everywhere:</p>
+  <div class="shots-2 pair">
+    <div>
+      <figure class="shot">
+        <img src="__SHOT09__" alt="Notepad showing the top of camera.py: a long explanatory note in triple quotes, then the import lines">
+        <figcaption><b>camera.py</b> &mdash; 31,748 characters, plain text, nothing else</figcaption>
+      </figure>
+      <div class="panel" style="margin-top:14px">
+        <h3>A &ldquo;module&rdquo; is one file</h3>
+        <p>One <code>.py</code> file holding related code. <code>camera.py</code> is the camera
+        module. When someone says &ldquo;it's in the camera module&rdquo;, they mean open that file
+        &mdash; and this is all opening it means.</p>
+      </div>
+    </div>
+    <div>
+      <figure class="shot">
+        <img src="__SHOT04__" alt="Explorer showing the hardware folder: camera.py alongside fake_fpga.py, fpga_scope.py, fpga_trigger.py, louisxiv_waveform.py, roi.py, stage.py and waveform.py">
+        <figcaption><b>hardware\\</b> &mdash; the folder that same file lives in</figcaption>
+      </figure>
+      <div class="panel" style="margin-top:14px">
+        <h3>A &ldquo;package&rdquo; is one folder of them</h3>
+        <p>A folder of modules that works as a unit. <code>hardware\\</code> is one:
+        <code>camera.py</code> and seven siblings. The whole program is itself a package, called
+        <code>unmscope</code>.</p>
+      </div>
+    </div>
+  </div>
+""")
 
 s3 = slide("""
   <p class="eyebrow">The widest view</p>
@@ -238,6 +278,7 @@ assert tail_marker in seg[16], "tail marker not found"
 seg[16], tail = seg[16].split(tail_marker, 1)
 tail = tail_marker + tail
 
+seg[2] = s2
 seg[3], seg[4], seg[7], seg[11], seg[12], seg[13] = s3, s4, s7, s11, s12, s13
 seg["6b"] = s6b
 
@@ -254,7 +295,8 @@ new = new.replace('<span id="tot">16</span>', '<span id="tot">17</span>')
 
 for k, v in [("01", "01_three_folders"), ("02", "02_project_root"), ("03", "03_package"),
              ("04", "04_hardware"), ("05", "05_gui"), ("06", "06_tests"),
-             ("07", "07_docs"), ("08", "08_spikes")]:
+             ("07", "07_docs"), ("08", "08_spikes"),
+             ("09", "09_camera_module")]:
     new = new.replace("__SHOT%s__" % k, S[v])
 
 assert "__SHOT" not in new

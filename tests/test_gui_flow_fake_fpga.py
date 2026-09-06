@@ -307,3 +307,49 @@ def test_save_stack_honours_the_base_name_timepoint_and_position(app, window, tm
 
     p5 = w._save_stack(stack, position=3)
     assert p5.parent.name == "position 4"
+
+
+def test_trigger_period_is_the_cycle_time_not_the_exposure(app, window):
+    """The Z-stack image-count bug, at its root.
+
+    MEASURED by the user in LouisXIV (2026-09-06): Cam exp 0.1 s with Cycle
+    time 0.127 s -- 27 ms for the X galvo to fly back before the next cycle.
+    Our SYNCREADOUT period had been max(exposure, readout + margin), i.e. the
+    exposure itself, so the galvo got zero flyback time and triggers landing
+    in readout were silently dropped: fewer images than Slices.
+    """
+    w = window
+    panel = w.utilities_tab.waveform_panel
+    w.exposure_spin.setValue(100.0)
+    w.sync_readout_chk.setChecked(True)
+    w.mode_combo.setCurrentText(mw.MODE_ZSTACK)
+    w.z_start_spin.setValue(0); w.z_end_spin.setValue(4); w.z_interval_spin.setValue(1)   # 5 slices
+    pump(app, 0.05)
+
+    def run():
+        w.on_acquire_clicked()
+        assert pump(app, 30.0, until=lambda: not w.acquiring)
+        pump(app, 0.3)
+        return w._trigger_period_s * 1000.0
+
+    # default: exposure plus the rig's measured 27% flyback, NOT the exposure
+    panel.custom_cycle_time.setChecked(False)
+    assert run() == pytest.approx(127.0, abs=0.5)
+    assert w.frame_count == w.z_target_frames == 5
+
+    # the user's own LouisXIV value, typed
+    panel.custom_cycle_time.setChecked(True)
+    panel.cycle_time_s.setValue(0.127)
+    assert run() == pytest.approx(127.0, abs=0.5)
+
+    # and the 0.2 the panel had been left at, which is where the "2x" came from
+    panel.cycle_time_s.setValue(0.200)
+    assert run() == pytest.approx(200.0, abs=0.5)
+
+    # a cycle time under the camera's own minimum is raised to it, with a log line
+    panel.cycle_time_s.setValue(0.050)
+    w.logs.clear()
+    period = run()
+    assert period >= w.camera.trigger_period_ms(100.0) - 1e-6
+    assert any("below the camera's minimum" in m for m in w.logs)
+    panel.custom_cycle_time.setChecked(False)

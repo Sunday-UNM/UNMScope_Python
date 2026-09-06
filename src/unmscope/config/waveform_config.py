@@ -31,6 +31,12 @@ Z_MOTION = ("Z galvo & piezo",)                    # panel default; other items 
 X_WAVE = ("Sawtooth", "Triangle")                  # [18] Cam settings sets Sawtooth; "X Triangle Pulses"
 Z_WAVE = ("Step", "Sweep")                         # Read Waveform cluster: Z wave == Sweep -> Sweep Z?
 AOTF_CYCLE = ("per Z", "per Stack", "None")        # HHMI - SPIM AOTF cycle enum
+
+#: Flyback allowance used when Cycle time is not set by hand: the fraction of
+#: the exposure the X galvo needs to get home before the next cycle. 0.27 is
+#: the user's own working value on this rig (100 ms exposure -> 127 ms cycle),
+#: within the 10-30% they measured empirically.
+DEFAULT_FLYBACK_FRACTION = 0.27
 ONE_EXP_PER = ("Z plane",)
 WAIT_FOR_Z_SETTLE = ("No settle",)                 # cases seen: "No settle.", "Skip imgs", "Z settle?"
 DUAL_VIEW = ("No D.V.",)
@@ -63,12 +69,19 @@ class WaveformConfig:
     duty_pct: float = 0.05
     n_integrations: int = 1
     cam_exp_s: float = 2.0                  # indicator: the camera exposure
-    cycle_time_s: float = 0.0               # indicator unless Custom Cycle Time
+    #: The trigger-to-trigger period. This is the number that actually times
+    #: the acquisition, NOT the exposure: the X galvo has to fly back to its
+    #: resting position before the next cycle can start, and that mechanical
+    #: return takes real time. On this rig, MEASURED by the user in LouisXIV,
+    #: 27 ms on a 100 ms exposure works; 10-30% is the usual band.
+    #: Read-only unless ``custom_cycle_time``, exactly as LouisXIV has it.
+    cycle_time_s: float = 0.0
     z_motion: str = "Z galvo & piezo"
     n_doe_beams: int = 1
     x_wave: str = "Sawtooth"
     z_bidirectional: bool = False
     virtual_confocal: bool = False          # LED
+    #: Tick to type your own Cycle time instead of taking the computed one.
     custom_cycle_time: bool = False
     z_piezo_selector: int = 1
     linked: bool = True

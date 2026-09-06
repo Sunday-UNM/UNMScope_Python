@@ -252,3 +252,34 @@ triggers averaged 100.6-100.8 ms between count callbacks (the ~0.6 ms is the
 same poll bias). Judge the cycle from `int_cycle_mismatches` or the FPGA
 scope (Waveforms tab), or over 50+ triggers, not from `achieved_hz` on a
 10-trigger run.
+
+## Z stack came up short: the trigger period was the exposure (fixed 2026-09-06)
+
+**Symptom.** Fewer images than the Slices field says, in Z stack mode, on
+the real camera. The simulated camera never showed it.
+
+**Cause.** The FPGA trigger period was taken from the camera:
+`trigger_period_ms()` = `max(exposure, readout + margin)` in SYNCREADOUT,
+which for any realistic exposure is the exposure itself. So the next trigger
+landed the instant the previous exposure ended -- zero time for the X galvo
+to fly back to its resting position, and a trigger that lands during readout
+is silently ignored by the camera. The 100 ms exposure the panel defaults
+to gave a 100.000 ms period: 0% slack.
+
+**What LouisXIV does.** The period is the **Cycle time**, a field the operator
+SETS, and it is exposure + flyback. The user's own working values, read off
+LouisXIV: Cam exp 0.1 s, Cycle time 0.127 s -- 27 ms of flyback, inside the
+10-30% they had found empirically for this hardware. `Time Per Trigger` on
+Scan Setup simply follows it. (The 200.084 ms first read off the panel was
+Cycle time left at 0.2 against a 0.1 exposure, not a structural factor.)
+
+**Fix.** The period is now the cycle time, with Cycle time editable on the
+Low-Level Waveform Config page behind LouisXIV's Custom Cycle Time tick.
+Untitcked it computes as exposure x (1 + `DEFAULT_FLYBACK_FRACTION`), 0.27.
+The camera's own minimum is kept as a floor, logged when it bites, so a
+too-short typed value cannot re-trigger the camera inside its readout.
+
+**History.** The same failure once came from a hard-coded 9.7 ms readout,
+which dropped every second trigger (see the comment that used to sit above
+this code). Different constant, same mistake: deriving the period from the
+camera instead of from the cycle.

@@ -11,8 +11,10 @@ cluster (204,204,204), sub-clusters (170,170,170), greyed block
 
 Live (editable, honoured by unmscope.hardware.louisxiv_waveform): Updates/Pix,
 Fractional Flyback, Fract. Smoothing, X Single Direction, Dither Triangle
-Pulses, Dither Fract. Flyback. Indicators
-(read-only, refreshed by the window): Pixel/ms, Cam exp, Cycle time, the axis
+Pulses, Dither Fract. Flyback, the three galvo/piezo delays, and -- gated by
+the Custom Cycle Time tick -- Cycle time, which is the trigger period itself
+(see main_window's acquire path). Indicators (read-only, refreshed by the
+window): Pixel/ms, Cam exp, Cycle time while Custom is off, the axis
 sub-clusters. Everything else is shown with its LouisXIV default and greyed
 until the corresponding part of "Calculate Waveforms" is ported (see
 docs/utilities_and_waveform_config.md).
@@ -186,7 +188,11 @@ class WaveformConfigPanel(QWidget):
             self._rlabel(text, _r(107, y, 38, 18))
         self.n_integrations = self._ispin(_r(107, 299, 38, 18), 1, 1000); self._rlabel("# of Integrations", _r(107, 299, 38, 18))
         self.cam_exp_s = self._ro(_r(82, 318, 63, 18)); self._rlabel("Cam exp (s)", _r(82, 318, 63, 18), 76)
-        self.cycle_time_s = self._ro(_r(82, 337, 63, 18)); self._rlabel("Cycle time (s)", _r(82, 337, 63, 18), 76)
+        # Cycle time is the trigger period, and it is EDITABLE -- LouisXIV's
+        # arrangement, and the user's call. It reads as an indicator until
+        # Custom Cycle Time is ticked, then you type the period you want.
+        self.cycle_time_s = self._dspin(_r(82, 337, 63, 18), 0.0, 60.0, 4)
+        self._rlabel("Cycle time (s)", _r(82, 337, 63, 18), 76)
         self.linked = self._toggle(_r(150, 282, 56, 16), "Linked", True)
         self.xz_correct = self._toggle(_r(150, 299, 56, 17), "XZcrrct", True)
         self.aotf_cycle = self._combo(_r(275, 280, 73, 19), AOTF_CYCLE); self._rlabel("AOTF cycle", _r(275, 280, 73, 19), 66)
@@ -212,7 +218,10 @@ class WaveformConfigPanel(QWidget):
         self.virtual_confocal = QLabel(self); self.virtual_confocal.setGeometry(*_r(145, 500, 14, 14))
         self.virtual_confocal.setStyleSheet("background: #204020; border-radius: 7px; border: 1px solid #333;")
         self.custom_cycle_time = QCheckBox(self); self.custom_cycle_time.setGeometry(*_r(169, 536, 13, 13))
-        self.custom_cycle_time.setEnabled(False); self._rlabel("Custom Cycle Time", _r(169, 536, 13, 13), 110)
+        self._rlabel("Custom Cycle Time", _r(169, 536, 13, 13), 110)
+        self.custom_cycle_time.toggled.connect(self._on_custom_cycle_toggled)
+        self.custom_cycle_time.toggled.connect(self._on_edit)
+        self._on_custom_cycle_toggled(self.custom_cycle_time.isChecked())
         self._label("Z Piezo Selector", _r(10, 552, 92, 21))
         self.z_piezo_1 = self._toggle(_r(105, 552, 44, 21), "1", True)
         self.z_piezo_2 = self._toggle(_r(153, 552, 44, 21), "2")
@@ -236,7 +245,7 @@ class WaveformConfigPanel(QWidget):
             self.n_integrations.setValue(cfg.n_integrations)
             self.n_doe_beams.setValue(cfg.n_doe_beams)
             self.cam_exp_s.setText(f"{cfg.cam_exp_s:g}")
-            self.cycle_time_s.setText(f"{cfg.cycle_time_s:g}")
+            self.cycle_time_s.setValue(cfg.cycle_time_s)
             for attr in ("aotf_cycle", "one_exp_per", "wait_for_z_settle", "z_wave", "dual_view",
                          "z_motion", "x_wave", "aotf_sweep_mode"):
                 getattr(self, attr).setCurrentText(getattr(cfg, attr))
@@ -265,7 +274,9 @@ class WaveformConfigPanel(QWidget):
                        updates_per_pix=self.updates_per_pix.value(),
                        x_single_direction=self.x_single_direction.isChecked(),
                        dither_triangle_pulses=self.dither_triangle_pulses.value(),
-                       dither_fract_flyback=self.dither_fract_flyback.value())
+                       dither_fract_flyback=self.dither_fract_flyback.value(),
+                       custom_cycle_time=self.custom_cycle_time.isChecked(),
+                       cycle_time_s=self.cycle_time_s.value())
 
     def set_indicators(self, *, cam_exp_s: float | None = None, cycle_time_s: float | None = None,
                        pixel_per_ms: float | None = None, axes: dict[str, AxisSettings] | None = None) -> None:
@@ -273,13 +284,24 @@ class WaveformConfigPanel(QWidget):
         period, AO rate / Updates per Pixel, and the Scan Setup axes)."""
         if cam_exp_s is not None:
             self._cfg = replace(self._cfg, cam_exp_s=cam_exp_s); self.cam_exp_s.setText(f"{cam_exp_s:g}")
-        if cycle_time_s is not None:
-            self._cfg = replace(self._cfg, cycle_time_s=cycle_time_s); self.cycle_time_s.setText(f"{cycle_time_s:g}")
+        if cycle_time_s is not None and not self.custom_cycle_time.isChecked():
+            # Never overwrite a period the user typed; this is the computed
+            # one, and it is only an indicator while Custom is off.
+            self._cfg = replace(self._cfg, cycle_time_s=cycle_time_s)
+            self._updating = True
+            try:
+                self.cycle_time_s.setValue(cycle_time_s)
+            finally:
+                self._updating = False
         if pixel_per_ms is not None:
             self._cfg = replace(self._cfg, pixel_per_ms=pixel_per_ms); self.pixel_per_ms.setText(f"{pixel_per_ms:g}")
         for name, a in (axes or {}).items():
             if name in self.ax:
                 self._cfg = replace(self._cfg, **{name: a}); self._show_axis(self.ax[name], a)
+
+    def _on_custom_cycle_toggled(self, on: bool) -> None:
+        """Cycle time is typeable only while Custom Cycle Time is ticked."""
+        self.cycle_time_s.setEnabled(bool(on))
 
     def _on_edit(self, *_):
         if self._updating:

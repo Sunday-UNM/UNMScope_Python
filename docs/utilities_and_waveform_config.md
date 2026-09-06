@@ -159,3 +159,12 @@ code would be wrong rather than merely incomplete.
 
 **NOT verified on the card.** The maths is tested and the block still fits
 its cycle, but no delayed waveform has been put on a scope.
+
+## Cycle time -- live, editable (2026-09-06)
+
+The trigger period. Behind LouisXIV's **Custom Cycle Time** tick the field is
+typeable and its value is the period; unticked it is an indicator showing the
+computed value, exposure x 1.27 (`DEFAULT_FLYBACK_FRACTION`, the user's
+measured 27 ms on 100 ms). Either way the camera's own minimum period is a
+floor. See `docs/known_issues.md` "Z stack came up short" for why this is the
+number that times the acquisition and the exposure is not.

@@ -83,7 +83,9 @@ from unmscope.gui.calibration_tab import CalibrationTab
 from unmscope.gui.hw_config_dialog import show_hw_config_dialog
 from unmscope.gui.sample_stage_dialog import SampleStageDialog
 from unmscope.config.um_per_volt import load_calibration_from_unmscope_ini
-from unmscope.config.waveform_config import AxisSettings, WaveformConfig
+from unmscope.config.waveform_config import (
+    DEFAULT_FLYBACK_FRACTION, AxisSettings, WaveformConfig,
+)
 from unmscope.fileio.tiff_stack import read_tiff_stack
 from unmscope.gui.widgets import bring_to_front
 
@@ -1942,13 +1944,37 @@ class MainWindow(QMainWindow):
 
         self.camera_poll_timer.start(30)
 
-        # Trigger period = exposure + sensor readout + a small margin. The
-        # camera silently IGNORES a trigger that lands while it is still
-        # exposing/reading out. readout_ms() is the camera's own figure
-        # (33.3 ms on this Orca -- not the 9.7 ms datasheet value that used
-        # to be hard-coded, which made it drop every second trigger).
+        # Trigger period = the CYCLE TIME, which is the exposure plus the
+        # flyback -- the mechanical time the X galvo needs to get back to its
+        # resting position before the next cycle can start. It is NOT the
+        # exposure, and it is not derived from the camera.
+        #
+        # MEASURED in LouisXIV by the user (2026-09-06): Cam exp 0.1 s with
+        # Cycle time 0.127 s, i.e. 27 ms of flyback on a 100 ms exposure;
+        # 10-30% is the band that works on this rig. LouisXIV makes Cycle
+        # time an editable field gated by a "Custom Cycle Time" tick, and we
+        # now do the same.
+        #
+        # We had been using the camera's own minimum as the period. In
+        # SYNCREADOUT that is max(exposure, readout + margin) = the exposure
+        # itself for any realistic exposure, so the galvo got ZERO flyback
+        # time and triggers landing during readout were silently ignored --
+        # fewer images than Slices. (The same class of bug once came from a
+        # hard-coded 9.7 ms readout, which dropped every second trigger.)
+        #
+        # The camera's minimum is still enforced as a floor, so a too-short
+        # custom Cycle time cannot re-trigger the camera inside its readout.
         exposure_ms = self.exposure_spin.value()
-        period_ms = self.camera.trigger_period_ms(exposure_ms)
+        wcfg_period = self.utilities_tab.waveform_panel.config()
+        if wcfg_period.custom_cycle_time and wcfg_period.cycle_time_s > 0:
+            cycle_ms = wcfg_period.cycle_time_s * 1000.0
+        else:
+            cycle_ms = exposure_ms * (1.0 + DEFAULT_FLYBACK_FRACTION)
+        camera_floor_ms = self.camera.trigger_period_ms(exposure_ms)
+        period_ms = max(cycle_ms, camera_floor_ms)
+        if period_ms > cycle_ms + 1e-9:
+            self._log(f"Cycle time {cycle_ms:.3f} ms is below the camera's minimum "
+                      f"{camera_floor_ms:.3f} ms; using the minimum.")
         period_s = period_ms / 1000.0
         sync = self.camera.trigger_active == self.camera.TRIGGER_SYNCREADOUT
         # free_run_timing() only needs exposure <= period; in SYNCREADOUT the

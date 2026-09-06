@@ -84,3 +84,32 @@ def test_load_stack_from_file_presents_it_as_an_acquired_stack(window, tmp_path)
     assert got.shape == (5, 64, 48) and np.array_equal(got, stack)
     assert window.calc_projections_btn.isEnabled()          # always enabled now (LouisXIV's Max Projs latch)
     assert "loaded" in window.frame_counter_label.text()
+
+
+# -- Cycle time: the trigger period, editable (2026-09-06) -----------------------------
+# The user found the "total number of images in a Z stack" bug: in SYNCREADOUT
+# the trigger period was the exposure itself, leaving the X galvo no flyback
+# time, so triggers that landed during readout were dropped. LouisXIV's fix is
+# structural -- Cycle time is a field you SET (exposure + flyback), gated by a
+# "Custom Cycle Time" tick. These pin that arrangement.
+
+def test_cycle_time_is_typeable_only_while_custom_is_ticked(window):
+    panel = window.utilities_tab.waveform_panel
+    panel.custom_cycle_time.setChecked(False)
+    assert not panel.cycle_time_s.isEnabled()
+    panel.custom_cycle_time.setChecked(True)
+    assert panel.cycle_time_s.isEnabled()
+    panel.cycle_time_s.setValue(0.127)
+    cfg = panel.config()
+    assert cfg.custom_cycle_time is True and cfg.cycle_time_s == pytest.approx(0.127)
+
+
+def test_the_computed_cycle_time_never_overwrites_a_typed_one(window):
+    panel = window.utilities_tab.waveform_panel
+    panel.custom_cycle_time.setChecked(True)
+    panel.cycle_time_s.setValue(0.127)
+    panel.set_indicators(cycle_time_s=0.5)          # the window pushing its computed value
+    assert panel.cycle_time_s.value() == pytest.approx(0.127)
+    panel.custom_cycle_time.setChecked(False)
+    panel.set_indicators(cycle_time_s=0.5)
+    assert panel.cycle_time_s.value() == pytest.approx(0.5)   # indicator again

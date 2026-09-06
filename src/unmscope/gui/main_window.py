@@ -2019,6 +2019,8 @@ class MainWindow(QMainWindow):
                 z_piezo_start_v=zp_start_v, z_piezo_step_v=zp_step_v if zp_moves else 0.0,
                 dither_range_v=dither_range_v, dither_pulses=wcfg.dither_triangle_pulses,
                 dither_flyback_fraction=wcfg.dither_fract_flyback,
+                x_galvo_delay_us=wcfg.x_galvo_delay_us, z_galvo_delay_us=wcfg.z_galvo_delay_us,
+                z_piezo_delay_us=wcfg.z_piezo_delay_us,
                 cycle_margin_s=0.0)        # LouisXIV's rule: the block fills the cycle (measured OK on the card)
         except ValueError as e:
             self._log(f"Waveform calculation failed: {e}")

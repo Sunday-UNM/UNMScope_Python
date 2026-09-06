@@ -166,11 +166,23 @@ class WaveformConfigPanel(QWidget):
         self._rlabel("Fractional Flyback", _r(107, 91, 38, 18))
         self.fract_smoothing = self._dspin(_r(107, 110, 38, 18), 0, 100, 2, live=True)
         self._rlabel("Fract. Smoothing", _r(107, 110, 38, 18))
-        rows = [("aotf_delay_us", "AOTF delay (us)", 185), ("x_galvo_delay_us", "X galvo delay (us)", 204),
-                ("z_galvo_delay_us", "Z galvo delay (us)", 223), ("z_piezo_delay_us", "Z piezo delay (us)", 242),
-                ("sweep_period_um", "Sweep period (um)", 261), ("duty_pct", "Duty (%)", 280)]
-        for attr, text, y in rows:
-            setattr(self, attr, self._dspin(_r(107, y, 38, 18), -1e6, 1e6, 3))
+        # The three galvo/piezo delays are live: they drive
+        # `louisxiv_waveform.extra_counts_for_delays`, LouisXIV's shift by
+        # held samples. Their range starts at 0 -- LouisXIV's formula gives a
+        # negative delay a longer block than the other channels, which cannot
+        # be assembled into an aligned scan, so the builder refuses one.
+        # AOTF delay stays greyed: it is a different mechanism entirely
+        # (Calibration/AOTF delay/, applied inside Generate 1 Line Ramp), not
+        # this shift, so wiring it here would be wrong rather than merely
+        # incomplete.
+        rows = [("aotf_delay_us", "AOTF delay (us)", 185, False, -1e6),
+                ("x_galvo_delay_us", "X galvo delay (us)", 204, True, 0.0),
+                ("z_galvo_delay_us", "Z galvo delay (us)", 223, True, 0.0),
+                ("z_piezo_delay_us", "Z piezo delay (us)", 242, True, 0.0),
+                ("sweep_period_um", "Sweep period (um)", 261, False, -1e6),
+                ("duty_pct", "Duty (%)", 280, False, -1e6)]
+        for attr, text, y, live, lo in rows:
+            setattr(self, attr, self._dspin(_r(107, y, 38, 18), lo, 1e6, 3, live=live))
             self._rlabel(text, _r(107, y, 38, 18))
         self.n_integrations = self._ispin(_r(107, 299, 38, 18), 1, 1000); self._rlabel("# of Integrations", _r(107, 299, 38, 18))
         self.cam_exp_s = self._ro(_r(82, 318, 63, 18)); self._rlabel("Cam exp (s)", _r(82, 318, 63, 18), 76)

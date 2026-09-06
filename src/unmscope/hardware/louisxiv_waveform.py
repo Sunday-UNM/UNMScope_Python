@@ -255,6 +255,125 @@ def ao_rate_for_line(line: FastAxisLine, exposure_s: float, cycle_s: float, upda
                     extra_images=extra_imgs)
 
 
+# -- channel delays -------------------------------------------------------------------
+#
+# `HHMI - SPIM Shift waveforms by galvo delay.vi` ->
+# `HHMI - SPIM Number of extrac counts needed for galvo inertia shift.vi` (sic)
+# -> `HHMI - Add counts to waveforms at beginning and end.vi`.
+#
+# The three galvo/piezo delays are NOT applied by resampling or by rotating
+# the array. Every channel is padded with held values -- copies of its own
+# first sample at the front and of its last sample at the end -- so that a
+# channel with a larger delay starts later within a block that is the same
+# length for all of them. The block grows by the largest delay's worth of
+# samples, which LouisXIV records as `AO read lag (counts)` and adds to
+# `Time Per WvFrm (sec)`.
+#
+# The AOTF delay is a different mechanism entirely (`Calibration/AOTF delay/`,
+# applied inside `HHMI - SPIM Generate 1 Line Ramp.vi`) and is NOT this. Here
+# the AOTF/Pockels channel simply takes the full lag at the beginning.
+
+
+@dataclass
+class DelayCounts:
+    """Per-channel (beginning, end) hold-sample counts, and the total lag."""
+    total: int
+    x_galvo: tuple[int, int] = (0, 0)
+    z_galvo: tuple[int, int] = (0, 0)
+    z_piezo: tuple[int, int] = (0, 0)
+    aotf: tuple[int, int] = (0, 0)
+
+    @property
+    def any_shift(self) -> bool:
+        return self.total > 0
+
+
+def extra_counts_for_delays(x_galvo_delay_us: float, z_galvo_delay_us: float,
+                            z_piezo_delay_us: float, ao_rate_hz: float) -> DelayCounts:
+    """``# of extrac counts needed for galvo inertia shift``, exactly.
+
+    For each axis, with ``d`` the signed delay in seconds and ``m`` the
+    largest ``|d|``::
+
+        total   = round(m / s_per_sample)
+        end_i   = round((1 - d_i / m) * total)
+        begin_i = total - end_i
+
+    so the axis with the largest positive delay gets all its padding at the
+    front (it starts last) and an axis with no delay gets it all at the end.
+    The AOTF/Pockels pair is not computed from a delay at all: LouisXIV wires
+    ``begin = total, end = 0`` to it.
+
+    NEGATIVE DELAYS ARE REFUSED, and this is a deliberate divergence.
+    ``1 - d/m`` exceeds 1 when ``d`` is negative, so ``end`` exceeds ``total``
+    and ``begin`` goes negative -- e.g. X = -4 us alone gives X (-4, 8) and
+    Z (0, 4). LabVIEW's Initialize Array treats the negative size as empty,
+    so that channel's block ends up 8 samples longer than the others' 4, and
+    the channels no longer line up. Downstream that does not fail loudly; it
+    truncates, and the scan comes out quietly misaligned. Porting the formula
+    faithfully and then emitting a wrong waveform would be worse than
+    stopping, so a negative delay raises instead. Nothing on this rig sets
+    one: LouisXIV's panel defaults are all >= 0.
+    """
+    delays_s = np.array([x_galvo_delay_us, z_galvo_delay_us, z_piezo_delay_us], float) * 1e-6
+    if np.any(delays_s < 0):
+        names = ("X galvo", "Z galvo", "Z piezo")
+        bad = ", ".join(f"{n} = {v * 1e6:g} us" for n, v in zip(names, delays_s) if v < 0)
+        raise ValueError(
+            f"negative channel delay ({bad}). LouisXIV's shift formula gives that "
+            "channel a longer block than the others, which cannot be assembled into "
+            "an aligned scan -- see extra_counts_for_delays. Use delays >= 0.")
+    max_abs = float(np.max(np.abs(delays_s)))
+    if max_abs <= 0 or not math.isfinite(ao_rate_hz) or ao_rate_hz <= 0:
+        return DelayCounts(total=0)          # the VI's "No shift?" TRUE case
+    s_per_sample = 1.0 / ao_rate_hz
+    total = int(round(max_abs / s_per_sample))
+    if total <= 0:
+        # A real delay, but under half a sample. LouisXIV rounds it away; at
+        # this rig's defaults (X galvo 0.02 us at 1000 kHz = 0.02 samples)
+        # this is the branch that runs, so the delays are inert until one of
+        # them reaches about half an AO sample.
+        return DelayCounts(total=0)
+    pairs = []
+    for d in delays_s:
+        end = int(round((1.0 - d / max_abs) * total))
+        pairs.append((total - end, end))     # (beginning, end)
+    return DelayCounts(total=total, x_galvo=pairs[0], z_galvo=pairs[1], z_piezo=pairs[2],
+                       aotf=(total, 0))
+
+
+def _fit_block_to_cycle(padded_points: int, original_points: int, rate: RateInfo) -> tuple[float, int]:
+    """Re-space a delay-padded block so it still occupies the same cycle.
+
+    LouisXIV does the opposite: it keeps the AO rate and lets the waveform
+    take longer, adding the lag to ``Time Per WvFrm (sec)``. Our free run
+    drives a fixed trigger period, so a longer block would overrun it.
+    Keeping the block's duration and shortening the sample interval preserves
+    the shape and every channel's relative offset, which is what the delays
+    are for. Returns (rate_hz, ticks_between_points).
+    """
+    if padded_points <= original_points:
+        return rate.ao_rate_hz, rate.ticks_between_points
+    block_s = original_points * rate.ticks_between_points / TICKS_PER_S
+    ticks = max(1, int(block_s * TICKS_PER_S // padded_points))
+    return TICKS_PER_S / ticks, ticks
+
+
+def add_hold_counts(block: np.ndarray, beginning: int, end: int) -> np.ndarray:
+    """``Add counts to waveforms at beginning and end``: pad with held values.
+
+    The front gets ``beginning`` copies of the block's first sample and the
+    back ``end`` copies of its last. A negative count contributes nothing, as
+    LabVIEW's Initialize Array does with a negative size.
+    """
+    block = np.asarray(block)
+    if block.size == 0:
+        return block
+    head = np.full(max(0, int(beginning)), block[0], dtype=block.dtype)
+    tail = np.full(max(0, int(end)), block[-1], dtype=block.dtype)
+    return np.concatenate([head, block, tail])
+
+
 # -- the whole waveform ---------------------------------------------------------------
 @dataclass
 class LouisXivWaveform:
@@ -272,7 +391,9 @@ def build_louisxiv_waveform(*, exposure_s: float, cycle_s: float, x_range_v: flo
                             z_piezo_start_v: float = 0.0, z_piezo_step_v: float = 0.0,
                             dither_range_v: float = 0.0, dither_pulses: float = 0.0,
                             dither_flyback_fraction: float = 0.1, z_settle_ms: float = 0.0,
-                            skip_images: bool = False, cycle_margin_s: float = 0.0) -> LouisXivWaveform:
+                            skip_images: bool = False, cycle_margin_s: float = 0.0,
+                            x_galvo_delay_us: float = 0.0, z_galvo_delay_us: float = 0.0,
+                            z_piezo_delay_us: float = 0.0) -> LouisXivWaveform:
     """One fast-axis line per trigger at LouisXIV's computed AO rate; slow
     axes constant per slice with an S-curve (return points IQ 3) into the
     next slice; the dither galvo's triangle across the line.
@@ -300,8 +421,33 @@ def build_louisxiv_waveform(*, exposure_s: float, cycle_s: float, x_range_v: flo
             zg[n_pts - n_s:] = s_curve(zg[0], z_galvo_start_v + (k + 1) * z_galvo_step_v, n_s)
             zp[n_pts - n_s:] = s_curve(zp[0], z_piezo_start_v + (k + 1) * z_piezo_step_v, n_s)
         slow_v.append((zg, zp))
-    scan = assemble_scan(line.positions, slow_v, d_block, rate.ticks_between_points)
+
+    # Channel delays: pad every block by the same total so they stay aligned,
+    # each channel starting at its own offset within that padding.
+    delays = extra_counts_for_delays(x_galvo_delay_us, z_galvo_delay_us, z_piezo_delay_us,
+                                     rate.ao_rate_hz)
+    x_block = line.positions
+    ticks = rate.ticks_between_points
+    if delays.any_shift:
+        x_block = add_hold_counts(x_block, *delays.x_galvo)
+        slow_v = [(add_hold_counts(zg, *delays.z_galvo), add_hold_counts(zp, *delays.z_piezo))
+                  for zg, zp in slow_v]
+        d_block = add_hold_counts(d_block, delays.total, 0)   # dither rides with the AOTF pair
+        # LouisXIV lets the block get longer (Time Per WvFrm grows by the
+        # lag). Our free run has a fixed trigger period, so instead the
+        # points are re-spaced to keep the longer block inside the same
+        # cycle. Same shape, same relative offsets, slightly faster clock.
+        _, ticks = _fit_block_to_cycle(len(x_block), n_pts, rate)
+        n_pts = len(x_block)
+
+    scan = assemble_scan(x_block, slow_v, d_block, ticks)
     notes = []
+    if delays.any_shift:
+        notes.append(
+            f"Channel delays: {delays.total} AO counts of lag "
+            f"(X galvo begin/end {delays.x_galvo}, Z galvo {delays.z_galvo}, "
+            f"Z piezo {delays.z_piezo}); block {n_pts} points, "
+            f"{ticks} ticks/point. NOT verified on the card.")
     if rate.update_rate != update_rate:
         notes.append(f"Updates/Pixel reduced {update_rate} -> {rate.update_rate} by the {MAX_AO_RATE_KHZ:g} kHz AO limit")
     if rate.extra_ao_counts or rate.extra_images:

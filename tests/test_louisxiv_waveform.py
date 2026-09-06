@@ -7,8 +7,9 @@ import pytest
 
 from unmscope.hardware.fpga_trigger import TICKS_PER_S
 from unmscope.hardware.louisxiv_waveform import (
-    MAX_AO_RATE_KHZ, ao_rate_for_line, build_louisxiv_waveform, check_ao_rate, cubic_portion,
-    cubic_ramp_coeffs, dma_ticks, fast_axis_line, min_rate_for_flyback, s_curve, s_curve_points,
+    MAX_AO_RATE_KHZ, add_hold_counts, ao_rate_for_line, build_louisxiv_waveform, check_ao_rate,
+    cubic_portion, cubic_ramp_coeffs, dma_ticks, extra_counts_for_delays, fast_axis_line,
+    min_rate_for_flyback, s_curve, s_curve_points,
 )
 
 
@@ -113,3 +114,76 @@ def test_build_louisxiv_waveform_packs_one_line_per_trigger():
         assert zp[n - 1] == zp[n]                                    # the S-curve lands on the next slice value
     assert wf.scan.ticks_between_points == wf.rate.ticks_between_points
     assert wf.scan.points_per_trigger * wf.scan.ticks_between_points <= 0.1 * TICKS_PER_S + wf.scan.ticks_between_points
+
+
+# -- channel delays ----------------------------------------------------------
+# `HHMI - SPIM Number of extrac counts needed for galvo inertia shift.vi` (sic)
+# and `HHMI - Add counts to waveforms at beginning and end.vi`.
+
+def test_a_delay_under_half_a_sample_rounds_away():
+    """This rig's own defaults land here: X galvo 0.02 us at 1000 kHz."""
+    d = extra_counts_for_delays(0.02, 0.0, 0.0, 1_000_000.0)
+    assert d.total == 0 and not d.any_shift
+
+
+def test_the_lag_is_the_largest_delay_in_samples():
+    d = extra_counts_for_delays(5.0, 2.0, 0.0, 1_000_000.0)   # 1 us per sample
+    assert d.total == 5
+
+
+def test_each_channel_is_padded_by_its_own_share_of_the_lag():
+    """end_i = round((1 - d_i/max) * total); begin_i = total - end_i."""
+    d = extra_counts_for_delays(5.0, 2.0, 0.0, 1_000_000.0)
+    assert d.x_galvo == (5, 0)      # largest delay: all padding at the front
+    assert d.z_galvo == (2, 3)      # 2/5 of the way
+    assert d.z_piezo == (0, 5)      # no delay: starts at once
+    assert d.aotf == (5, 0)         # LouisXIV wires begin=total, end=0
+    # every channel grows by the same total, which is what keeps them aligned
+    for pair in (d.x_galvo, d.z_galvo, d.z_piezo, d.aotf):
+        assert sum(pair) == d.total
+
+
+def test_equal_delays_shift_everything_together():
+    d = extra_counts_for_delays(3.0, 3.0, 3.0, 1_000_000.0)
+    assert d.x_galvo == d.z_galvo == d.z_piezo == (3, 0)
+
+
+def test_negative_delays_are_refused_rather_than_silently_misaligned():
+    """LouisXIV's formula gives a negative delay a LONGER block than the rest.
+
+    X = -4 us alone yields X (-4, 8) against Z (0, 4): 8 extra samples on one
+    channel and 4 on the others, so they no longer line up. Downstream that
+    truncates instead of failing, so this refuses.
+    """
+    with pytest.raises(ValueError, match="negative channel delay"):
+        extra_counts_for_delays(-4.0, 0.0, 0.0, 1_000_000.0)
+
+
+def test_padding_holds_the_edge_values():
+    block = np.array([1.0, 2.0, 3.0, 4.0])
+    np.testing.assert_array_equal(add_hold_counts(block, 2, 1),
+                                  [1.0, 1.0, 1.0, 2.0, 3.0, 4.0, 4.0])
+    np.testing.assert_array_equal(add_hold_counts(block, 0, 0), block)
+
+
+def test_delays_keep_every_channel_the_same_length_and_the_block_in_its_cycle():
+    kw = dict(exposure_s=0.01, cycle_s=0.02, x_range_v=1.0, x_offset_v=0.0, x_pixels=50)
+    base = build_louisxiv_waveform(**kw)
+    # 300 us at this AO rate (~15 kHz, 66.7 us/sample) is 4 samples of lag
+    w = build_louisxiv_waveform(**kw, x_galvo_delay_us=300.0, z_galvo_delay_us=120.0)
+    assert w.scan.points_per_trigger == base.scan.points_per_trigger + 4
+    assert len({len(c) for c in w.scan.channels.values()}) == 1, "channels must stay aligned"
+    # the block still fits the same cycle: LouisXIV lengthens Time Per WvFrm
+    # instead, which our fixed-period free run cannot do
+    def block_s(x):
+        return x.scan.points_per_trigger * x.scan.ticks_between_points / TICKS_PER_S
+    assert block_s(w) == pytest.approx(block_s(base), rel=1e-3)
+    assert any("Channel delays" in n for n in w.notes)
+
+
+def test_no_delay_changes_nothing():
+    kw = dict(exposure_s=0.01, cycle_s=0.02, x_range_v=1.0, x_offset_v=0.0, x_pixels=50)
+    a = build_louisxiv_waveform(**kw)
+    b = build_louisxiv_waveform(**kw, x_galvo_delay_us=0.0, z_galvo_delay_us=0.0)
+    assert a.scan.points_per_trigger == b.scan.points_per_trigger
+    assert a.scan.words == b.scan.words

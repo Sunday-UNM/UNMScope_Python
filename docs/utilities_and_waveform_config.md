@@ -111,3 +111,51 @@ white, relative to the frame's top-left):
 Deliberate difference: the page lives under Utilities (user's request), so
 its origin differs from LouisXIV's Adv Setup nested tab; the classic-grey
 cluster look (204,204,204) is the render's.
+
+## Channel delays (X galvo / Z galvo / Z piezo) -- live 2026-09-05
+
+Ported from `HHMI - SPIM Shift waveforms by galvo delay.vi` ->
+`HHMI - SPIM Number of extrac counts needed for galvo inertia shift.vi`
+(sic) -> `HHMI - Add counts to waveforms at beginning and end.vi`.
+
+**The delays are not a resample or a rotate.** Each channel is padded with
+*held* values -- copies of its own first sample at the front, its last at the
+end -- so a channel with a larger delay starts later inside a block that
+stays the same length for every channel. With `d` the signed delay in seconds
+and `m` the largest `|d|`:
+
+    total   = round(m x AO_rate)          # LouisXIV's "AO read lag (counts)"
+    end_i   = round((1 - d_i / m) x total)
+    begin_i = total - end_i
+
+So the axis with the largest delay gets all its padding at the front, an
+undelayed axis gets it all at the end, and every channel grows by `total`.
+The AOTF/Pockels pair is not computed from a delay at all: LouisXIV wires
+`begin = total, end = 0`.
+
+Three things worth knowing:
+
+* **At this rig's defaults the delays do nothing.** X galvo 0.02 us at a
+  1000 kHz AO rate is 0.02 samples, which rounds to zero counts. They only
+  bite once a delay reaches about half an AO sample -- 33 us at the 15 kHz
+  rate a typical 20 ms cycle produces, or 0.5 us at the 1000 kHz cap.
+* **Negative delays are refused**, a deliberate divergence. LouisXIV's
+  formula gives a negative delay a *longer* block than the other channels
+  (X = -4 us alone yields X (-4, 8) against Z (0, 4)), so they no longer line
+  up; downstream that truncates rather than failing, and the scan comes out
+  quietly misaligned. Emitting a wrong waveform is worse than stopping. The
+  panel's minimum for these three fields is 0.
+* **Where we diverge on timing.** LouisXIV keeps the AO rate and lets the
+  waveform take longer, adding the lag to `Time Per WvFrm (sec)`. Our free
+  run drives a fixed trigger period, so the padded block is re-spaced to
+  occupy the same cycle instead: same shape, same relative offsets, a
+  slightly shorter sample interval.
+
+**AOTF delay stays greyed** and that is on purpose. It is a different
+mechanism -- `Calibration/AOTF delay/HHMI - SPIM Calc AOTF delay.vi` and
+`... Convert X pix size to AOTF delay.vi`, applied inside
+`HHMI - SPIM Generate 1 Line Ramp.vi` -- not this shift. Wiring it to this
+code would be wrong rather than merely incomplete.
+
+**NOT verified on the card.** The maths is tested and the block still fits
+its cycle, but no delayed waveform has been put on a scope.

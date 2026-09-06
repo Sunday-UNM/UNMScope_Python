@@ -58,7 +58,11 @@ from unmscope.config.hw_config import (
 )
 from unmscope.gui.widgets import bring_to_front, rect_mapper
 
-WINDOW_TITLE = "HW Configuration GUI"      # ASSUMED: the VI's name (no TITL resource was read)
+#: MEASURED 2026-09-05: `vi.FPWinTitle` over COM. The window is titled
+#: "Hardware Configuration", NOT the VI's file name, which is what we
+#: had assumed. (The um/V window is "Microns per Volt Settings" and the
+#: camera one "Debug Panel"; both of ours already matched.)
+WINDOW_TITLE = "Hardware Configuration"
 DIALOG_SIZE = (486, 490)                   # tab control 0..485 x 0..440, buttons end at y 479 (+10 px)
 
 # Measured colours (render): pane border and unselected-tab outline (221,221,221),

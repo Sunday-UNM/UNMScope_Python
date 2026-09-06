@@ -417,9 +417,22 @@ see caveat). The literal per-field enable/disable wiring lives inline in
 case that is itself a 6-frame stacked sequence (`0 [0..5]`); the VI
 diagram export tool only captured frame 0 (unrelated: waveform-tab
 visibility, Multistack->Slices.Disabled, tab colors) -- frames 1-5, the
-likely home of this logic, and the combo box's Value-Change event case,
-were never captured by any export and are not recoverable from the static
-PNGs. Two dedicated "enable/disable" subVIs exist (`HHMI - SPIM Enable
+likely home of this logic, and the combo box's Value-Change event case.
+
+> **This paragraph's conclusion is out of date (noted 2026-09-05).** It said
+> those frames "were never captured by any export and are not recoverable
+> from the static PNGs". That is no longer true: setting
+> `app.PrintSetupCustomDiagramHidden = True` before `PrintVIToHTML` prints
+> **every** frame of every case and stacked-sequence structure, and SPIM
+> MAIN.vi was exported that way -- **392 frames**, now in
+> `VI_Diagrams/SPIM/SPIM LV8.6 VIs/SPIM MAIN/hidden_frames/`. Frames 1-5 of
+> the "Property nodes" sequence and the combo box's Value-Change case should
+> be among them. So the enable/disable rules below *can* now be
+> source-verified rather than left as observation-only; nobody has gone
+> looking yet. The rules themselves have not changed and are still the ones
+> in use.
+
+Two dedicated "enable/disable" subVIs exist (`HHMI - SPIM Enable
 disable depending on scan state.vi` / `...on aquisition state.vi`) but
 both only gate idle-vs-acquiring, an orthogonal axis to Continuous-vs-
 Z-stack. **So the actual rule set below comes from the user's own two

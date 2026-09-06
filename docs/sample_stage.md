@@ -120,6 +120,8 @@ are never written. `~/.unmscope/SPIMProject.ini`, `~/.unmscope/SPIMProject
 Locations.txt` are byte-for-byte copies made on first use and are the only
 files the panel modifies; `spim_ini.write_keys` rewrites only the keys it
 owns and keeps CRLF, the `Key = Value` spacing and every unknown section.
+(Since 2026-09-05 that is a thin wrapper over the one shared writer,
+`config/ini_text.py`, which hw_config and um_per_volt use too.)
 The ini's boolean spellings differ (`Enable? = False`, `Simulate = FALSE`);
 both are read, `True`/`False` is written.
 

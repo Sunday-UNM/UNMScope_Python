@@ -177,8 +177,11 @@ session scratchpad). Render coordinates; page widgets are placed with
   the real panel once it is run side by side.
 - The pane's left edge sits under the render's 1 px print border (x = 0)
   and could not be measured; ours is at x = 0.
-- Window title "HW Configuration GUI" is ASSUMED (the VI's name; its TITL
-  resource was not read).
+- ~~Window title~~ **resolved 2026-09-05**: `vi.FPWinTitle` over COM says
+  the window is titled **"Hardware Configuration"**, not the VI's file name.
+  Our assumed "HW Configuration GUI" was wrong and is fixed. (The same read
+  confirms "Microns per Volt Settings" and "Debug Panel" for the other two
+  tool windows, which we already had right.)
 
 ## Open questions
 

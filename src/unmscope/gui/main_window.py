@@ -69,7 +69,7 @@ from unmscope.hardware.fpga_trigger import FpgaTriggerController, MIN_TRIGGER_UP
 from unmscope.hardware.fpga_scope import (
     AI_CHANNEL_NAMES, DIGITAL_TRUE, IDX_DIO4, FpgaScope, ScopeSnapshot,
 )
-from unmscope.hardware.waveform import COUNTS_PER_VOLT
+from unmscope.hardware.waveform import COUNTS_PER_VOLT, unpack_words
 from unmscope.hardware.louisxiv_waveform import LouisXivWaveform, build_louisxiv_waveform
 from unmscope.config.calibration import load_calibration
 from unmscope.analysis.projections import DEFAULT_STAGE_ANGLE_DEG, stack_projections
@@ -2015,6 +2015,29 @@ class MainWindow(QMainWindow):
                   f"(flyback {self.dg_flyback.value():.2f}) (calibration: {cal.source}).")
         return lx, period_s, exposure_s, sync
 
+    def _aotf_levels_for_run(self) -> tuple[dict[int, int], str]:
+        """({AOTF channel: DAC counts}, a one-line description) for the
+        current Excitation rows -- exactly what _start_acquisition hands to
+        start_free_run(aotf_levels=...). The one selected row (the
+        one-laser rule is enforced at Acquire) sets its AOTF channel to
+        Power% -> volts -> counts; every other channel 0. The FPGA drives
+        'AOTF ch (V)' as a DC level while armed, so the laser is on for the
+        whole run (docs/aotf.md). Shared with the Simulated view so it
+        shows the levels that would really be written, not a second guess
+        at them."""
+        cal = self.calibration
+        levels: dict[int, int] = {}
+        desc = "off"
+        for i, (chk, wl, spin) in enumerate(self.excitation_rows):
+            if chk.isChecked() and spin.value() > 0:
+                ch = cal.aotf.channel_for_row(i)
+                v = cal.aotf.power_pct_to_v(spin.value())
+                counts = int(round(v * COUNTS_PER_VOLT))
+                levels[ch] = counts
+                desc = (f"{wl} nm at {spin.value():g} % -> AOTF ch {ch} = {v:.3f} V ({counts} counts); "
+                        f"other channels 0")
+        return levels, desc
+
     @staticmethod
     def _trigger_up_ticks_for(wf) -> int:
         """The Int-Sync high time this port arms the FPGA with for one
@@ -2026,45 +2049,68 @@ class MainWindow(QMainWindow):
         block_ticks = wf.points_per_trigger * wf.ticks_between_points
         return block_ticks + 40_000
 
-    def _scope_snapshot_from_waveform(self, wf) -> ScopeSnapshot:
-        """A ScopeSnapshot of an already-computed ScanWaveform (wf = a
-        LouisXivWaveform's .scan), for the Waveforms tab's Source: Simulated
-        view. Pure data reshaping -- no camera, no FPGA, nothing
-        hardware-facing; safe to call with nothing connected at all.
+    #: Where each slot of the Wvfrm2 AO stream lands on the FPGA Scope's
+    #: columns (docs/fpga_scope.md: "columns 8-13 carry the galvo/tiling/
+    #: filter values"). The two prefix slots are LabVIEW bookkeeping, not
+    #: signals, so they are not shown.
+    AO_STREAM_COLUMNS = {"X Galvo": 8, "Z Galvo": 9, "Z Piezo": 10,
+                         "Dither Galvo": 11, "Tiling": 12, "Filter": 13}
+    #: 'AOTF ch (V)' channel -> scope column (scope_view.LEGEND_LABELS:
+    #: 16/17 are AOTF 0/1, 18 is Perfusion, 19+ are AOTF 2..6).
+    AOTF_LEVEL_COLUMNS = {0: 16, 1: 17, 2: 19, 3: 20}
 
-        Covers the AO channels (X/Z Galvo, Z Piezo, Dither Galvo) AND a
-        MODEL of the camera trigger, Cam Ext Trigger Out (DIO4) -- which is
-        NOT part of wf.channels (that is only ever the AO waveform math;
-        the trigger pulses come from the FPGA's own timing logic,
-        HHMI - Internal Cycle Sync Trigger.vi / HHMI - Generate External
-        Camera Trigger.vi, a completely separate mechanism). Without it a
-        Simulated view shows every analog channel but never the trigger
-        they are meant to be in step with -- and checking that they ARE in
-        step, before anything touches real hardware, is the whole point of
-        this view. One pulse per slice's AO block, at the instant the
-        FPGA's free run fires it, MIN_TRIGGER_UP_TICKS wide (the ~100 us
-        camera pulse the FPGA hard-codes -- fpga_trigger.py,
-        docs/fpga_io_map.md).
+    def _scope_snapshot_from_arm(self, wf, aotf_levels: dict[int, int] | None = None) -> ScopeSnapshot:
+        """Decode what would be SENT TO THE CARD back into scope traces --
+        the Waveforms tab's Source: Simulated view.
 
-        Int Sync (column 14) is deliberately NOT modeled: this port arms
-        'Trigger up (ticks)' at _trigger_up_ticks_for(wf), which is longer
-        than the whole AO block by design (it has to cover it, spikes/29b),
-        so a faithful Int Sync trace would be a permanently-high line
-        carrying no information. The camera trigger is the reference edge
-        worth looking at.
+        Deliberately built from the arm payload itself, not from a
+        second model of each signal: ``wf.words`` IS the Wvfrm2 AO stream
+        start_free_run() streams, so unpack_words() (waveform.py, written
+        "for showing what was sent") replays every slot in it -- X/Z
+        Galvo, Z Piezo, Dither Galvo, Tiling, Filter -- rather than a
+        hand-picked few. ``aotf_levels`` is the same dict handed to
+        start_free_run(aotf_levels=...), drawn as the DC level it is
+        (docs/aotf.md: written just before the arm, held for the whole run,
+        zeroed on stop). The trigger is the one thing with no payload to
+        replay -- the FPGA's own timing logic generates it -- so it is
+        reconstructed from the timing this port actually arms:
+        MIN_TRIGGER_UP_TICKS wide, once per AO block.
 
-        Modeled from the same timing this port actually arms the FPGA
-        with -- still computed, not a real-hardware readback.
+        Anything added to the stream later shows up here for free. No
+        camera, no FPGA, nothing hardware-facing; safe with nothing
+        connected at all.
+
+        Int Sync (column 14) is deliberately left empty: this port arms
+        'Trigger up (ticks)' at _trigger_up_ticks_for(wf), longer than the
+        whole AO block by design (it has to cover it, spikes/29b), so a
+        faithful trace would be a permanently-high line carrying nothing.
         """
         n = max(1, wf.points_per_trigger * wf.n_slices)
         frames = np.zeros((n, len(AI_CHANNEL_NAMES)), dtype=np.int16)
-        # Same column positions the real FPGA Scope uses (docs/fpga_scope.md):
-        # 8 X Galvo, 9 Z Galvo, 10 Z Piezo, 11 Dither Galvo, 15 DIO4.
-        # Everything else (AI0-7, Int Sync, AOTF, ...) stays 0 here.
-        for name, col in (("X Galvo", 8), ("Z Galvo", 9), ("Z Piezo", 10), ("Dither Galvo", 11)):
-            arr = wf.channels.get(name)
+        # The AO stream, replayed slot by slot straight out of the words
+        # that would be DMA'd to the card.
+        streamed = unpack_words(wf.words) if wf.words else {}
+        for name, col in self.AO_STREAM_COLUMNS.items():
+            arr = streamed.get(name)
             if arr is not None and len(arr):
-                frames[:, col] = np.clip(arr, -32767, 32767).astype(np.int16)
+                arr = arr[:n]
+                frames[:len(arr), col] = np.clip(arr, -32767, 32767).astype(np.int16)
+        # The laser: its level (from the Excitation rows) modulated by the
+        # per-line gate LouisXIV defines -- on through the forward sweep,
+        # off for the whole return move (louisxiv_waveform.aotf_gate).
+        gate = wf.channels.get("AOTF gate")
+        for ch, counts in (aotf_levels or {}).items():
+            col = self.AOTF_LEVEL_COLUMNS.get(int(ch))
+            if col is None:
+                continue
+            level = int(np.clip(counts, -32767, 32767))
+            if gate is not None and len(gate):
+                g = gate[:n]
+                frames[:len(g), col] = np.clip(g * level, -32767, 32767).astype(np.int16)
+            else:
+                frames[:, col] = level
+        # The camera trigger: no payload to replay (the FPGA generates it),
+        # so rebuilt from the same ticks this port arms it with.
         tpp = max(1, wf.points_per_trigger)
         dio4_n = int(np.clip(round(MIN_TRIGGER_UP_TICKS / wf.ticks_between_points), 1, tpp))
         for k in range(wf.n_slices):
@@ -2087,11 +2133,12 @@ class MainWindow(QMainWindow):
             return
         lx, period_s, exposure_s, sync = result
         wf = lx.scan
-        snap = self._scope_snapshot_from_waveform(wf)
+        aotf_levels, aotf_desc = self._aotf_levels_for_run()
+        snap = self._scope_snapshot_from_arm(wf, aotf_levels)
         self.scope_panel.show_computed_waveform(snap)
         self._log(f"Simulated: {len(snap.frames)} computed points ({wf.n_slices} slice(s) x "
-                  f"{wf.points_per_trigger} pts/trigger) shown on the Waveforms tab -- nothing "
-                  "armed, no voltage sent to the FPGA.")
+                  f"{wf.points_per_trigger} pts/trigger), AOTF {aotf_desc} -- this is the arm "
+                  "payload itself, replayed; nothing armed, no voltage sent to the FPGA.")
 
     def _start_acquisition(self):
         if self.camera is None or self.fpga is None:
@@ -2232,13 +2279,17 @@ class MainWindow(QMainWindow):
         self._sim_fed = 0
         # Simulate-on-FPGA clamps every AO output to 0 V by design (the
         # whole point: nothing may move) -- the real scope reading flat is
-        # correct, but not useful to look at, so show the computed waveform
-        # instead automatically. A real-camera run switches back to the
+        # correct, but not useful to look at, so replay the arm payload
+        # instead automatically. Deliberately the INTENDED levels, not the
+        # clamped ones start_free_run() will actually write: this view is
+        # for checking the plan, and a clamped copy of it would be as
+        # blank as the real trace. A real-camera run switches back to the
         # live view, in case Source was left on Simulated from an earlier
         # look. Either way this is just what the Waveforms tab DISPLAYS;
         # the FPGA is armed identically regardless of Source.
         if sim_on_fpga:
-            self.scope_panel.show_computed_waveform(self._scope_snapshot_from_waveform(wf))
+            self.scope_panel.show_computed_waveform(
+                self._scope_snapshot_from_arm(wf, self._aotf_levels_for_run()[0]))
         else:
             self.scope_panel.source_combo.setCurrentText("Hardware")
         trigger_up_ticks = self._trigger_up_ticks_for(wf)
@@ -2248,21 +2299,7 @@ class MainWindow(QMainWindow):
                                                         else "0 -- every AO output frozen at 0 V."))
 
         # ---- AOTF excitation level (docs/aotf.md) --------------------------
-        # The one selected Excitation row (enforced above) sets its AOTF
-        # channel to Power% -> volts -> DAC counts; every other channel 0.
-        # The FPGA drives 'AOTF ch (V)' as a DC level while armed, so the
-        # laser is on for the whole run. In simulate-on-FPGA mode
-        # start_free_run() forces all AOTF levels to 0 (nothing may light).
-        aotf_levels: dict[int, int] = {}
-        aotf_desc = "off"
-        for i, (chk, wl, spin) in enumerate(self.excitation_rows):
-            if chk.isChecked() and spin.value() > 0:
-                ch = cal.aotf.channel_for_row(i)
-                v = cal.aotf.power_pct_to_v(spin.value())
-                counts = int(round(v * COUNTS_PER_VOLT))
-                aotf_levels[ch] = counts
-                aotf_desc = (f"{wl} nm at {spin.value():g} % -> AOTF ch {ch} = {v:.3f} V ({counts} counts); "
-                             f"other channels 0")
+        aotf_levels, aotf_desc = self._aotf_levels_for_run()
         if sim_on_fpga and aotf_levels:
             self._log(f"SIMULATE ON FPGA: AOTF forced OFF (would have been {aotf_desc}).")
         else:

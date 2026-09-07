@@ -560,5 +560,31 @@ def test_preview_never_touches_the_fpga_and_shows_the_true_z_piezo_staircase(app
         # Int Sync is deliberately not modeled (armed longer than the whole
         # block by design, so it would just be a permanently-high line).
         assert snap.frames[:, 14].max() == 0
+
+        # The AO traces are the ARM PAYLOAD replayed, not a second model of
+        # it: unpacking the very words start_free_run() would DMA has to
+        # give back exactly what is drawn, slot for slot.
+        from unmscope.hardware.waveform import unpack_words
+        streamed = unpack_words(wf.words)
+        for name, col in mw.MainWindow.AO_STREAM_COLUMNS.items():
+            assert np.array_equal(snap.frames[:, col], streamed[name][:len(snap.frames)]), name
+
+        # The laser: MODULATED, not a DC level -- LouisXIV's rule is on
+        # through the forward sweep, off for the whole return move
+        # (louisxiv_waveform.aotf_gate). One on/off cycle per slice, at the
+        # level the Excitation rows ask for.
+        levels, _desc = w._aotf_levels_for_run()
+        assert levels, "the fixture selects one excitation row, so a level must be computed"
+        for ch, counts in levels.items():
+            col = mw.MainWindow.AOTF_LEVEL_COLUMNS[ch]
+            trace = snap.frames[:, col].astype(np.int64)
+            assert counts != 0
+            assert trace.max() == counts, "on during the sweep, at the requested level"
+            assert trace.min() == 0, "off during the return move -- not a DC level"
+            # blanks once per slice, in step with the galvo's flyback
+            _, falling = digital_edges(trace, threshold=counts / 2)
+            assert len(falling) == wf.n_slices, f"expected one blanking per slice, got {len(falling)}"
+            on_frac = (trace > counts / 2).sum() / len(trace)
+            assert 0.5 < on_frac < 1.0, f"on for most of each line but not all of it, got {on_frac:.2f}"
     finally:
         w.fpga = real_fpga                       # restore before the window fixture's own teardown

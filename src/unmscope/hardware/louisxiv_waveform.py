@@ -154,6 +154,27 @@ def fast_axis_line(xrange: float, offset: float, xpix: int, update_rate: int, ta
 
 
 # -- slow axes -----------------------------------------------------------------------
+def aotf_gate(line: FastAxisLine) -> np.ndarray:
+    """LouisXIV's laser modulation for one fast-axis line: 1.0 while the
+    sheet sweeps forward and the camera is exposing, 0.0 for the whole
+    return move (``HHMI - Pockel Cell or AOTF Linear Ramp.vi``: "on during
+    the linear forward sweep, off for the entire return move").
+
+    The boundary is the one the rate rules already use -- ``on_points`` =
+    min points - points used for return, annotated "(AOTF on, camera
+    exposing)" on FastAxisLine itself -- so the gate and the AO rate agree
+    by construction rather than by a second, separate derivation.
+
+    Bidirectional lines sweep both ways with no return move, so the gate
+    is on throughout.
+    """
+    if line.bidirectional:
+        return np.ones(line.total_points)
+    gate = np.zeros(line.total_points)
+    gate[:max(0, line.on_points)] = 1.0
+    return gate
+
+
 def s_curve_points(return_points: int) -> int:
     """``HHMI - Compute S curve number of points``: return points IQ 3."""
     return int(return_points) // 3
@@ -441,12 +462,14 @@ def build_louisxiv_waveform(*, exposure_s: float, cycle_s: float, x_range_v: flo
     delays = extra_counts_for_delays(x_galvo_delay_us, z_galvo_delay_us, z_piezo_delay_us,
                                      rate.ao_rate_hz)
     x_block = line.positions
+    gate_block = aotf_gate(line)
     ticks = rate.ticks_between_points
     if delays.any_shift:
         x_block = add_hold_counts(x_block, *delays.x_galvo)
         slow_v = [(add_hold_counts(zg, *delays.z_galvo), add_hold_counts(zp, *delays.z_piezo))
                   for zg, zp in slow_v]
         d_block = add_hold_counts(d_block, delays.total, 0)   # dither rides with the AOTF pair
+        gate_block = add_hold_counts(gate_block, *delays.aotf)   # the AOTF pair itself
         # LouisXIV lets the block get longer (Time Per WvFrm grows by the
         # lag). Our free run has a fixed trigger period, so instead the
         # points are re-spaced to keep the longer block inside the same
@@ -455,6 +478,12 @@ def build_louisxiv_waveform(*, exposure_s: float, cycle_s: float, x_range_v: flo
         n_pts = len(x_block)
 
     scan = assemble_scan(x_block, slow_v, d_block, ticks)
+    # The laser modulation, one line's gate repeated per slice, alongside the
+    # AO channels so it can be inspected against them. Kept OUT of the packed
+    # AO words on purpose: the deployed bitfile's DMA cluster has no AOTF slot
+    # (Tiling/Filter sit there), so this is the planned modulation, not
+    # something the stream carries -- see the module docstring.
+    scan.channels["AOTF gate"] = np.tile(gate_block, len(slow_v))
     notes = []
     if delays.any_shift:
         notes.append(

@@ -124,17 +124,31 @@ def test_arm_failure_is_reported_and_unwinds(app, window, monkeypatch):
     assert any("arm FAILED" in m for m in w.logs)
 
 
-def test_simulate_on_fpga_keeps_aotf_off(app, window):
+def test_simulate_on_fpga_drives_the_aotf_but_still_clamps_the_ao(app, window):
+    """User, 2026-09-07 (laser module confirmed off): "Something happened to
+    the AOTF channel again. I am not seeing any voltage at those channels."
+    A simulate-on-FPGA run forced every AOTF level to 0 V, so the channels
+    could never show anything on the live trace. The AO clamp is what stops
+    the mirrors moving, and it stays on."""
     w = window
     regs = w.fpga._session.registers
     w.mode_combo.setCurrentText(mw.MODE_CONTINUOUS)
+    # 488 nm is the shipped default row; make sure a level is actually asked for
+    levels, _desc = w._aotf_levels_for_run()
+    assert levels, "the test needs a selected excitation row"
+    ch, counts = next(iter(levels.items()))
     pump(app, 0.05)
     w.on_acquire_clicked()
     pump(app, 0.3)
-    assert any("AOTF forced OFF" in m for m in w.logs)
-    assert regs["AOTF ch (V)"].read()["AOTF ch 0"] == 0 and regs["AOTF ch out (V)"].read()["AOTF ch 0"] == 0
-    w.on_acquire_clicked()
+
+    assert any("AOTF LIVE on a clamped run" in m for m in w.logs)
+    assert regs["AOTF ch (V)"].read()[f"AOTF ch {ch}"] == counts
+    assert regs["AO Limit Max (counts)"].read()["AOTF on?"] is True
+    assert w.fpga.ao_clamped, "the AO outputs must still be frozen"
+
+    w.on_acquire_clicked()                                  # Stop
     pump(app, 0.3)
+    assert regs["AOTF ch (V)"].read()[f"AOTF ch {ch}"] == 0, "levels must return to 0 V at Stop"
 
 
 def test_real_camera_run_drives_selected_aotf_channel(app, window):

@@ -152,9 +152,11 @@ def ao_limits(clamp: bool, limit_counts: int = 0, allow_aotf_gate: bool | None =
     The clusters also carry the 'AOTF on?' permission: the FPGA range-
     checks every point's AOTF gate against Max/Min, so Max=False forces
     the AOTF off whatever the stream says. allow_aotf_gate defaults to
-    ``not clamp``; a clamped run may pass True to let the gate through
-    with every AOTF level at 0 V (the gate is then visible on the scope
-    and nothing can light up)."""
+    ``not clamp`` -- the conservative choice, kept as the DEFAULT so a
+    caller has to ask for anything else. A clamped run that passes True
+    lets the gate through, and if the levels are non-zero the laser
+    really does light: the AO clamp stops the mirrors moving, it has
+    never had anything to do with the AOTF."""
     if allow_aotf_gate is None:
         allow_aotf_gate = not clamp
     if clamp:
@@ -637,9 +639,12 @@ class FpgaTriggerController:
                            counter keeps its value until we disarm.
 
         aotf_levels={channel: counts} sets 'AOTF ch (V)' for the run (the
-        output follows the waveform's per-point gate, docs/aotf.md); a
-        clamped run always writes 0 V levels. allow_aotf_gate is the
-        'AOTF on?' permission in the AO limits (default: not clamp_ao).
+        output follows the waveform's per-point gate, docs/aotf.md) --
+        written as given, clamped run or not. allow_aotf_gate is the
+        'AOTF on?' permission in the AO limits; it still defaults to
+        ``not clamp_ao``, so a caller that wants the AOTF live on a
+        clamped run has to say so, and both switches have to agree
+        before any light can come out.
 
         Callbacks run on the monitor thread: on_trigger_count(n) whenever
         '# of triggers read' changes, on_status(FreeRunStatus) every
@@ -729,7 +734,13 @@ class FpgaTriggerController:
             return False
         # AOTF levels for the run: 0 V whenever clamped (nothing may light
         # up), otherwise what the caller asked for. Read back.
-        self.set_aotf_levels({} if clamp_ao else aotf_levels)
+        # Whatever the caller asked for, clamped or not. This used to be
+        # overridden to {} under clamp_ao, which meant a simulate-on-FPGA run
+        # could never show any AOTF voltage at all -- the caller decides the
+        # policy now (MainWindow._start_acquisition), because "the AO outputs
+        # must not move" and "the laser must not light" are separate
+        # questions and only the operator knows the answer to the second.
+        self.set_aotf_levels(aotf_levels)
         # Waveform content: a repeating pattern of I64 words (all-zero by
         # default = every AO channel at 0 V). See pack_ao_word().
         self._set_pattern(ao_words)

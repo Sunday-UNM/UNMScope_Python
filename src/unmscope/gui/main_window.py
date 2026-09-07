@@ -2374,9 +2374,19 @@ class MainWindow(QMainWindow):
                                                         else "0 -- every AO output frozen at 0 V."))
 
         # ---- AOTF excitation level (docs/aotf.md) --------------------------
+        # The AOTF is driven for real even on a simulate-on-FPGA run (user,
+        # 2026-09-07, with the laser module confirmed off). It used to be
+        # forced to 0 V there, which meant the AOTF channels could never show
+        # any voltage on the live trace -- "I am not seeing any voltage at
+        # those channels". The AO clamp stops the mirrors moving; it never
+        # had anything to do with the laser, and conflating the two hid the
+        # one signal the run was being watched for. allow_aotf_gate has to be
+        # passed explicitly because it still defaults to off under a clamp.
         aotf_levels, aotf_desc = self._aotf_levels_for_run()
         if sim_on_fpga and aotf_levels:
-            self._log(f"SIMULATE ON FPGA: AOTF forced OFF (would have been {aotf_desc}).")
+            self._log(f"AOTF LIVE on a clamped run: {aotf_desc}. The AO outputs are frozen at "
+                      "0 V but the laser IS being driven for the length of this run; levels "
+                      "return to 0 V at Stop.")
         else:
             self._log(f"AOTF: {aotf_desc}.")
 
@@ -2385,6 +2395,7 @@ class MainWindow(QMainWindow):
             period_s, exposure_s, n_triggers=n_triggers, clamp_ao=sim_on_fpga, clamp_counts=clamp_counts,
             ao_points_per_trigger=wf.points_per_trigger, ao_ticks_between_points=wf.ticks_between_points,
             ao_words=wf.words, trigger_up_ticks=trigger_up_ticks, aotf_levels=aotf_levels,
+            allow_aotf_gate=True,
             on_trigger_count=lambda count: self.fpga_signals.frame_fired.emit(count),
             on_status=lambda st: self.fpga_signals.status.emit(st),
             on_error=lambda msg: self.fpga_signals.error.emit(msg),

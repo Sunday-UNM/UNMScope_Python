@@ -24,8 +24,14 @@ Every AO output is clamped by the FPGA's own limit registers,
 Z Galvo, Z Piezo, Dither Galvo, Tiling, Filter + `AOTF on?`). The FPGA
 range-checks every DMA point and every static value against them
 (`Output DMA.vi` / `Range Check A0 Values.vi`), so 0/0 forces 0 counts on
-every channel whatever the waveform words say, and `AOTF on?` is forced
-False.
+every channel whatever the waveform words say.
+
+**The AOTF is NOT part of this clamp** (changed 2026-09-07, user's
+instruction, laser module confirmed off). `AOTF on?` used to be forced
+False here as well; it is now passed `True` by the GUI so the laser
+modulation is visible on the live trace like every other channel. The AO
+clamp freezes the galvos and the piezo -- that is all it was ever for.
+See docs/aotf.md.
 
 - Written at FPGA **connect** when the camera is simulated
   (`FpgaTriggerController.set_ao_clamp(True)`) and again at **every arm**

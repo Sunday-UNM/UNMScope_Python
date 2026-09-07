@@ -715,6 +715,28 @@ def test_computed_waveform_ticks_whatever_carries_data(app):
     assert not p.channel_checks[16].isChecked(), "an empty channel is not ticked just because it is a default"
 
 
+def test_computed_waveform_leaves_a_working_selection_completely_alone(app):
+    """The user: "everytime I hit acquire the defaults displays are kicking
+    in. I want only the waveforms I checked be displayed." So once a ticked
+    channel has data, showing a computed waveform must not touch the
+    selection at all -- not even additively."""
+    p = FpgaScopePanel()
+    for chk in p.channel_checks.values():
+        chk.setChecked(False)
+    p.channel_checks[10].setChecked(True)         # the user wants ONLY Z Piezo
+
+    n = 300
+    frames = np.zeros((n, len(AI_CHANNEL_NAMES)), dtype=np.int16)
+    for col in (8, 9, 10, 11, 15, 19):            # plenty of other channels carry data
+        frames[:, col] = 700
+    snap = ScopeSnapshot(frames=frames, fs_hz=10_000.0, names=AI_CHANNEL_NAMES, end_frame_index=n)
+
+    for _ in range(3):                            # repeated Acquires must not creep
+        p.show_computed_waveform(snap)
+
+    assert p.enabled_channels() == [10], f"selection was overridden: {p.enabled_channels()}"
+
+
 def test_computed_waveform_never_unticks_the_users_own_picks(app):
     p = FpgaScopePanel()
     p.channel_checks[0].setChecked(True)          # AI0: user's own pick, no data in the snapshot

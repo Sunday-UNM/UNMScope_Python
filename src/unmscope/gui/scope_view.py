@@ -1281,16 +1281,21 @@ class FpgaScopePanel(QWidget):
         # combo (not trace.set_trigger_column directly) so the dropdown
         # itself shows what the screen is actually doing.
         self.trig_combo.setCurrentIndex(0)
-        # Tick whatever actually carries data. DEFAULT_ACTIVE hard-codes
-        # AOTF 0/1, but which AOTF channel is live depends on the laser
-        # selected in Excitation (488 is AOTF 2 on this rig) -- so the
-        # active one was never shown, and the two that were are empty.
-        # Doing it from the snapshot means the live laser's channel comes
-        # up on its own, and a computed waveform can never land on a blank
-        # screen because the columns holding it happened to be unticked.
-        for col, chk in self.channel_checks.items():
-            if col < snap.frames.shape[1] and np.any(snap.frames[:, col]) and not chk.isChecked():
-                chk.setChecked(True)          # additive: never unticks the user's own picks
+        # RESCUE ONLY -- never on a screen that is already showing something.
+        # An earlier version ticked every column carrying data on every
+        # single call, which meant each Acquire reimposed a channel set over
+        # whatever the user had chosen. Their words: "everytime I hit acquire
+        # the defaults displays are kicking in. I want only the waveforms I
+        # checked be displayed." So: if any ticked channel already has data,
+        # change nothing at all. Only when the screen would be blank -- none
+        # of the ticked channels hold anything -- tick the ones that do,
+        # which is also what puts the live laser's AOTF channel up the first
+        # time (DEFAULT_ACTIVE hard-codes AOTF 0/1, but 488 is AOTF 2 here).
+        has_data = {col for col in self.channel_checks
+                    if col < snap.frames.shape[1] and np.any(snap.frames[:, col])}
+        if not any(self.channel_checks[c].isChecked() for c in has_data):
+            for col in has_data:
+                self.channel_checks[col].setChecked(True)
         self.trace.set_data(snap)
         self.trace.fit_each_channel()
         self._sync_view_combos()

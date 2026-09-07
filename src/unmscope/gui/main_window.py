@@ -2013,20 +2013,12 @@ class MainWindow(QMainWindow):
                   f"(flyback {self.dg_flyback.value():.2f}) (calibration: {cal.source}).")
         return lx, period_s, exposure_s, sync
 
-    def on_preview_waveform_requested(self):
-        """Waveforms tab, Source: Simulated, 'Preview' clicked. Computes
-        the TRUE waveform through the exact same _compute_scan_waveform()
-        Acquire uses, then hands the scope panel a snapshot to DISPLAY.
-
-        Deliberately never references self.fpga anywhere in this method:
-        no voltage can leave the FPGA card through this path, by
-        construction, regardless of what is or isn't connected.
-        """
-        result = self._compute_scan_waveform()
-        if result is None:
-            return
-        lx, period_s, exposure_s, sync = result
-        wf = lx.scan
+    @staticmethod
+    def _scope_snapshot_from_waveform(wf) -> ScopeSnapshot:
+        """A ScopeSnapshot of the AO side of an already-computed ScanWaveform
+        (wf = a LouisXivWaveform's .scan), for the Waveforms tab's Source:
+        Simulated view. Pure data reshaping -- no camera, no FPGA, nothing
+        hardware-facing; safe to call with nothing connected at all."""
         n = max(1, wf.points_per_trigger * wf.n_slices)
         frames = np.zeros((n, len(AI_CHANNEL_NAMES)), dtype=np.int16)
         # Same column positions the real FPGA Scope uses for these four
@@ -2037,12 +2029,28 @@ class MainWindow(QMainWindow):
             arr = wf.channels.get(name)
             if arr is not None and len(arr):
                 frames[:, col] = np.clip(arr, -32767, 32767).astype(np.int16)
-        snap = ScopeSnapshot(frames=frames, fs_hz=1.0 / wf.point_period_s,
+        return ScopeSnapshot(frames=frames, fs_hz=1.0 / wf.point_period_s,
                              names=AI_CHANNEL_NAMES, end_frame_index=n)
-        self.scope_panel.set_preview_snapshot(snap)
-        self._log(f"Preview: {n} computed points ({wf.n_slices} slice(s) x {wf.points_per_trigger} "
-                  "pts/trigger) shown on the Waveforms tab (Source: Simulated) -- nothing armed, "
-                  "no voltage sent to the FPGA.")
+
+    def on_preview_waveform_requested(self):
+        """Waveforms tab, Source combo set to Simulated. Computes the TRUE
+        waveform through the exact same _compute_scan_waveform() Acquire
+        uses, then hands the scope panel a snapshot to DISPLAY.
+
+        Deliberately never references self.fpga anywhere in this method:
+        no voltage can leave the FPGA card through this path, by
+        construction, regardless of what is or isn't connected.
+        """
+        result = self._compute_scan_waveform()
+        if result is None:
+            return
+        lx, period_s, exposure_s, sync = result
+        wf = lx.scan
+        snap = self._scope_snapshot_from_waveform(wf)
+        self.scope_panel.show_computed_waveform(snap)
+        self._log(f"Simulated: {len(snap.frames)} computed points ({wf.n_slices} slice(s) x "
+                  f"{wf.points_per_trigger} pts/trigger) shown on the Waveforms tab -- nothing "
+                  "armed, no voltage sent to the FPGA.")
 
     def _start_acquisition(self):
         if self.camera is None or self.fpga is None:
@@ -2181,6 +2189,17 @@ class MainWindow(QMainWindow):
         # own limit registers. Real timing, nothing moves, no camera.
         sim_on_fpga = not self.camera.reacts_to_dio4
         self._sim_fed = 0
+        # Simulate-on-FPGA clamps every AO output to 0 V by design (the
+        # whole point: nothing may move) -- the real scope reading flat is
+        # correct, but not useful to look at, so show the computed waveform
+        # instead automatically. A real-camera run switches back to the
+        # live view, in case Source was left on Simulated from an earlier
+        # look. Either way this is just what the Waveforms tab DISPLAYS;
+        # the FPGA is armed identically regardless of Source.
+        if sim_on_fpga:
+            self.scope_panel.show_computed_waveform(self._scope_snapshot_from_waveform(wf))
+        else:
+            self.scope_panel.source_combo.setCurrentText("Hardware")
         block_ticks = wf.points_per_trigger * wf.ticks_between_points
         # The Int-Sync high time must cover the block or the FPGA aborts the
         # block after the last trigger of a bounded run (spikes/29b, 29c).

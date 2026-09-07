@@ -934,11 +934,11 @@ class FpgaScopePanel(QWidget):
 
     REFRESH_MS = 100
 
-    #: Emitted when Preview is clicked. MainWindow (which owns Scan Setup,
-    #: the calibration and the camera) computes the true waveform and hands
-    #: the result back via set_preview_snapshot() -- this widget never
-    #: computes a waveform itself, and never touches self._scope while
-    #: doing so.
+    #: Emitted when Source is set to Simulated. MainWindow (which owns Scan
+    #: Setup, the calibration and the camera) computes the true waveform and
+    #: hands the result back via show_computed_waveform() -- this widget
+    #: never computes a waveform itself, and never touches self._scope
+    #: while doing so.
     preview_requested = Signal()
 
     def __init__(self, parent=None):
@@ -970,25 +970,23 @@ class FpgaScopePanel(QWidget):
         # Source: which data feeds this screen. Hardware is the real FPGA
         # scope (unchanged from before this existed -- everything below is
         # additive). Simulated NEVER touches self._scope or the FPGA in any
-        # way: it only ever displays a snapshot MainWindow builds from the
-        # already-computed AO arrays and hands in via set_preview_snapshot().
-        # No voltage can leave the card through this path, by construction.
+        # way: selecting it computes and shows the true waveform immediately
+        # (MainWindow builds it from the already-computed AO arrays and
+        # hands it in via show_computed_waveform()) -- no voltage can leave
+        # the card through this path, by construction. Acquire also selects
+        # Simulated for you automatically on a Simulate-on-FPGA run, since
+        # the real trace is known-clamped-to-0V there by design.
         top.addWidget(QLabel("Source"))
         self.source_combo = QComboBox()
         self.source_combo.addItems(["Hardware", "Simulated"])
         self.source_combo.setToolTip("Hardware: the real FPGA scope (live, subject to the AO "
-                                     "clamp in Simulate-on-FPGA runs).\nSimulated: the computed "
-                                     "waveform for the current Scan Setup -- no voltage is ever "
-                                     "sent to the FPGA for this. Click Preview to (re)compute it.")
+                                     "clamp in Simulate-on-FPGA runs).\nSimulated: the true "
+                                     "computed waveform for the current Scan Setup, shown as soon "
+                                     "as you pick this -- no voltage is ever sent to the FPGA for "
+                                     "it. An Acquire run also switches here for you automatically "
+                                     "when it's Simulate-on-FPGA.")
         self.source_combo.currentIndexChanged.connect(self._on_source_changed)
         top.addWidget(self.source_combo)
-        self.preview_btn = QPushButton("Preview")
-        self.preview_btn.setToolTip("Compute the true AO waveform for the current Scan Setup / "
-                                    "Low-Level Waveform Config values and show it here -- the "
-                                    "exact math Acquire would use, but nothing is armed and no "
-                                    "voltage leaves the FPGA card. Switches Source to Simulated.")
-        self.preview_btn.clicked.connect(self._on_preview_clicked)
-        top.addWidget(self.preview_btn)
         top.addSpacing(12)
 
         top.addWidget(QLabel("T/div"))
@@ -1239,24 +1237,53 @@ class FpgaScopePanel(QWidget):
             else:
                 self.trace.set_data(None)
                 self.status_label.setText("Scope: FPGA not connected")
-        elif self._preview_snap is None:
-            self.status_label.setText("Scope: SIMULATED -- click Preview to compute the waveform "
-                                      "(no voltage is sent to the FPGA)")
+        else:
+            # Selecting Simulated computes and shows it immediately -- no
+            # separate button. MainWindow supplies the data (this widget
+            # never computes a waveform itself); a compute that fails
+            # (e.g. no camera connected) logs why and leaves this message.
+            self.status_label.setText("Scope: SIMULATED -- computing...")
+            self.preview_requested.emit()
 
-    def _on_preview_clicked(self):
+    def show_computed_waveform(self, snap: ScopeSnapshot) -> None:
+        """MainWindow calls this with the TRUE waveform -- from a Source:
+        Simulated selection, or automatically whenever an Acquire starts a
+        Simulate-on-FPGA run (the real scope is known-uninformative there,
+        clamped to 0 V by design, so showing the computed one is just the
+        more useful default -- docs/known_issues.md). Forces Simulated
+        (signals blocked, so this alone never re-triggers a compute) and
+        only ever touches self.trace/status/points labels -- never
+        self._scope, never anything FPGA-facing.
+        """
+        self._mode = "simulated"
         if self.source_combo.currentText() != "Simulated":
-            self.source_combo.setCurrentText("Simulated")     # fires _on_source_changed too
-        self.preview_requested.emit()
-
-    def set_preview_snapshot(self, snap: ScopeSnapshot) -> None:
-        """MainWindow calls this after computing the true waveform. Only
-        ever touches self.trace/self.status_label/self.points_label --
-        never self._scope, never anything FPGA-facing."""
+            self.source_combo.blockSignals(True)
+            self.source_combo.setCurrentText("Simulated")
+            self.source_combo.blockSignals(False)
         self._preview_snap = snap
-        if self._mode == "simulated":
-            self.trace.set_data(snap)
-            self.trace.fit_each_channel()
-            self._sync_view_combos()
+        # A Z stack's slow axes (Z Piezo included) are constant WITHIN a
+        # slice and only step BETWEEN slices -- correctly flat over any one
+        # trigger. Whatever T/div was last showing (left over from the live
+        # scope, or a previous zoom) can be much narrower than one slice,
+        # let alone the whole stack, in which case every step looks like
+        # nothing is happening. fit_each_channel() only ever rescales
+        # volts, never the timebase (see its own docstring) -- widen T/div
+        # first, to whatever shows the ENTIRE computed buffer.
+        total_s = len(snap.frames) / snap.fs_hz if snap.fs_hz else 0.0
+        if total_s > 0:
+            need_per_div = total_s / HDIV
+            fit_tdiv = next((v for v in TIME_PER_DIV if v >= need_per_div), TIME_PER_DIV[-1])
+            self.trace.set_time_per_div(fit_tdiv)
+        # A computed snapshot has no real Int Sync / DIO4 edges to align on
+        # (those columns are left at 0 -- this is the AO side only);
+        # trigger-searching them would just report "no trigger" at best and
+        # can hide data at worst, so free-run for this view. Through the
+        # combo (not trace.set_trigger_column directly) so the dropdown
+        # itself shows what the screen is actually doing.
+        self.trig_combo.setCurrentIndex(0)
+        self.trace.set_data(snap)
+        self.trace.fit_each_channel()
+        self._sync_view_combos()
         self.points_label.setText(f"# points: {len(snap.frames):,} (computed)")
         self.status_label.setText("Scope: SIMULATED -- computed waveform, no voltage sent to the FPGA")
 
@@ -1274,7 +1301,7 @@ class FpgaScopePanel(QWidget):
     # -- refresh ----------------------------------------------------------------
     def _refresh(self):
         if self._mode == "simulated":
-            return    # the screen shows the last set_preview_snapshot() result, untouched
+            return    # the screen shows the last show_computed_waveform() result, untouched
         scope = self._scope
         if scope is None:
             return

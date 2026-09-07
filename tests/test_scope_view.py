@@ -575,7 +575,9 @@ def test_trigger_mode_asks_for_the_whole_buffer(app):
 # The user's ask: a fully simulated view where no voltage leaves the FPGA card, without
 # losing or endangering the real hardware scope. Hardware stays the default and every
 # hardware-facing line of the panel is untouched; Simulated only ever reaches
-# set_preview_snapshot(), which touches self.trace/labels and nothing else.
+# show_computed_waveform(), which touches self.trace/labels and nothing else. No
+# separate Preview button (the user's own pushback, "why so many options" -- selecting
+# Simulated IS the action, computed and shown immediately).
 
 class _FakeLiveScope:
     """Just enough of FpgaScope's interface for _refresh() -- no hardware."""
@@ -603,6 +605,17 @@ def test_scope_panel_defaults_to_hardware_source(app):
     assert FpgaScopePanel().source_combo.currentText() == "Hardware"
 
 
+def test_selecting_simulated_emits_a_compute_request(app):
+    """No separate button: picking Simulated from the combo IS the action.
+    MainWindow (not under test here) is what actually computes and calls
+    back via show_computed_waveform()."""
+    p = FpgaScopePanel()
+    got = []
+    p.preview_requested.connect(lambda: got.append(1))
+    p.source_combo.setCurrentText("Simulated")
+    assert got == [1]
+
+
 def test_simulated_source_ignores_the_live_scope(app):
     """Switching to Simulated must stop _refresh() from ever pulling in
     live data -- proves the two data paths cannot cross."""
@@ -619,37 +632,61 @@ def test_simulated_source_ignores_the_live_scope(app):
     assert p.trace._snap is not hot
 
     preview = _quiet_snapshot(seconds=0.05)
-    p.set_preview_snapshot(preview)
-    assert p.trace._snap is preview        # only set_preview_snapshot can reach the screen here
-
-
-def test_preview_button_switches_to_simulated_and_emits(app):
-    p = FpgaScopePanel()
-    got = []
-    p.preview_requested.connect(lambda: got.append(1))
-    p.preview_btn.click()
-    assert p.source_combo.currentText() == "Simulated"
-    assert got == [1]
+    p.show_computed_waveform(preview)
+    assert p.trace._snap is preview        # only show_computed_waveform can reach the screen here
 
 
 def test_switching_back_to_hardware_resumes_the_live_view_immediately(app):
     p = FpgaScopePanel()
     live = _FakeLiveScope(_quiet_snapshot())
     p.set_scope(live)
-    p.source_combo.setCurrentText("Simulated")
-    p.set_preview_snapshot(_burst_snapshot())
+    p.show_computed_waveform(_burst_snapshot())    # forces Simulated on its own
     p.source_combo.setCurrentText("Hardware")
     assert p.trace._snap is live._snap     # back immediately, not on the next 100 ms tick
 
 
-def test_set_preview_snapshot_never_touches_the_live_scope(app):
-    """The structural safety property, at the panel level: feeding a
-    preview snapshot must not read or write self._scope at all."""
+def test_show_computed_waveform_never_touches_the_live_scope(app):
+    """The structural safety property, at the panel level: showing a
+    computed waveform must not read or write self._scope at all."""
     class _Landmine:
         def __getattr__(self, name):
-            raise AssertionError(f"set_preview_snapshot touched the live scope's .{name}")
+            raise AssertionError(f"show_computed_waveform touched the live scope's .{name}")
 
     p = FpgaScopePanel()
     p._scope = _Landmine()                 # would raise on ANY attribute access
-    p.source_combo.setCurrentText("Simulated")
-    p.set_preview_snapshot(_quiet_snapshot(seconds=0.05))   # must not touch p._scope at all
+    p.show_computed_waveform(_quiet_snapshot(seconds=0.05))   # must not touch p._scope at all
+    assert p.source_combo.currentText() == "Simulated"        # forces the mode too
+
+
+def test_show_computed_waveform_widens_time_per_div_to_show_the_whole_buffer(app):
+    """The actual bug the user hit: a Z stack's slow axes (Z Piezo included)
+    are constant WITHIN one slice and only step BETWEEN slices -- correctly
+    flat over any narrow timebase left over from viewing the live scope
+    (or a previous zoom). fit_each_channel() only ever rescales volts, never
+    the timebase (see its own docstring) -- showing a computed waveform
+    must widen T/div itself, or every step looks like nothing happened."""
+    p = FpgaScopePanel()
+    p.tdiv_combo.setCurrentIndex(TIME_PER_DIV.index(20e-3))   # a narrow window, as if left from live viewing
+    assert p.trace.time_per_div == pytest.approx(20e-3)
+
+    n = int(2.0 * 10_000)                     # 2 s of computed buffer at 10 kHz -- several slices' worth
+    frames = np.zeros((n, len(AI_CHANNEL_NAMES)), dtype=np.int16)
+    frames[:, 10] = 1000                        # Z Piezo: nonzero, so it would be visible if shown at all
+    snap = ScopeSnapshot(frames=frames, fs_hz=10_000.0, names=AI_CHANNEL_NAMES, end_frame_index=n)
+
+    p.show_computed_waveform(snap)
+
+    assert p.trace.time_per_div * HDIV >= 2.0 - 1e-9, "T/div must widen enough to show the whole buffer"
+    assert p.tdiv_combo.currentData() == pytest.approx(p.trace.time_per_div)      # dropdown reflects it
+
+
+def test_show_computed_waveform_switches_to_free_run(app):
+    """A computed snapshot has no real Int Sync / DIO4 edges (those columns
+    are 0 -- this is the AO side only); trigger-searching them finds
+    nothing, so showing one must not leave a stale trigger selection over
+    from Hardware mode."""
+    p = FpgaScopePanel()
+    p.trig_combo.setCurrentIndex(1)              # "D4 cam trig", Hardware mode's default
+    p.show_computed_waveform(_quiet_snapshot(seconds=0.1))
+    assert p.trig_combo.currentIndex() == 0      # "Free run"
+    assert p.trace._trigger_col is None

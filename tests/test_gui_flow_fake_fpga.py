@@ -309,6 +309,30 @@ def test_save_stack_honours_the_base_name_timepoint_and_position(app, window, tm
     assert p5.parent.name == "position 4"
 
 
+# -- Acquire auto-switches the Waveforms tab to Simulated on Simulate-on-FPGA -----------
+# The user's follow-up simplification: Simulate-on-FPGA clamps every AO output to 0 V by
+# design, so the real scope is known-uninformative there -- Acquire should just show the
+# computed waveform automatically rather than making the user flip Source by hand.
+
+def test_acquire_with_a_simulated_camera_shows_the_computed_waveform_automatically(app, window):
+    w = window                                    # fixture already uses the Simulated backend
+    assert not w.camera.reacts_to_dio4             # Simulate-on-FPGA: this run
+    w.scope_panel.source_combo.setCurrentText("Hardware")   # as if left there from a real-camera look
+    w.mode_combo.setCurrentText(mw.MODE_CONTINUOUS)
+    pump(app, 0.05)
+
+    w.on_acquire_clicked()
+    assert w.acquiring
+
+    assert w.scope_panel.source_combo.currentText() == "Simulated"     # switched with no user action
+    snap = w.scope_panel._preview_snap
+    assert snap is not None and len(snap.frames) > 0
+    assert snap.frames[:, 8].astype("int64").max() != 0                # X Galvo: real, nonzero waveform
+
+    w.on_acquire_clicked()
+    pump(app, 0.3)
+
+
 def test_trigger_period_is_the_cycle_time_not_the_exposure(app, window):
     """The Z-stack image-count bug, at its root.
 
@@ -498,9 +522,10 @@ def test_preview_never_touches_the_fpga_and_shows_the_true_z_piezo_staircase(app
         pump(app, 0.05)
         w.logs.clear()
 
-        # The real click path: FpgaScopePanel switches Source to Simulated and
-        # emits preview_requested; must not raise -- the landmine would catch it.
-        w.scope_panel.preview_btn.click()
+        # The real path: selecting Simulated in the Source combo (no separate
+        # button) emits preview_requested; must not raise -- the landmine
+        # would catch it.
+        w.scope_panel.source_combo.setCurrentText("Simulated")
 
         assert w.scope_panel.source_combo.currentText() == "Simulated"
         assert any("no voltage sent to the FPGA" in m for m in w.logs)

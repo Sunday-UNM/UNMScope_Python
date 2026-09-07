@@ -162,6 +162,10 @@ class ScopeTraceWidget(QWidget):
         #: Either way the axis only leaves Volts once gains actually differ.
         self._per_channel_scale = True
         self._delay_s = 0.0        # how far the right edge sits behind "now"
+        #: Centre a segment SHORTER than the window instead of anchoring it
+        #: at the right edge. Only bites when there is blank screen to
+        #: share out -- a live buffer that fills the window is unaffected.
+        self._h_center = False
         self._trigger_col: int | None = None   # None = free run; else align on this column
         self._trig_info = ""
         self._held_trig: ScopeSnapshot | None = None   # last snapshot that had a usable edge
@@ -350,11 +354,16 @@ class ScopeTraceWidget(QWidget):
 
         This is the answer to comparing waveforms of unequal amplitude: after
         it, shape is comparable directly and each tag says what scale it is on.
+
+        Fit also centres horizontally (as Centre does): a buffer shorter than
+        the window used to be left jammed against the right edge, which is
+        not "fitted to the screen" in any sense the user recognised.
         """
         seg = self._visible_segment()
         cols = self._visible_columns()
         if seg is None or len(seg) == 0 or not cols:
             return
+        self._h_center = True
         if not self._per_channel_scale:
             # Shared mode: one gain that fits every visible channel at once.
             sub = seg[:, cols].astype(np.float64) * AI_VOLTS_PER_COUNT
@@ -379,6 +388,49 @@ class ScopeTraceWidget(QWidget):
             self._offset[c] = -((hi + lo) / 2) / self._gain[c]     # centre it
         self.update()
         self.view_changed.emit()
+
+    def center_view(self) -> None:
+        """Put the waveform in the middle of the screen, both ways, WITHOUT
+        touching any volts/div or the timebase.
+
+        Horizontally: a segment shorter than the window is normally anchored
+        hard against the right edge (see _draw_traces), which is what leaves
+        a computed waveform sitting off to one side with a screenful of blank
+        beside it. This shares that blank out evenly instead. Panning or
+        zooming releases it again.
+
+        Vertically: each shown channel is re-offset onto the centre line.
+        The difference from fit_each_channel() is that Fit RESCALES too, so
+        it discards gains that were set deliberately (per channel, or from a
+        tag's +/- buttons); this only ever moves things.
+        """
+        self._h_center = True
+        self._center_each_channel()
+        self.update()
+        self.view_changed.emit()
+
+    def _center_each_channel(self) -> None:
+        """The vertical half of center_view(): re-offset only, no rescale."""
+        seg = self._visible_segment()
+        cols = self._visible_columns()
+        if seg is None or len(seg) == 0 or not cols:
+            return
+        if not self._per_channel_scale:
+            # Shared mode: one offset for everything, on the combined range,
+            # or the channels stop sharing a scale and the axis leaves Volts.
+            sub = seg[:, cols].astype(np.float64) * AI_VOLTS_PER_COUNT
+            lo, hi = float(sub.min()), float(sub.max())
+            if not (np.isfinite(lo) and np.isfinite(hi)):
+                return
+            for c in cols:
+                self._offset[c] = -((hi + lo) / 2) / self.gain(c)
+        else:
+            for c in cols:
+                col = seg[:, c].astype(np.float64) * AI_VOLTS_PER_COUNT
+                lo, hi = float(col.min()), float(col.max())
+                if not (np.isfinite(lo) and np.isfinite(hi)):
+                    continue
+                self._offset[c] = -((hi + lo) / 2) / self.gain(c)
 
     def _px_per_div(self, plot: QRectF) -> float:
         return plot.height() / VDIV
@@ -658,7 +710,8 @@ class ScopeTraceWidget(QWidget):
             self._ti = int(np.clip(self._ti - np.sign(steps), 0, len(TIME_PER_DIV) - 1))
             if self._trigger_col is None:
                 frac = (plot.right() - ev.position().x()) / max(1.0, plot.width())
-                self._delay_s = max(0.0, anchor - frac * self.view_seconds)
+                self._h_center = False        # the user is positioning it by hand now
+            self._delay_s = max(0.0, anchor - frac * self.view_seconds)
         self.update()
         self.view_changed.emit()
         ev.accept()
@@ -792,7 +845,18 @@ class ScopeTraceWidget(QWidget):
         # back far enough yet). Anchor it at the right edge and leave the rest
         # of the screen blank rather than stretching it to fit.
         have_s = len(seg) / (self._source or self._snap).fs_hz
-        x_left = self._t_to_x(have_s, plot)
+        if self._h_center and have_s < self.view_seconds:
+            # Share the blank equally instead: the data block's left edge sits
+            # (view - have)/2 in from the left, i.e. (view + have)/2 before the
+            # right edge. Centre puts it here; panning or zooming releases it.
+            x_left = self._t_to_x((self.view_seconds + have_s) / 2.0, plot)
+        else:
+            x_left = self._t_to_x(have_s, plot)
+        # The width the DATA occupies. Identical to (plot.right() - x_left)
+        # whenever the block is anchored at the right edge, but that form
+        # silently stretched it back out to the edge once the block was
+        # centred -- so the pan only ever got it half of the way there.
+        width_px = min(1.0, have_s / self.view_seconds) * plot.width()
 
         for c in cols:
             col = seg[:, c].astype(np.float64) * AI_VOLTS_PER_COUNT
@@ -800,7 +864,6 @@ class ScopeTraceWidget(QWidget):
             m = len(mins)
             if m <= 2:
                 continue
-            width_px = (plot.right() - x_left)
             # m samples span m intervals: x_left came from len(seg)/fs, i.e.
             # the right edge is the instant AFTER the newest sample. Dividing
             # by m-1 instead pinned the last sample ON the right edge and
@@ -1023,11 +1086,18 @@ class FpgaScopePanel(QWidget):
 
         self.fit_btn = QPushButton("Fit")
         self.fit_btn.setMinimumWidth(52)
-        self.fit_btn.setToolTip("Fit the traces to the screen. In Per-ch mode each channel gets "
-                                "its own volts/div, so waveforms of very different amplitude "
-                                "become comparable shape-for-shape.")
+        self.fit_btn.setToolTip("Fit the traces to the screen and centre them. In Per-ch mode "
+                                "each channel gets its own volts/div, so waveforms of very "
+                                "different amplitude become comparable shape-for-shape.")
         self.fit_btn.clicked.connect(self._on_fit)
         top.addWidget(self.fit_btn)
+        self.center_btn = QPushButton("Centre")
+        self.center_btn.setMinimumWidth(62)
+        self.center_btn.setToolTip("Bring every shown trace back to the middle of the screen, "
+                                   "WITHOUT changing any volts/div. Fit rescales as well, which "
+                                   "throws away scales you set yourself (or from a tag's +/-).")
+        self.center_btn.clicked.connect(self._on_center)
+        top.addWidget(self.center_btn)
         self.untag_btn = QPushButton("Untag")
         self.untag_btn.setMinimumWidth(58)
         self.untag_btn.setToolTip("Remove every pinned tag. Click a trace to pin one; the tag's "
@@ -1201,6 +1271,10 @@ class FpgaScopePanel(QWidget):
 
     def _on_fit(self):
         self.trace.fit_each_channel()
+        self._sync_view_combos()
+
+    def _on_center(self):
+        self.trace.center_view()
         self._sync_view_combos()
 
     def _on_untag(self):

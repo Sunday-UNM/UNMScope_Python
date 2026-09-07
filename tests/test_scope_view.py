@@ -747,3 +747,112 @@ def test_computed_waveform_never_unticks_the_users_own_picks(app):
     p.show_computed_waveform(snap)
     assert p.channel_checks[0].isChecked(), "additive -- it must not clear what the user ticked"
     assert p.channel_checks[8].isChecked()
+
+
+# -- Centre: pan a short buffer into the middle (2026-09-07, user) ----------
+# "All I am asking for is an automatic pan action that brings the waveforms
+# to the center of the viewing window." A computed waveform is normally far
+# shorter than the window it lands in, and _draw_traces anchors a short
+# segment hard against the RIGHT edge -- so it sat off to one side with a
+# screenful of blank next to it, and Fit (which only ever rescaled) could
+# not bring it back.
+
+def _short_buffer_widget(t_per_div=0.1, fs=10_000.0, n=2000):
+    """A 0.2 s buffer shown in a 1 s window: 80% of the screen is blank."""
+    w = ScopeTraceWidget()
+    w.resize(860, 430)
+    frames = np.zeros((n, len(AI_CHANNEL_NAMES)), dtype=np.int16)
+    frames[:, 8] = (np.sin(np.linspace(0, 8 * np.pi, n)) * 800).astype(np.int16)
+    frames[:, 10] = np.linspace(1500, 3000, n).astype(np.int16)      # a different offset
+    w.set_enabled([8, 10])
+    w.set_trigger_column(None)                                       # free run: nothing pins x
+    w.set_time_per_div(t_per_div)
+    w.set_data(ScopeSnapshot(frames=frames, fs_hz=fs, names=AI_CHANNEL_NAMES, end_frame_index=n))
+    return _painted(w)
+
+
+def _drawn_centre(w, c):
+    """(x, y) of the middle of channel c's drawn extent, relative to the
+    middle of the plot area -- 0, 0 means dead centre."""
+    plot = w._plot_rect()
+    xs, ytop, ybot, _mn, _mx = w._drawn[c]
+    return ((float(xs.min()) + float(xs.max())) / 2 - plot.center().x(),
+            (float(ytop.min()) + float(ybot.max())) / 2 - plot.center().y())
+
+
+def test_centre_pans_a_short_buffer_into_the_middle(app):
+    w = _short_buffer_widget()
+    before = _drawn_centre(w, 8)
+    assert before[0] > 100, f"a short buffer should start pinned right, not at {before[0]:+.0f}px"
+
+    w.center_view()
+    _painted(w)
+    for c in (8, 10):
+        x, y = _drawn_centre(w, c)
+        assert abs(x) < 2.0, f"ch{c} still {x:+.1f}px off centre horizontally"
+        assert abs(y) < 2.0, f"ch{c} still {y:+.1f}px off centre vertically"
+
+
+def test_centre_changes_no_scales(app):
+    """The whole reason Centre exists next to Fit: Fit rescales, which throws
+    away a volts/div set deliberately (per channel, or from a tag's +/-)."""
+    w = _short_buffer_widget()
+    w.set_per_channel_scale(True)
+    w.set_gain(8, 0.5)
+    w.set_gain(10, 2.0)
+    w.set_time_per_div(0.1)
+    w.center_view()
+    _painted(w)
+    assert w.gain(8) == 0.5 and w.gain(10) == 2.0
+    assert w.time_per_div == 0.1
+
+
+def test_centre_leaves_a_full_window_alone(app):
+    """With no blank to share out there is nothing to pan: the newest sample
+    must stay on the right edge, or the live view would jump on every click."""
+    w = _short_buffer_widget(t_per_div=20e-3)        # 0.2 s window == 0.2 s of data
+    before = _drawn_centre(w, 8)[0]
+    w.center_view()
+    _painted(w)
+    assert abs(_drawn_centre(w, 8)[0] - before) < 2.0
+
+
+def test_panning_by_hand_releases_the_centring(app):
+    """Centre is a mode, not a one-shot nudge -- but the moment the user
+    positions the view themselves it has to get out of the way."""
+    from PySide6.QtCore import QPoint, QPointF, Qt
+    from PySide6.QtGui import QWheelEvent
+
+    w = _short_buffer_widget()
+    w.center_view()
+    _painted(w)
+    assert abs(_drawn_centre(w, 8)[0]) < 2.0
+
+    pos = QPointF(w._plot_rect().center())
+    w.wheelEvent(QWheelEvent(pos, w.mapToGlobal(pos.toPoint()), QPoint(0, 0), QPoint(0, -120),
+                             Qt.NoButton, Qt.NoModifier, Qt.NoScrollPhase, False))
+    _painted(w)
+    assert w._h_center is False
+
+
+def test_fit_centres_horizontally_too(app):
+    """The user's original report was against Fit: "When I hit fit the
+    waveforms are not automatically centering."""
+    w = _short_buffer_widget()
+    w.fit_each_channel()
+    _painted(w)
+    assert abs(_drawn_centre(w, 8)[0]) < 2.0
+
+
+def test_centring_does_not_stretch_the_trace(app):
+    """The pan must MOVE the block, not rubber-band it back out to the right
+    edge -- the first cut computed its width as (right edge - left edge),
+    which left it only half way there and 5x too wide."""
+    w = _short_buffer_widget()
+    span_before = float(w._drawn[8][0].max() - w._drawn[8][0].min())
+    w.center_view()
+    _painted(w)
+    span_after = float(w._drawn[8][0].max() - w._drawn[8][0].min())
+    assert span_after == pytest.approx(span_before, rel=0.02)
+    # 0.2 s of data in a 1 s window occupies a fifth of the plot area
+    assert span_after == pytest.approx(w._plot_rect().width() / 5, rel=0.05)

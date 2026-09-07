@@ -205,6 +205,16 @@ class CameraTab(QWidget):
         self.center_at_btn = self._button("Center  ROI at", _rect(37, 823, 92, 31), self.on_center_roi_at)
 
     # -- state -------------------------------------------------------------------
+    def persistent_widgets(self) -> dict:
+        """Camera settings worth carrying into the next session (see
+        unmscope.config.ui_state). The ROI corners are stored rather than
+        the derived width/height boxes, which recompute from them."""
+        return {"cam_exposure_ms": self.exposure_spin,
+                "cam_sync_readout": self.sync_readout_chk,
+                "cam_sensor_mode": self.sensor_mode_combo,
+                "cam_roi_left": self.roi_left, "cam_roi_right": self.roi_right,
+                "cam_roi_top": self.roi_top, "cam_roi_bottom": self.roi_bottom}
+
     @property
     def roi(self) -> Roi:
         return self._roi

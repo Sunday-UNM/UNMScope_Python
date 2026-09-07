@@ -1297,6 +1297,18 @@ class FpgaScopePanel(QWidget):
         self._on_channel_toggled()
 
     # -- wiring -----------------------------------------------------------------
+    def persistent_widgets(self) -> dict:
+        """The settings worth carrying into the next session (see
+        unmscope.config.ui_state). Hold is deliberately absent: coming up on
+        a frozen screen reads as broken, not as restored.
+        """
+        w = {"scope_tdiv": self.tdiv_combo, "scope_vdiv": self.vdiv_combo,
+             "scope_trig": self.trig_combo, "scope_overlay": self.overlay_btn,
+             "scope_buffer_s": self.window_spin, "scope_streaming": self.stream_chk,
+             "scope_test_clamp": self.test_clamp_spin}
+        w.update({f"scope_ch_{c}": chk for c, chk in self.channel_checks.items()})
+        return w
+
     def set_streamed_channels(self, n: int) -> None:
         """Grey out the channels the current source does not carry.
 

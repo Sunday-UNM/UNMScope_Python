@@ -72,6 +72,7 @@ from unmscope.hardware.fpga_scope import (
 from unmscope.hardware.waveform import COUNTS_PER_VOLT, unpack_words
 from unmscope.hardware.louisxiv_waveform import LouisXivWaveform, build_louisxiv_waveform
 from unmscope.config.calibration import load_calibration
+from unmscope.config import ui_state
 from unmscope.analysis.projections import DEFAULT_STAGE_ANGLE_DEG, stack_projections
 from unmscope.fileio.tiff_stack import (
     TIFF_EXTENSION, clean_base_filename, save_tiff_stack, stack_path, write_acq_info,
@@ -278,6 +279,51 @@ class MainWindow(QMainWindow):
         body.setSizes([406, 975])
 
         self._on_mode_changed(self.mode_combo.currentText())
+        self._restore_ui_state()
+
+    # -- Remembering the user's own settings between sessions --------------
+    #
+    # "why do the software keep going to default options that you have
+    # stored. Why not keep the last checked options given [by] the user as
+    # the starting point for the next session." Everything named here is
+    # written to ~/.unmscope/ui_state.json on exit and filled back in at
+    # startup; see unmscope.config.ui_state for what is deliberately left
+    # out (window geometry, Hold, connection state).
+
+    def _persistent_widgets(self) -> dict:
+        w = {
+            "backend": self.backend_combo,
+            "scan_mode": self.mode_combo,
+            "cycle_lasers": self.cycle_lasers_combo,
+            "xg_offset": self.xg_offset, "xg_range": self.xg_range, "xg_pixels": self.xg_pixels,
+            "zg_interval": self.zg_interval, "zg_start": self.zg_start, "zg_end": self.zg_end,
+            "z_interval": self.z_interval_spin, "z_start": self.z_start_spin, "z_end": self.z_end_spin,
+            "dg_sweeps": self.dg_sweeps, "dg_flyback": self.dg_flyback,
+        }
+        for wavelength, (chk, _ch, spin) in zip(self.EXCITATION_WAVELENGTHS_NM, self.excitation_rows):
+            w[f"exc_{wavelength}_on"] = chk
+            w[f"exc_{wavelength}_pct"] = spin
+        w.update(self.camera_tab.persistent_widgets())
+        w.update(self.scope_panel.persistent_widgets())
+        return w
+
+    def _restore_ui_state(self) -> None:
+        try:
+            state = ui_state.load()
+        except Exception as e:                    # a settings file must never stop startup
+            self._log(f"Could not read the saved settings: {type(e).__name__}: {e}")
+            return
+        if not state:
+            return
+        done = ui_state.apply(self._persistent_widgets(), state)
+        self._log(f"Restored {len(done)} setting(s) from the last session "
+                  f"({ui_state.default_path()}).")
+
+    def _save_ui_state(self) -> None:
+        try:
+            ui_state.save(ui_state.collect(self._persistent_widgets()))
+        except OSError as e:
+            self._log(f"Could not save the settings: {e}")
 
     # -- Top bar: Acquire, mode, Simulation, Status pill+bars, Exit --------
     def _build_top_bar(self) -> QHBoxLayout:
@@ -2607,6 +2653,11 @@ class MainWindow(QMainWindow):
             self._close_when_idle = True
             event.ignore()
             return
+        # Saved BEFORE the teardown: disconnecting can drive controls (the
+        # camera tab is written back from the device on connect/disconnect),
+        # and what should be remembered is what was on screen when the user
+        # decided to close, not what the shutdown left behind.
+        self._save_ui_state()
         if self.acquiring:
             self._stop_acquisition()
         if self.camera is not None:

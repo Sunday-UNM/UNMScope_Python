@@ -539,5 +539,26 @@ def test_preview_never_touches_the_fpga_and_shows_the_true_z_piezo_staircase(app
 
         xg_counts = snap.frames[:, 8].astype(np.int64)          # X Galvo (AO): the fast-axis sweep
         assert xg_counts.min() != xg_counts.max()
+
+        # The camera trigger: NOT part of the AO waveform math (the FPGA's
+        # own timing logic generates it, a separate mechanism -- see
+        # _scope_snapshot_from_waveform's docstring), so without it this
+        # view would show every analog channel but never the trigger they
+        # are meant to be in step with. Checking that they ARE in step,
+        # before touching real hardware, is the whole point.
+        from unmscope.hardware.fpga_scope import DIGITAL_THRESHOLD, digital_edges
+        wf = w.last_waveform
+        dio4 = snap.frames[:, 15]
+        # One pulse per slice, each firing exactly at its block's first
+        # sample (so the very first has no rising edge before it -- count
+        # the falling ones, which are all present).
+        _, dio4_falling = digital_edges(dio4)
+        assert len(dio4_falling) == wf.n_slices, f"expected one camera trigger per slice, got {len(dio4_falling)}"
+        for k in range(wf.n_slices):
+            assert dio4[k * wf.points_per_trigger] > DIGITAL_THRESHOLD, f"no trigger at the start of slice {k}"
+        assert dio4[wf.points_per_trigger // 2] <= DIGITAL_THRESHOLD, "the pulse is short, not the whole block"
+        # Int Sync is deliberately not modeled (armed longer than the whole
+        # block by design, so it would just be a permanently-high line).
+        assert snap.frames[:, 14].max() == 0
     finally:
         w.fpga = real_fpga                       # restore before the window fixture's own teardown

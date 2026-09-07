@@ -65,8 +65,10 @@ from PySide6.QtWidgets import (
 )
 
 from unmscope.hardware.camera import Camera, OrcaFlash4Camera, SimulatedCamera, other_camera_holders
-from unmscope.hardware.fpga_trigger import FpgaTriggerController, TICKS_PER_S
-from unmscope.hardware.fpga_scope import AI_CHANNEL_NAMES, FpgaScope, ScopeSnapshot
+from unmscope.hardware.fpga_trigger import FpgaTriggerController, MIN_TRIGGER_UP_TICKS, TICKS_PER_S
+from unmscope.hardware.fpga_scope import (
+    AI_CHANNEL_NAMES, DIGITAL_TRUE, IDX_DIO4, FpgaScope, ScopeSnapshot,
+)
 from unmscope.hardware.waveform import COUNTS_PER_VOLT
 from unmscope.hardware.louisxiv_waveform import LouisXivWaveform, build_louisxiv_waveform
 from unmscope.config.calibration import load_calibration
@@ -2014,21 +2016,60 @@ class MainWindow(QMainWindow):
         return lx, period_s, exposure_s, sync
 
     @staticmethod
-    def _scope_snapshot_from_waveform(wf) -> ScopeSnapshot:
-        """A ScopeSnapshot of the AO side of an already-computed ScanWaveform
-        (wf = a LouisXivWaveform's .scan), for the Waveforms tab's Source:
-        Simulated view. Pure data reshaping -- no camera, no FPGA, nothing
-        hardware-facing; safe to call with nothing connected at all."""
+    def _trigger_up_ticks_for(wf) -> int:
+        """The Int-Sync high time this port arms the FPGA with for one
+        ``wf`` (a ScanWaveform): must cover the whole AO block or the FPGA
+        aborts it after the last trigger of a bounded run (spikes/29b,
+        29c) -- the same formula _start_acquisition sends to the real
+        FPGA, factored out so the Simulated view's digital trace matches
+        it exactly rather than a second, separately-maintained copy."""
+        block_ticks = wf.points_per_trigger * wf.ticks_between_points
+        return block_ticks + 40_000
+
+    def _scope_snapshot_from_waveform(self, wf) -> ScopeSnapshot:
+        """A ScopeSnapshot of an already-computed ScanWaveform (wf = a
+        LouisXivWaveform's .scan), for the Waveforms tab's Source: Simulated
+        view. Pure data reshaping -- no camera, no FPGA, nothing
+        hardware-facing; safe to call with nothing connected at all.
+
+        Covers the AO channels (X/Z Galvo, Z Piezo, Dither Galvo) AND a
+        MODEL of the camera trigger, Cam Ext Trigger Out (DIO4) -- which is
+        NOT part of wf.channels (that is only ever the AO waveform math;
+        the trigger pulses come from the FPGA's own timing logic,
+        HHMI - Internal Cycle Sync Trigger.vi / HHMI - Generate External
+        Camera Trigger.vi, a completely separate mechanism). Without it a
+        Simulated view shows every analog channel but never the trigger
+        they are meant to be in step with -- and checking that they ARE in
+        step, before anything touches real hardware, is the whole point of
+        this view. One pulse per slice's AO block, at the instant the
+        FPGA's free run fires it, MIN_TRIGGER_UP_TICKS wide (the ~100 us
+        camera pulse the FPGA hard-codes -- fpga_trigger.py,
+        docs/fpga_io_map.md).
+
+        Int Sync (column 14) is deliberately NOT modeled: this port arms
+        'Trigger up (ticks)' at _trigger_up_ticks_for(wf), which is longer
+        than the whole AO block by design (it has to cover it, spikes/29b),
+        so a faithful Int Sync trace would be a permanently-high line
+        carrying no information. The camera trigger is the reference edge
+        worth looking at.
+
+        Modeled from the same timing this port actually arms the FPGA
+        with -- still computed, not a real-hardware readback.
+        """
         n = max(1, wf.points_per_trigger * wf.n_slices)
         frames = np.zeros((n, len(AI_CHANNEL_NAMES)), dtype=np.int16)
-        # Same column positions the real FPGA Scope uses for these four
-        # (docs/fpga_scope.md): 8 X Galvo, 9 Z Galvo, 10 Z Piezo, 11 Dither
-        # Galvo. Everything else (AI0-7, Int Sync, DIO4, AOTF, ...) isn't
-        # computed here and stays 0 -- this is the AO side only.
+        # Same column positions the real FPGA Scope uses (docs/fpga_scope.md):
+        # 8 X Galvo, 9 Z Galvo, 10 Z Piezo, 11 Dither Galvo, 15 DIO4.
+        # Everything else (AI0-7, Int Sync, AOTF, ...) stays 0 here.
         for name, col in (("X Galvo", 8), ("Z Galvo", 9), ("Z Piezo", 10), ("Dither Galvo", 11)):
             arr = wf.channels.get(name)
             if arr is not None and len(arr):
                 frames[:, col] = np.clip(arr, -32767, 32767).astype(np.int16)
+        tpp = max(1, wf.points_per_trigger)
+        dio4_n = int(np.clip(round(MIN_TRIGGER_UP_TICKS / wf.ticks_between_points), 1, tpp))
+        for k in range(wf.n_slices):
+            start = k * tpp
+            frames[start:start + dio4_n, IDX_DIO4] = DIGITAL_TRUE
         return ScopeSnapshot(frames=frames, fs_hz=1.0 / wf.point_period_s,
                              names=AI_CHANNEL_NAMES, end_frame_index=n)
 
@@ -2200,10 +2241,7 @@ class MainWindow(QMainWindow):
             self.scope_panel.show_computed_waveform(self._scope_snapshot_from_waveform(wf))
         else:
             self.scope_panel.source_combo.setCurrentText("Hardware")
-        block_ticks = wf.points_per_trigger * wf.ticks_between_points
-        # The Int-Sync high time must cover the block or the FPGA aborts the
-        # block after the last trigger of a bounded run (spikes/29b, 29c).
-        trigger_up_ticks = block_ticks + 40_000
+        trigger_up_ticks = self._trigger_up_ticks_for(wf)
         clamp_counts = self.scope_panel.test_clamp_counts() if sim_on_fpga else 0
         if sim_on_fpga:
             self._log("SIMULATE ON FPGA: AO clamp " + (f"+-{clamp_counts} counts (scope test clamp)" if clamp_counts

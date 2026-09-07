@@ -690,3 +690,38 @@ def test_show_computed_waveform_switches_to_free_run(app):
     p.show_computed_waveform(_quiet_snapshot(seconds=0.1))
     assert p.trig_combo.currentIndex() == 0      # "Free run"
     assert p.trace._trigger_col is None
+
+
+def test_computed_waveform_ticks_whatever_carries_data(app):
+    """The user's report: nothing on the screen, and the live laser's AOTF
+    channel never shown. DEFAULT_ACTIVE hard-codes AOTF 0/1, but 488 is
+    AOTF 2 on this rig -- so the channel with the level was unticked while
+    two empty ones were ticked. Showing a computed waveform must tick
+    whatever actually holds data."""
+    p = FpgaScopePanel()
+    for chk in p.channel_checks.values():        # start from nothing ticked at all
+        chk.setChecked(False)
+
+    n = 500
+    frames = np.zeros((n, len(AI_CHANNEL_NAMES)), dtype=np.int16)
+    frames[:, 10] = 1234                          # Z Piezo
+    frames[:, 19] = 800                           # AOTF 2 -- the live laser, not in DEFAULT_ACTIVE
+    snap = ScopeSnapshot(frames=frames, fs_hz=10_000.0, names=AI_CHANNEL_NAMES, end_frame_index=n)
+
+    p.show_computed_waveform(snap)
+
+    assert p.channel_checks[10].isChecked()
+    assert p.channel_checks[19].isChecked(), "the live laser's AOTF channel must come up on its own"
+    assert not p.channel_checks[16].isChecked(), "an empty channel is not ticked just because it is a default"
+
+
+def test_computed_waveform_never_unticks_the_users_own_picks(app):
+    p = FpgaScopePanel()
+    p.channel_checks[0].setChecked(True)          # AI0: user's own pick, no data in the snapshot
+    n = 100
+    frames = np.zeros((n, len(AI_CHANNEL_NAMES)), dtype=np.int16)
+    frames[:, 8] = 500
+    snap = ScopeSnapshot(frames=frames, fs_hz=10_000.0, names=AI_CHANNEL_NAMES, end_frame_index=n)
+    p.show_computed_waveform(snap)
+    assert p.channel_checks[0].isChecked(), "additive -- it must not clear what the user ticked"
+    assert p.channel_checks[8].isChecked()

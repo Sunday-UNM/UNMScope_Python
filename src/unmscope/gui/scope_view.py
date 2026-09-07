@@ -1281,6 +1281,16 @@ class FpgaScopePanel(QWidget):
         # combo (not trace.set_trigger_column directly) so the dropdown
         # itself shows what the screen is actually doing.
         self.trig_combo.setCurrentIndex(0)
+        # Tick whatever actually carries data. DEFAULT_ACTIVE hard-codes
+        # AOTF 0/1, but which AOTF channel is live depends on the laser
+        # selected in Excitation (488 is AOTF 2 on this rig) -- so the
+        # active one was never shown, and the two that were are empty.
+        # Doing it from the snapshot means the live laser's channel comes
+        # up on its own, and a computed waveform can never land on a blank
+        # screen because the columns holding it happened to be unticked.
+        for col, chk in self.channel_checks.items():
+            if col < snap.frames.shape[1] and np.any(snap.frames[:, col]) and not chk.isChecked():
+                chk.setChecked(True)          # additive: never unticks the user's own picks
         self.trace.set_data(snap)
         self.trace.fit_each_channel()
         self._sync_view_combos()

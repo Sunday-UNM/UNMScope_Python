@@ -172,3 +172,25 @@ def test_saving_is_not_confused_by_the_shutdown(app):
     w.camera_tab.exposure_spin.setValue(63.0)
     w.close()
     assert ui_state.load().get("cam_exposure_ms") == pytest.approx(63.0)
+
+
+def test_the_images_tab_display_options_come_back(app):
+    """Palette, scaling and the overlays are viewing preferences -- snapping
+    back to Gradient/Autoscale every session is the same annoyance."""
+    w = mw.MainWindow()
+    w.palette_rainbow_radio.setChecked(True)
+    w.autoscale_z_check.setChecked(False)
+    w.scalebar_check.setChecked(True)
+    w.frames_to_avg_spin.setValue(4)
+    w.deskew_check.setChecked(False)
+    w.close()
+
+    w2 = mw.MainWindow()
+    try:
+        assert w2.palette_rainbow_radio.isChecked() and not w2.palette_gradient_radio.isChecked()
+        assert not w2.autoscale_z_check.isChecked()
+        assert w2.scalebar_check.isChecked()
+        assert w2.frames_to_avg_spin.value() == 4
+        assert not w2.deskew_check.isChecked()
+    finally:
+        w2.close()

@@ -303,6 +303,22 @@ class MainWindow(QMainWindow):
         for wavelength, (chk, _ch, spin) in zip(self.EXCITATION_WAVELENGTHS_NM, self.excitation_rows):
             w[f"exc_{wavelength}_on"] = chk
             w[f"exc_{wavelength}_pct"] = spin
+        # Images tab display options: these are pure viewing preferences, and
+        # having them snap back to Gradient/Autoscale every session is exactly
+        # the same annoyance as the scope ticks.
+        w.update({
+            "img_max_counts": self.max_counts_spin,
+            "img_frames_to_avg": self.frames_to_avg_spin,
+            "img_palette_gray": self.palette_gray_radio,
+            "img_palette_gradient": self.palette_gradient_radio,
+            "img_palette_rainbow": self.palette_rainbow_radio,
+            "img_scalebar": self.scalebar_check,
+            "img_zoom_to_fit": self.zoom_to_fit_check,
+            "img_autoscale_z": self.autoscale_z_check,
+            "img_scale_to_counts": self.scale_to_counts_check,
+            "img_text_info": self.text_info_overlay_check,
+            "img_deskew": self.deskew_check,
+        })
         w.update(self.camera_tab.persistent_widgets())
         w.update(self.scope_panel.persistent_widgets())
         return w

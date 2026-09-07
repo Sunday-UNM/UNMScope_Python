@@ -317,14 +317,14 @@ def test_save_stack_honours_the_base_name_timepoint_and_position(app, window, tm
 def test_acquire_with_a_simulated_camera_shows_the_computed_waveform_automatically(app, window):
     w = window                                    # fixture already uses the Simulated backend
     assert not w.camera.reacts_to_dio4             # Simulate-on-FPGA: this run
-    w.scope_panel.source_combo.setCurrentText("Hardware")   # as if left there from a real-camera look
+    w.scope_panel.show_live()                     # as if left there from a real-camera look
     w.mode_combo.setCurrentText(mw.MODE_CONTINUOUS)
     pump(app, 0.05)
 
     w.on_acquire_clicked()
     assert w.acquiring
 
-    assert w.scope_panel.source_combo.currentText() == "Simulated"     # switched with no user action
+    assert w.scope_panel._mode == "simulated"     # switched with no user action
     snap = w.scope_panel._preview_snap
     assert snap is not None and len(snap.frames) > 0
     assert snap.frames[:, 8].astype("int64").max() != 0                # X Galvo: real, nonzero waveform
@@ -522,13 +522,14 @@ def test_preview_never_touches_the_fpga_and_shows_the_true_z_piezo_staircase(app
         pump(app, 0.05)
         w.logs.clear()
 
-        # The real path: selecting Simulated in the Source combo (no separate
-        # button) emits preview_requested; must not raise -- the landmine
-        # would catch it.
-        w.scope_panel.source_combo.setCurrentText("Simulated")
+        # The real path: the compute-and-display half of a Simulate-on-FPGA
+        # Acquire, driven without arming anything. Must not raise -- the
+        # landmine catches any reference to the FPGA controller at all.
+        lx, _period_s, _exposure_s, _sync = w._compute_scan_waveform()
+        levels, _desc = w._aotf_levels_for_run()
+        w.scope_panel.show_computed_waveform(w._scope_snapshot_from_arm(lx.scan, levels))
 
-        assert w.scope_panel.source_combo.currentText() == "Simulated"
-        assert any("no voltage sent to the FPGA" in m for m in w.logs)
+        assert w.scope_panel._mode == "simulated"
         snap = w.scope_panel._preview_snap
         assert snap is not None and len(snap.frames) > 0
 

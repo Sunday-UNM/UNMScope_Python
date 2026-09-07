@@ -1090,13 +1090,6 @@ class FpgaScopePanel(QWidget):
 
     REFRESH_MS = 100
 
-    #: Emitted when Source is set to Simulated. MainWindow (which owns Scan
-    #: Setup, the calibration and the camera) computes the true waveform and
-    #: hands the result back via show_computed_waveform() -- this widget
-    #: never computes a waveform itself, and never touches self._scope
-    #: while doing so.
-    preview_requested = Signal()
-
     def __init__(self, parent=None):
         super().__init__(parent)
         self._scope: FpgaScope | None = None
@@ -1121,28 +1114,6 @@ class FpgaScopePanel(QWidget):
         self.hold_btn.setToolTip("Freeze the screen so the captured window can be zoomed into.")
         self.hold_btn.toggled.connect(self._on_hold_toggled)
         top.addWidget(self.hold_btn)
-        top.addSpacing(12)
-
-        # Source: which data feeds this screen. Hardware is the real FPGA
-        # scope (unchanged from before this existed -- everything below is
-        # additive). Simulated NEVER touches self._scope or the FPGA in any
-        # way: selecting it computes and shows the true waveform immediately
-        # (MainWindow builds it from the already-computed AO arrays and
-        # hands it in via show_computed_waveform()) -- no voltage can leave
-        # the card through this path, by construction. Acquire also selects
-        # Simulated for you automatically on a Simulate-on-FPGA run, since
-        # the real trace is known-clamped-to-0V there by design.
-        top.addWidget(QLabel("Source"))
-        self.source_combo = QComboBox()
-        self.source_combo.addItems(["Hardware", "Simulated"])
-        self.source_combo.setToolTip("Hardware: the real FPGA scope (live, subject to the AO "
-                                     "clamp in Simulate-on-FPGA runs).\nSimulated: the true "
-                                     "computed waveform for the current Scan Setup, shown as soon "
-                                     "as you pick this -- no voltage is ever sent to the FPGA for "
-                                     "it. An Acquire run also switches here for you automatically "
-                                     "when it's Simulate-on-FPGA.")
-        self.source_combo.currentIndexChanged.connect(self._on_source_changed)
-        top.addWidget(self.source_combo)
         top.addSpacing(12)
 
         top.addWidget(QLabel("T/div"))
@@ -1186,23 +1157,6 @@ class FpgaScopePanel(QWidget):
                                 "is already there as big as the screen allows.")
         self.fit_btn.clicked.connect(self._on_fit)
         top.addWidget(self.fit_btn)
-        self.overlay_btn = QPushButton("Overlay")
-        self.overlay_btn.setCheckable(True)
-        self.overlay_btn.setMinimumWidth(70)
-        self.overlay_btn.setToolTip("Centre every shown channel on the middle line and superimpose "
-                                    "them, each scaled to fill the screen. For 'does this edge line "
-                                    "up with that one' -- the DC levels are removed, so only shape "
-                                    "and timing are being compared. Press again (or Reset) to go "
-                                    "back to a slot per channel.")
-        self.overlay_btn.toggled.connect(self._on_overlay_toggled)
-        top.addWidget(self.overlay_btn)
-        self.reset_btn = QPushButton("Reset")
-        self.reset_btn.setMinimumWidth(62)
-        self.reset_btn.setToolTip("Back to what a standard scope shows: one slot per channel, every "
-                                  "one re-fitted, nothing left over from a hand adjustment. Leaves "
-                                  "the timebase, the trigger and your channel ticks alone.")
-        self.reset_btn.clicked.connect(self._on_reset)
-        top.addWidget(self.reset_btn)
         self.untag_btn = QPushButton("Untag")
         self.untag_btn.setMinimumWidth(58)
         self.untag_btn.setToolTip("Remove every pinned tag. Click a trace to pin one; the tag's "
@@ -1216,6 +1170,24 @@ class FpgaScopePanel(QWidget):
         # whole 1381px window wider (CLAUDE.md: a control row can do that).
         top2 = QHBoxLayout()
 
+        self.overlay_btn = QPushButton("Overlay")
+        self.overlay_btn.setCheckable(True)
+        self.overlay_btn.setMinimumWidth(70)
+        self.overlay_btn.setToolTip("Centre every shown channel on the middle line and superimpose "
+                                    "them, each scaled to fill the screen. For 'does this edge line "
+                                    "up with that one' -- the DC levels are removed, so only shape "
+                                    "and timing are being compared. Press again (or Reset) to go "
+                                    "back to a slot per channel.")
+        self.overlay_btn.toggled.connect(self._on_overlay_toggled)
+        top2.addWidget(self.overlay_btn)
+        self.reset_btn = QPushButton("Reset")
+        self.reset_btn.setMinimumWidth(62)
+        self.reset_btn.setToolTip("Back to what a standard scope shows: one slot per channel, every "
+                                  "one re-fitted, nothing left over from a hand adjustment. Leaves "
+                                  "the timebase, the trigger and your channel ticks alone.")
+        self.reset_btn.clicked.connect(self._on_reset)
+        top2.addWidget(self.reset_btn)
+        top2.addSpacing(12)
         top2.addWidget(QLabel("# of seconds to buff"))
         self.window_spin = QDoubleSpinBox()
         self.window_spin.setRange(0.05, 5.0)
@@ -1406,6 +1378,10 @@ class FpgaScopePanel(QWidget):
         self._sync_view_combos()
 
     def _on_reset(self):
+        # "shows the waveforms as shown by a standard oscilloscope" -- which
+        # includes showing the live input. With the Source combo gone this is
+        # also the only manual way out of the simulated view.
+        self.show_live()
         self.trace.reset_view()
         if self.overlay_btn.isChecked():
             self.overlay_btn.blockSignals(True)      # reset_view already left overlay
@@ -1430,40 +1406,36 @@ class FpgaScopePanel(QWidget):
         self.stream_chk.setEnabled(on)
         self.clear_btn.setEnabled(on)
 
-    def _on_source_changed(self, _i=None):
-        self._mode = "simulated" if self.source_combo.currentText() == "Simulated" else "hardware"
+    def show_live(self) -> None:
+        """Leave the simulated view and go back to the live FPGA scope.
+
+        There is no Source control any more (the user removed it: the mode
+        is decided by what you Acquire, not by a dropdown). Acquire puts the
+        screen into the simulated view on a Simulate-on-FPGA run and takes it
+        out again on a real-camera one; Reset is the manual way back, so a
+        run left on screen can never strand the panel away from live.
+        """
         if self._mode == "hardware":
-            # Resume the live view immediately rather than waiting up to
-            # REFRESH_MS for the timer -- self._scope itself was never
-            # touched, so this just goes back to reading it.
-            if self._scope is not None:
-                self._refresh()
-            else:
-                self.trace.set_data(None)
-                self.status_label.setText("Scope: FPGA not connected")
+            return
+        self._mode = "hardware"
+        # Resume immediately rather than waiting up to REFRESH_MS for the
+        # timer -- self._scope itself was never touched by the simulated
+        # view, so this just goes back to reading it.
+        if self._scope is not None:
+            self._refresh()
         else:
-            # Selecting Simulated computes and shows it immediately -- no
-            # separate button. MainWindow supplies the data (this widget
-            # never computes a waveform itself); a compute that fails
-            # (e.g. no camera connected) logs why and leaves this message.
-            self.status_label.setText("Scope: SIMULATED -- computing...")
-            self.preview_requested.emit()
+            self.trace.set_data(None)
+            self.status_label.setText("Scope: FPGA not connected")
 
     def show_computed_waveform(self, snap: ScopeSnapshot) -> None:
-        """MainWindow calls this with the TRUE waveform -- from a Source:
-        Simulated selection, or automatically whenever an Acquire starts a
-        Simulate-on-FPGA run (the real scope is known-uninformative there,
-        clamped to 0 V by design, so showing the computed one is just the
-        more useful default -- docs/known_issues.md). Forces Simulated
-        (signals blocked, so this alone never re-triggers a compute) and
-        only ever touches self.trace/status/points labels -- never
-        self._scope, never anything FPGA-facing.
+        """MainWindow calls this with the TRUE waveform, whenever an Acquire
+        starts a Simulate-on-FPGA run: the real scope is known-uninformative
+        there, clamped to 0 V by design, so showing the computed one is the
+        more useful default (docs/known_issues.md). Puts the panel into the
+        simulated view, and only ever touches self.trace / the status and
+        points labels -- never self._scope, never anything FPGA-facing.
         """
         self._mode = "simulated"
-        if self.source_combo.currentText() != "Simulated":
-            self.source_combo.blockSignals(True)
-            self.source_combo.setCurrentText("Simulated")
-            self.source_combo.blockSignals(False)
         self._preview_snap = snap
         self.set_streamed_channels(snap.frames.shape[1])
         # A Z stack's slow axes (Z Piezo included) are constant WITHIN a

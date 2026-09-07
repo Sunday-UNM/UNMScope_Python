@@ -741,7 +741,6 @@ class MainWindow(QMainWindow):
         # The FPGA Scope (LouisXIV's 'HHMI - AI buffer.vi' front panel):
         # live traces from the FPGA's 'AI data' stream -- docs/fpga_scope.md.
         self.scope_panel = FpgaScopePanel()
-        self.scope_panel.preview_requested.connect(self.on_preview_waveform_requested)
         top_tabs.addTab(self.scope_panel, "Waveforms")
         top_tabs.addTab(self._build_images_tab(), "Images")
         top_tabs.setCurrentIndex(1)  # Images -- where the actual feed lives
@@ -1878,10 +1877,10 @@ class MainWindow(QMainWindow):
         """Build the TRUE AO waveform for the current Scan Setup / Low-Level
         Waveform Config values -- exactly what Acquire arms the FPGA with.
 
-        Shared by ``_start_acquisition`` and ``on_preview_waveform_requested``
-        so the two can never drift apart: whatever the Waveforms tab's
-        Simulated source shows is provably the same computation a real run
-        would use, not a second, separately-maintained formula.
+        The single source for both what gets ARMED and what the Waveforms
+        tab DISPLAYS on a Simulate-on-FPGA run, so the two can never drift
+        apart: the simulated trace is provably the same computation a real
+        run would use, not a second, separately-maintained formula.
 
         Returns ``(lx, period_s, exposure_s, sync)``, or ``None`` (having
         already logged/warned) if no camera is connected or the waveform
@@ -2148,27 +2147,6 @@ class MainWindow(QMainWindow):
         return ScopeSnapshot(frames=frames, fs_hz=1.0 / wf.point_period_s,
                              names=AI_CHANNEL_NAMES, end_frame_index=n)
 
-    def on_preview_waveform_requested(self):
-        """Waveforms tab, Source combo set to Simulated. Computes the TRUE
-        waveform through the exact same _compute_scan_waveform() Acquire
-        uses, then hands the scope panel a snapshot to DISPLAY.
-
-        Deliberately never references self.fpga anywhere in this method:
-        no voltage can leave the FPGA card through this path, by
-        construction, regardless of what is or isn't connected.
-        """
-        result = self._compute_scan_waveform()
-        if result is None:
-            return
-        lx, period_s, exposure_s, sync = result
-        wf = lx.scan
-        aotf_levels, aotf_desc = self._aotf_levels_for_run()
-        snap = self._scope_snapshot_from_arm(wf, aotf_levels)
-        self.scope_panel.show_computed_waveform(snap)
-        self._log(f"Simulated: {len(snap.frames)} computed points ({wf.n_slices} slice(s) x "
-                  f"{wf.points_per_trigger} pts/trigger), AOTF {aotf_desc} -- this is the arm "
-                  "payload itself, replayed; nothing armed, no voltage sent to the FPGA.")
-
     def _start_acquisition(self):
         if self.camera is None or self.fpga is None:
             return
@@ -2313,14 +2291,20 @@ class MainWindow(QMainWindow):
         # clamped ones start_free_run() will actually write: this view is
         # for checking the plan, and a clamped copy of it would be as
         # blank as the real trace. A real-camera run switches back to the
-        # live view, in case Source was left on Simulated from an earlier
-        # look. Either way this is just what the Waveforms tab DISPLAYS;
-        # the FPGA is armed identically regardless of Source.
+        # live view, in case an earlier Simulate-on-FPGA run left the panel
+        # showing a computed one. Either way this is only what the Waveforms
+        # tab DISPLAYS; the FPGA is armed identically in both cases.
         if sim_on_fpga:
-            self.scope_panel.show_computed_waveform(
-                self._scope_snapshot_from_arm(wf, self._aotf_levels_for_run()[0]))
+            aotf_levels, aotf_desc = self._aotf_levels_for_run()
+            snap = self._scope_snapshot_from_arm(wf, aotf_levels)
+            self.scope_panel.show_computed_waveform(snap)
+            self._log(f"Waveforms tab showing the SIMULATED trace: {len(snap.frames)} computed "
+                      f"points ({wf.n_slices} slice(s) x {wf.points_per_trigger} pts/trigger), "
+                      f"AOTF {aotf_desc} -- this is the arm payload itself, replayed, because "
+                      "the AO outputs are clamped and no voltage is sent to the FPGA. Press "
+                      "Reset on that tab for the live trace.")
         else:
-            self.scope_panel.source_combo.setCurrentText("Hardware")
+            self.scope_panel.show_live()
         trigger_up_ticks = self._trigger_up_ticks_for(wf)
         clamp_counts = self.scope_panel.test_clamp_counts() if sim_on_fpga else 0
         if sim_on_fpga:

@@ -502,48 +502,53 @@ class _FakeLiveScope:
         pass
 
 
-def test_scope_panel_defaults_to_hardware_source(app):
-    assert FpgaScopePanel().source_combo.currentText() == "Hardware"
-
-
-def test_selecting_simulated_emits_a_compute_request(app):
-    """No separate button: picking Simulated from the combo IS the action.
-    MainWindow (not under test here) is what actually computes and calls
-    back via show_computed_waveform()."""
+def test_scope_panel_starts_live(app):
+    """There is no Source control any more (user, 2026-09-07): the mode is
+    decided by what you Acquire, not by a dropdown."""
     p = FpgaScopePanel()
-    got = []
-    p.preview_requested.connect(lambda: got.append(1))
-    p.source_combo.setCurrentText("Simulated")
-    assert got == [1]
+    assert not hasattr(p, "source_combo")
+    assert p._mode == "hardware"
 
 
-def test_simulated_source_ignores_the_live_scope(app):
-    """Switching to Simulated must stop _refresh() from ever pulling in
-    live data -- proves the two data paths cannot cross."""
+def test_the_simulated_view_ignores_the_live_scope(app):
+    """Once showing a computed waveform, _refresh() must never pull in live
+    data -- it proves the two data paths cannot cross."""
     p = FpgaScopePanel()
     live = _FakeLiveScope(_quiet_snapshot())
     p.set_scope(live)                      # as MainWindow does on FPGA connect
     p._refresh()
-    assert p.trace._snap is live._snap     # Hardware (default): live data shown, as before
-
-    p.source_combo.setCurrentText("Simulated")
-    hot = _burst_snapshot()
-    live._snap = hot                       # the "live" scope now has fresh data
-    p._refresh()                           # a timer tick while Simulated must be a no-op
-    assert p.trace._snap is not hot
+    assert p.trace._snap is live._snap     # live by default, as before
 
     preview = _quiet_snapshot(seconds=0.05)
-    p.show_computed_waveform(preview)
-    assert p.trace._snap is preview        # only show_computed_waveform can reach the screen here
+    p.show_computed_waveform(preview)      # as Acquire does on Simulate-on-FPGA
+    assert p.trace._snap is preview
+
+    hot = _burst_snapshot()
+    live._snap = hot                       # the "live" scope now has fresh data
+    p._refresh()                           # a timer tick in the simulated view: a no-op
+    assert p.trace._snap is preview
 
 
-def test_switching_back_to_hardware_resumes_the_live_view_immediately(app):
+def test_show_live_resumes_the_live_view_immediately(app):
     p = FpgaScopePanel()
     live = _FakeLiveScope(_quiet_snapshot())
     p.set_scope(live)
-    p.show_computed_waveform(_burst_snapshot())    # forces Simulated on its own
-    p.source_combo.setCurrentText("Hardware")
-    assert p.trace._snap is live._snap     # back immediately, not on the next 100 ms tick
+    p.show_computed_waveform(_burst_snapshot())
+    p.show_live()
+    assert p.trace._snap is live._snap     # back at once, not on the next 100 ms tick
+
+
+def test_reset_is_the_way_back_to_live(app):
+    """With the Source combo gone, Reset is the only manual way out of the
+    simulated view -- a run left on screen must never strand the panel."""
+    p = FpgaScopePanel()
+    live = _FakeLiveScope(_quiet_snapshot())
+    p.set_scope(live)
+    p.show_computed_waveform(_burst_snapshot())
+    assert p._mode == "simulated"
+    p.reset_btn.click()
+    assert p._mode == "hardware"
+    assert p.trace._snap is live._snap
 
 
 def test_show_computed_waveform_never_touches_the_live_scope(app):
@@ -556,7 +561,7 @@ def test_show_computed_waveform_never_touches_the_live_scope(app):
     p = FpgaScopePanel()
     p._scope = _Landmine()                 # would raise on ANY attribute access
     p.show_computed_waveform(_quiet_snapshot(seconds=0.05))   # must not touch p._scope at all
-    assert p.source_combo.currentText() == "Simulated"        # forces the mode too
+    assert p._mode == "simulated"                             # sets the mode too
 
 
 def test_show_computed_waveform_widens_time_per_div_to_show_the_whole_buffer(app):

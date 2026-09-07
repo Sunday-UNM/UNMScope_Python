@@ -856,3 +856,50 @@ def test_centring_does_not_stretch_the_trace(app):
     assert span_after == pytest.approx(span_before, rel=0.02)
     # 0.2 s of data in a 1 s window occupies a fifth of the plot area
     assert span_after == pytest.approx(w._plot_rect().width() / 5, rel=0.05)
+
+
+# -- ...but a LIVE view must keep rolling against the right edge -----------
+# Regression, same day: the centring latched onto the live sweep too, so an
+# Acquire with a buffer shorter than the window left the trace parked
+# mid-screen. "do you see that the real acquire button isn't displaying the
+# signals on scope real time" -- it was, at 5.5M points with a rock-steady
+# 127.0000 ms DIO4; it just no longer looked like it.
+
+def _panel_with_live_scope(t_per_div=0.5, seconds=0.2):
+    p = FpgaScopePanel()
+    p.trace.resize(860, 430)
+    p.trig_combo.setCurrentIndex(0)                     # free run
+    p.trace.set_time_per_div(t_per_div)                 # 5 s window, 0.2 s of data
+    snap = _quiet_snapshot(seconds=seconds)
+    snap.frames[:, 8] = 600
+    p.set_scope(_FakeLiveScope(snap))                   # calls _refresh() itself
+    return p
+
+
+def test_a_live_frame_re_anchors_the_sweep_on_now(app):
+    p = _panel_with_live_scope()
+    p.trace.center_view()
+    assert p.trace._h_center is True
+    p._refresh()                                        # the next timer tick
+    assert p.trace._h_center is False, "a rolling view must not stay centred"
+
+
+def test_hold_lets_the_centring_stick(app):
+    """Held, no new frame arrives, so there is nothing to re-anchor on --
+    this is the state Centre is actually for on live data."""
+    p = _panel_with_live_scope()
+    p.hold_btn.setChecked(True)
+    p.trace.center_view()
+    p._refresh()                                        # status line only while held
+    assert p.trace._h_center is True
+
+
+def test_a_computed_waveform_stays_centred_across_timer_ticks(app):
+    p = _panel_with_live_scope()
+    preview = _quiet_snapshot(seconds=0.05)
+    preview.frames[:, 8] = 700
+    p.show_computed_waveform(preview)
+    assert p.trace._h_center is True                    # fit_each_channel() centres it
+    for _ in range(5):
+        p._refresh()                                    # Simulated: a no-op
+    assert p.trace._h_center is True

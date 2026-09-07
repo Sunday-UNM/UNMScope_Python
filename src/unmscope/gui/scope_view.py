@@ -243,6 +243,13 @@ class ScopeTraceWidget(QWidget):
         self.update()
 
     def set_data(self, snap: ScopeSnapshot | None) -> None:
+        # A new frame re-anchors the sweep on "now": the right edge of a
+        # rolling view IS the newest sample, and centring a buffer shorter
+        # than the window would park it mid-screen and make a live trace
+        # look frozen. Only a view that has STOPPED arriving can be centred
+        # -- Hold and the Simulated source both stop calling this, so
+        # Centre (and Fit) stick exactly where they are meant to.
+        self._h_center = False
         self._snap = snap
         if snap is None:
             self._held_trig = None
@@ -397,7 +404,10 @@ class ScopeTraceWidget(QWidget):
         hard against the right edge (see _draw_traces), which is what leaves
         a computed waveform sitting off to one side with a screenful of blank
         beside it. This shares that blank out evenly instead. Panning or
-        zooming releases it again.
+        zooming releases it again -- and so does the next live frame, because
+        a rolling sweep's right edge IS "now" and a centred one looks frozen
+        (see set_data). So the horizontal half only persists on a screen that
+        has stopped arriving: Hold, or the Simulated source.
 
         Vertically: each shown channel is re-offset onto the centre line.
         The difference from fit_each_channel() is that Fit RESCALES too, so
@@ -1095,7 +1105,9 @@ class FpgaScopePanel(QWidget):
         self.center_btn.setMinimumWidth(62)
         self.center_btn.setToolTip("Bring every shown trace back to the middle of the screen, "
                                    "WITHOUT changing any volts/div. Fit rescales as well, which "
-                                   "throws away scales you set yourself (or from a tag's +/-).")
+                                   "throws away scales you set yourself (or from a tag's +/-). "
+                                   "A live sweep keeps rolling against the right edge; use Hold "
+                                   "first to centre one horizontally.")
         self.center_btn.clicked.connect(self._on_center)
         top.addWidget(self.center_btn)
         self.untag_btn = QPushButton("Untag")

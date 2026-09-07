@@ -32,34 +32,36 @@ LouisXIV puts every laser on channel 0. The user's decision (2026-09-04):
 the physical patch from AOTF channel to laser is what will be changed, so
 the software keeps one channel per row.
 
+**The operator decides which channels are driven.** Whatever Excitation
+rows are ticked with Power > 0 % get their AOTF channel driven --
+including more than one. LouisXIV's `HHMI - Check that only 1 laser is
+selected.vi` REFUSED to start unless exactly one was on; on the user's
+instruction (2026-09-07) that is a log line now, not a block, and a run
+with nothing ticked is a legitimate dark run for checking waveforms.
+The port does not force any AOTF channel to 0 V on its own; the only
+automatic zeroing left is on Stop and reset.
+
 **Simulate-on-FPGA** (Simulated camera + real FPGA): the AOTF is driven
-for real. **Changed 2026-09-07 on the user's instruction**, with the laser
-module confirmed off: *"Your automatically forcing the AOTF to 0V is
-throwing off my trouble shooting process."*
+exactly as in any other mode. **Changed 2026-09-07 on the user's
+instruction**: *"Your automatically forcing the AOTF to 0V is throwing
+off my trouble shooting process."*
 
 Every AOTF level used to be forced to 0 and the gate refused
 (`AOTF on?` = False) alongside the galvo clamp. That conflated two
 different things. The AO clamp stops the **mirrors and the piezo**
-moving; it has never had anything to do with the laser, and zeroing the
-AOTF removed the one trace a simulate-on-FPGA run is usually being
-watched for -- the channels simply read flat, with no indication why.
+moving; it has never had anything to do with the AOTF, and zeroing it
+removed the one trace a simulate-on-FPGA run is usually being watched
+for -- the channels simply read flat, with no indication why.
 
-Now: `MainWindow._start_acquisition` passes the real levels **and**
-`allow_aotf_gate=True`, and logs `AOTF LIVE on a clamped run: ... The AO
-outputs are frozen at 0 V but the laser IS being driven`. The AO clamp
-itself is unchanged and still verified by readback. Levels still return
-to 0 V at Stop.
+Now nothing in the software zeroes or gates the AOTF on its own:
 
-Two switches gate the AOTF and the driver leaves both to the caller:
-
-| switch | what it is | driver default |
+| switch | what it is | default |
 |---|---|---|
-| `aotf_levels={ch: counts}` | the DC level in `AOTF ch (V)` | written as given |
-| `allow_aotf_gate` | the `AOTF on?` permission in the AO limits | `not clamp_ao` -- conservative, so a caller must ask |
+| `aotf_levels={ch: counts}` | the DC level in `AOTF ch (V)` | written as given, clamped run or not |
+| `allow_aotf_gate` | the `AOTF on?` permission in the AO limits | `True` -- pass `False` to refuse it deliberately |
 
-The gate alone is enough to stop light whatever the level says, which is
-why the conservative default is kept at the driver and the GUI opts in
-explicitly.
+The AO clamp itself is unchanged and still verified by readback, and
+levels still return to 0 V at Stop and reset.
 
 ## What the bitfile was measured to do
 

@@ -250,6 +250,7 @@ def test_shift_wheel_keeps_the_voltage_under_the_pointer_on_screen(app):
 
     w = ScopeTraceWidget()
     w.resize(860, 430)
+    w.set_enabled([8])          # one channel, so the pointer can only be on it
     w.set_data(_offset_snapshot())
     _painted(w)
     plot = w._plot_rect()
@@ -760,7 +761,7 @@ def test_autoset_gives_every_channel_its_own_slot(app):
 
     bands = {c: _drawn_band(w, c) for c in (8, 9, 10, 11)}
     order = sorted(bands, key=lambda c: bands[c][0])
-    assert order == [8, 9, 10, 11], f"slots are not in channel order: {order}"
+    assert order == w._visible_columns(), f"slots do not follow the legend order: {order}"
     for a, b in zip(order, order[1:]):
         assert bands[a][1] <= bands[b][0] + 1.0, f"ch{a} and ch{b} overlap: {bands[a]} {bands[b]}"
 
@@ -777,12 +778,17 @@ def test_autoset_fills_each_slot_without_overflowing_it(app):
         assert (bot - top) >= slot_px * 0.4, f"ch{c} barely uses its slot ({bot - top:.0f}px)"
 
 
-def test_slot_numbers_run_top_to_bottom(app):
+def test_slot_numbers_follow_the_legend_order(app):
+    """The user's order (2026-09-07): Z Galvo, Z Piezo, X Galvo, cam trig,
+    Int Cycle, dither, then the AOTFs. The legend, the slots and the numbers
+    in the scale bar all use it, so what you tick down the side is the order
+    the traces come out in."""
     w = _short_buffer_widget()
-    w.set_enabled([10, 8, 11])                     # any order in -- sorted on screen
-    assert [w.slot_index(c) for c in (8, 10, 11)] == [1, 2, 3]
+    w.set_enabled([10, 8, 11])                     # any order in
+    assert w._visible_columns() == [10, 8, 11]     # Z Piezo, X Galvo, Dither
+    assert [w.slot_index(c) for c in (10, 8, 11)] == [1, 2, 3]
     centres = w.slot_centres()
-    assert centres[8] > centres[10] > centres[11]  # divisions above centre are positive
+    assert centres[10] > centres[8] > centres[11]  # divisions above centre are positive
 
 
 def test_ground_markers_sit_at_each_channels_zero_volts(app):
@@ -865,7 +871,7 @@ def test_double_click_autosets(app):
                                         Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
     _painted(w)
     assert w.gain(8) < 5.0 and w.gain(10) < 5.0
-    assert _drawn_band(w, 8)[1] <= _drawn_band(w, 10)[0] + 1.0
+    assert _drawn_band(w, 10)[1] <= _drawn_band(w, 8)[0] + 1.0   # Z Piezo above X Galvo
 
 
 def test_autoset_button_is_the_only_scaling_button(app):
@@ -931,7 +937,7 @@ def test_overlay_puts_every_channel_on_the_centre_line(app):
     w.autoset()
     _painted(w)
     stacked = {c: _drawn_band(w, c) for c in (8, 10, 11)}
-    assert stacked[8][1] <= stacked[10][0] + 1.0            # separated, to start with
+    assert stacked[10][1] <= stacked[8][0] + 1.0            # separated, to start with
 
     w.set_overlay(True)
     _painted(w)
@@ -978,7 +984,7 @@ def test_reset_returns_the_standard_scope_view(app):
     assert w.overlay is False
     bands = {c: _drawn_band(w, c) for c in (8, 10, 11)}
     order = sorted(bands, key=lambda c: bands[c][0])
-    assert order == [8, 10, 11]
+    assert order == [10, 8, 11]                    # legend order, not column order
     for a, b in zip(order, order[1:]):
         assert bands[a][1] <= bands[b][0] + 1.0, "traces still overlap after Reset"
     assert w.gain(8) != 5.0, "Reset kept a hand-set volts/div"
@@ -994,7 +1000,7 @@ def test_reset_leaves_the_measurement_settings_alone(app):
     w.reset_view()
     assert w.time_per_div == 5e-3
     assert w._trigger_col == IDX_DIO4
-    assert w._visible_columns() == [8, 10]
+    assert sorted(w._visible_columns()) == [8, 10]
 
 
 def test_the_readout_says_when_it_is_overlaid(app):

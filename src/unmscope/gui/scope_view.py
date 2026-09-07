@@ -43,6 +43,15 @@ LEGEND_LABELS = {14: "Int Cycle Trigger", 15: "D4 Cam Ext Trig Out", 8: "X Galvo
                  10: "Z Piezo", 11: "Dither Galvo", 12: "AOTF0 (AO)", 13: "Filter",
                  16: "AOTF 0", 17: "AOTF 1", 18: "Perfusion", 19: "AOTF 2", 20: "AOTF 3", 21: "AOTF 4",
                  22: "AOTF 5", 23: "AOTF 6"}
+#: Top-to-bottom order for the legend AND for the slots on screen, so the
+#: list you tick down the side is the order the traces come out in and the
+#: numbers in the scale bar agree with it. The user's order (2026-09-07):
+#: the channels actually watched during a run first, the eight raw analog
+#: inputs and the unused columns after. Anything not named here falls in at
+#: the end in column order, so a column added to AI_CHANNEL_NAMES later
+#: still appears instead of silently vanishing from the list.
+LEGEND_ORDER = (9, 10, 8, 15, 14, 11, 16, 17, 19, 20, 21, 22, 23)
+
 PALETTE = ["#ffffff", "#ff4040", "#40ff40", "#4080ff", "#ffff40", "#ff40ff", "#40ffff", "#ff9020",
            "#a0a0a0", "#c060ff", "#60c0ff", "#80ff80", "#ffb0b0", "#b0ffb0", "#b0b0ff", "#ffe080",
            "#e0e0e0", "#ff8080", "#80ff80", "#8080ff", "#ffff80", "#ff80ff", "#80ffff", "#ffc080",
@@ -63,6 +72,13 @@ SCREEN_BG = QColor(0, 0, 0)
 GRID_DOT = QColor(0, 110, 110)
 GRID_AXIS = QColor(0, 165, 165)
 READOUT = QColor(220, 220, 120)
+
+
+def legend_order(n_columns: int) -> list[int]:
+    """Column indices in display order: LEGEND_ORDER first, then whatever
+    else exists, in column order."""
+    named = [c for c in LEGEND_ORDER if c < n_columns]
+    return named + [c for c in range(n_columns) if c not in set(named)]
 
 
 def eng_time(s: float) -> str:
@@ -637,10 +653,14 @@ class ScopeTraceWidget(QWidget):
                       max(1, self.height() - self.TOP - self.BOTTOM))
 
     def _visible_columns(self) -> list[int]:
+        """The shown channels, TOP TO BOTTOM -- in LEGEND_ORDER, not column
+        order, so a trace's slot and its number match where it sits in the
+        legend beside the screen."""
         frames = self._snap.frames if self._snap is not None else None
         if frames is None:
             return []
-        return [c for c in sorted(self._enabled) if c < frames.shape[1]]
+        return [c for c in legend_order(frames.shape[1])
+                if c in self._enabled and c < frames.shape[1]]
 
     def _edge_delay(self, snap: ScopeSnapshot):
         """(delay, reason) for aligning the centre on this snapshot's newest
@@ -1262,7 +1282,8 @@ class FpgaScopePanel(QWidget):
         legend_lay.setContentsMargins(4, 4, 4, 4)
         legend_lay.setSpacing(1)
         self.channel_checks: dict[int, QCheckBox] = {}
-        for c, name in enumerate(AI_CHANNEL_NAMES):
+        for c in legend_order(len(AI_CHANNEL_NAMES)):
+            name = AI_CHANNEL_NAMES[c]
             row = QHBoxLayout()
             chk = QCheckBox(LEGEND_LABELS.get(c, name))
             chk.setChecked(c in DEFAULT_ACTIVE)

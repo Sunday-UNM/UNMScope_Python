@@ -27,11 +27,10 @@ range-checks every DMA point and every static value against them
 every channel whatever the waveform words say.
 
 **The AOTF is NOT part of this clamp** (changed 2026-09-07, user's
-instruction, laser module confirmed off). `AOTF on?` used to be forced
-False here as well; it is now passed `True` by the GUI so the laser
-modulation is visible on the live trace like every other channel. The AO
-clamp freezes the galvos and the piezo -- that is all it was ever for.
-See docs/aotf.md.
+instruction). `AOTF on?` used to be forced False here as well; it now
+defaults to True so the laser modulation appears on the live trace like
+every other channel. The AO clamp freezes the galvos and the piezo --
+that is all it was ever for. See docs/aotf.md.
 
 - Written at FPGA **connect** when the camera is simulated
   (`FpgaTriggerController.set_ao_clamp(True)`) and again at **every arm**

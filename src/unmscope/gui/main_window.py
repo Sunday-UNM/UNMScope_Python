@@ -1256,7 +1256,10 @@ class MainWindow(QMainWindow):
             "PhysicalSizeZ_um": float(self.z_interval_spin.value()),
             "Timepoints": 1,
             "Cameras": 1,
-            "Channels": 1,                      # one laser at a time, as LouisXIV gates it
+            # LouisXIV always writes 1 (it gates to one laser); this follows
+            # what is actually ticked, since that rule is now the user's call.
+            "Channels": max(1, sum(1 for chk, _wl, spin in self.excitation_rows
+                                   if chk.isChecked() and spin.value() > 0)),
             "AOTFCycleMode": "per Z",           # the cluster's default; we do not cycle
             "TimeIncrement_s": period_ms / 1000.0,
             "Username": "",                     # no panel field ported
@@ -2215,14 +2218,18 @@ class MainWindow(QMainWindow):
         mode = self.mode_combo.currentText()
         self._log(f"Starting acquisition: {mode}")
 
-        # Real LouisXIV rule (HHMI - Check that only 1 laser is selected.vi):
-        # exactly 1 Excitation line must be checked with Power > 0%.
+        # LouisXIV's rule (HHMI - Check that only 1 laser is selected.vi) is
+        # that exactly 1 Excitation line may be checked with Power > 0%, and
+        # this REFUSED to start otherwise. Relaxed to a log line on the
+        # user's instruction (2026-09-07): "let me make the decision on if
+        # the voltage on AOTFs should be forced to zero ... if any of the
+        # AOTF is checked please throw the voltage at the appropriate
+        # channel." Whatever is ticked is what gets driven -- including
+        # nothing, which is a legitimate dark run for checking waveforms.
         selected = [wl for chk, wl, spin in self.excitation_rows if chk.isChecked() and spin.value() > 0]
         if len(selected) != 1:
-            msg = "Please select only 1 excitation source to be \"ON\" (with Power > 0%) and try again."
-            self._log(f"Excitation check failed: {msg}")
-            QMessageBox.warning(self, "Excitation", msg)
-            return
+            self._log(f"Excitation: {len(selected)} row(s) selected ({', '.join(str(w) for w in selected) or 'none'}) "
+                      "-- LouisXIV allows exactly one; driving what is ticked, as asked.")
 
         try:
             if self.camera_tab.apply_to_camera(self.camera):
@@ -2374,28 +2381,18 @@ class MainWindow(QMainWindow):
                                                         else "0 -- every AO output frozen at 0 V."))
 
         # ---- AOTF excitation level (docs/aotf.md) --------------------------
-        # The AOTF is driven for real even on a simulate-on-FPGA run (user,
-        # 2026-09-07, with the laser module confirmed off). It used to be
-        # forced to 0 V there, which meant the AOTF channels could never show
-        # any voltage on the live trace -- "I am not seeing any voltage at
-        # those channels". The AO clamp stops the mirrors moving; it never
-        # had anything to do with the laser, and conflating the two hid the
-        # one signal the run was being watched for. allow_aotf_gate has to be
-        # passed explicitly because it still defaults to off under a clamp.
+        # Whatever is ticked is what gets driven, in every mode. The AO
+        # clamp stops the galvos and the piezo moving; it has nothing to do
+        # with the AOTF, and conflating the two hid the one signal a
+        # simulate-on-FPGA run is usually being watched for.
         aotf_levels, aotf_desc = self._aotf_levels_for_run()
-        if sim_on_fpga and aotf_levels:
-            self._log(f"AOTF LIVE on a clamped run: {aotf_desc}. The AO outputs are frozen at "
-                      "0 V but the laser IS being driven for the length of this run; levels "
-                      "return to 0 V at Stop.")
-        else:
-            self._log(f"AOTF: {aotf_desc}.")
+        self._log(f"AOTF: {aotf_desc}.")
 
         self._arm_time = time.perf_counter()
         armed = self.fpga.start_free_run(
             period_s, exposure_s, n_triggers=n_triggers, clamp_ao=sim_on_fpga, clamp_counts=clamp_counts,
             ao_points_per_trigger=wf.points_per_trigger, ao_ticks_between_points=wf.ticks_between_points,
             ao_words=wf.words, trigger_up_ticks=trigger_up_ticks, aotf_levels=aotf_levels,
-            allow_aotf_gate=True,
             on_trigger_count=lambda count: self.fpga_signals.frame_fired.emit(count),
             on_status=lambda st: self.fpga_signals.status.emit(st),
             on_error=lambda msg: self.fpga_signals.error.emit(msg),

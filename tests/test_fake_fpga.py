@@ -98,30 +98,26 @@ def test_aotf_level_written_at_arm_and_zeroed_at_stop(ctrl):
     assert regs["AOTF ch out (V)"].read()["AOTF ch 2"] == 0
 
 
-def test_a_clamped_run_still_defaults_the_aotf_gate_off(ctrl):
-    """The AO clamp and the AOTF are separate switches, but the conservative
-    default is kept at the driver: a caller that wants the laser live on a
-    clamped run has to ask for it with allow_aotf_gate. The gate alone is
-    enough to stop light, whatever the level says."""
+def test_a_clamped_run_drives_the_aotf(ctrl):
+    """User, 2026-09-07: "please stop forcing the AOTF channels to zero ...
+    if any of the AOTF is checked please throw the voltage at the
+    appropriate channel." A clamped run used to write 0 V levels AND refuse
+    the gate, so a simulate-on-FPGA run could never show any AOTF voltage
+    at all -- the one signal it was being watched for. The AO clamp is for
+    the galvos and the piezo."""
     regs = ctrl._session.registers
     ok = ctrl.start_free_run(0.020, 0.010, n_triggers=2, clamp_ao=True, aotf_levels={0: 16384})
-    assert ok and ctrl.ao_clamped
-    assert regs["AO Limit Max (counts)"].read()["AOTF on?"] is False      # not permitted by default
-    assert regs["AOTF ch out (V)"].read()["AOTF ch 0"] == 0               # so nothing comes out
-    ctrl.stop_free_run()
-
-
-def test_a_clamped_run_can_drive_the_aotf_when_asked(ctrl):
-    """User, 2026-09-07 (laser module confirmed off): "please stop forcing
-    the AOTF channels to zero". A simulate-on-FPGA run could never show any
-    AOTF voltage at all, which is the one signal it was being watched for.
-    The AO clamp freezes the mirrors; it never had anything to do with the
-    laser."""
-    regs = ctrl._session.registers
-    ok = ctrl.start_free_run(0.020, 0.010, n_triggers=2, clamp_ao=True,
-                             aotf_levels={0: 16384}, allow_aotf_gate=True)
     assert ok and ctrl.ao_clamped                        # the AO outputs are STILL frozen
-    assert regs["AOTF ch (V)"].read()["AOTF ch 0"] == 16384        # the level is written as given
+    assert regs["AOTF ch (V)"].read()["AOTF ch 0"] == 16384        # written as given
     assert regs["AO Limit Max (counts)"].read()["AOTF on?"] is True
     ctrl.stop_free_run()
-    assert regs["AOTF ch (V)"].read()["AOTF ch 0"] == 0            # and back to 0 V at Stop
+    assert regs["AOTF ch (V)"].read()["AOTF ch 0"] == 0            # back to 0 V at Stop
+
+
+def test_the_aotf_gate_can_still_be_refused_deliberately(ctrl):
+    """The capability stays -- it just is not the default any more."""
+    regs = ctrl._session.registers
+    ok = ctrl.start_free_run(0.020, 0.010, n_triggers=2, clamp_ao=True,
+                             aotf_levels={0: 16384}, allow_aotf_gate=False)
+    assert ok and regs["AO Limit Max (counts)"].read()["AOTF on?"] is False
+    ctrl.stop_free_run()

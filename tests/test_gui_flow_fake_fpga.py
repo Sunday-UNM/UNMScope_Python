@@ -141,7 +141,6 @@ def test_simulate_on_fpga_drives_the_aotf_but_still_clamps_the_ao(app, window):
     w.on_acquire_clicked()
     pump(app, 0.3)
 
-    assert any("AOTF LIVE on a clamped run" in m for m in w.logs)
     assert regs["AOTF ch (V)"].read()[f"AOTF ch {ch}"] == counts
     assert regs["AO Limit Max (counts)"].read()["AOTF on?"] is True
     assert w.fpga.ao_clamped, "the AO outputs must still be frozen"
@@ -600,3 +599,46 @@ def test_preview_never_touches_the_fpga_and_shows_the_true_z_piezo_staircase(app
             assert (trace == counts).all(), "AOTF cycle None: steady level, as LouisXIV shows"
     finally:
         w.fpga = real_fpga                       # restore before the window fixture's own teardown
+
+
+# -- the operator decides which AOTF channels are driven (2026-09-07) ------
+# "let me make the decision on if the voltage on AOTFs should be forced to
+# zero ... From here on if any of the AOTF is checked please throw the
+# voltage at the appropriate channel." LouisXIV refuses to start unless
+# exactly one Excitation row is on; that is now a log line, not a block.
+
+def test_two_excitation_rows_drive_two_aotf_channels(app, window):
+    w = window
+    regs = w.fpga._session.registers
+    for chk, _wl, spin in w.excitation_rows:
+        chk.setChecked(False)
+    w.excitation_rows[0][0].setChecked(True); w.excitation_rows[0][2].setValue(50.0)   # 637
+    w.excitation_rows[2][0].setChecked(True); w.excitation_rows[2][2].setValue(25.0)   # 488
+    levels, _desc = w._aotf_levels_for_run()
+    assert len(levels) == 2, "both ticked rows must produce a level"
+
+    w.mode_combo.setCurrentText(mw.MODE_CONTINUOUS)
+    pump(app, 0.05)
+    w.on_acquire_clicked()
+    pump(app, 0.3)
+    assert w.acquiring, "two lasers ticked must no longer refuse to start"
+    written = regs["AOTF ch (V)"].read()
+    for ch, counts in levels.items():
+        assert written[f"AOTF ch {ch}"] == counts
+    w.on_acquire_clicked()
+    pump(app, 0.3)
+
+
+def test_no_excitation_row_is_a_legitimate_dark_run(app, window):
+    """Checking waveforms with every laser off must not be blocked either."""
+    w = window
+    for chk, _wl, _spin in w.excitation_rows:
+        chk.setChecked(False)
+    w.mode_combo.setCurrentText(mw.MODE_CONTINUOUS)
+    pump(app, 0.05)
+    w.on_acquire_clicked()
+    pump(app, 0.3)
+    assert w.acquiring
+    assert w._aotf_levels_for_run()[0] == {}
+    w.on_acquire_clicked()
+    pump(app, 0.3)

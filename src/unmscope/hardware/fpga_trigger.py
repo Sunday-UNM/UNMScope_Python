@@ -151,14 +151,16 @@ def ao_limits(clamp: bool, limit_counts: int = 0, allow_aotf_gate: bool | None =
 
     The clusters also carry the 'AOTF on?' permission: the FPGA range-
     checks every point's AOTF gate against Max/Min, so Max=False forces
-    the AOTF off whatever the stream says. allow_aotf_gate defaults to
-    ``not clamp`` -- the conservative choice, kept as the DEFAULT so a
-    caller has to ask for anything else. A clamped run that passes True
-    lets the gate through, and if the levels are non-zero the laser
-    really does light: the AO clamp stops the mirrors moving, it has
-    never had anything to do with the AOTF."""
+    the AOTF off whatever the stream says.
+
+    allow_aotf_gate defaults to **True**: the software does not gate the
+    AOTF off on its own, in any mode. It used to default to ``not clamp``,
+    which meant a clamped run silently produced no AOTF voltage at all --
+    the operator's instruction (2026-09-07) is that this is their call and
+    the AO clamp has nothing to do with it. The clamp is for the galvos
+    and the piezo. Pass False to gate the AOTF off deliberately."""
     if allow_aotf_gate is None:
-        allow_aotf_gate = not clamp
+        allow_aotf_gate = True
     if clamp:
         lim = int(abs(limit_counts))
         mx = {c: lim for c in AO_LIMIT_CHANNELS}
@@ -401,10 +403,12 @@ class FpgaTriggerController:
     def set_ao_clamp(self, clamp: bool, limit_counts: int = 0, allow_aotf_gate: bool | None = None) -> bool:
         """Write the AO output limits: clamp=True limits every AO channel to
         +-limit_counts (default 0: nothing can move, "simulate on FPGA")
-        whatever the waveform or static value says, and (unless
-        allow_aotf_gate=True) forces the AOTF gate off; False restores full
-        scale. Reads the registers back and returns whether the clamp is
-        in effect."""
+        whatever the waveform or static value says; False restores full
+        scale. The AOTF gate is left permitted either way -- the clamp is
+        for the galvos and the piezo, and nothing here turns the AOTF off
+        on its own (pass allow_aotf_gate=False to do that deliberately).
+        Reads the registers back and returns whether the clamp is in
+        effect."""
         return self._write_ao_limits(clamp, limit_counts, allow_aotf_gate)
 
     # -- AOTF levels ----------------------------------------------------------
@@ -641,10 +645,9 @@ class FpgaTriggerController:
         aotf_levels={channel: counts} sets 'AOTF ch (V)' for the run (the
         output follows the waveform's per-point gate, docs/aotf.md) --
         written as given, clamped run or not. allow_aotf_gate is the
-        'AOTF on?' permission in the AO limits; it still defaults to
-        ``not clamp_ao``, so a caller that wants the AOTF live on a
-        clamped run has to say so, and both switches have to agree
-        before any light can come out.
+        'AOTF on?' permission in the AO limits and defaults to True --
+        nothing here gates the AOTF off on its own. Pass False to do it
+        deliberately.
 
         Callbacks run on the monitor thread: on_trigger_count(n) whenever
         '# of triggers read' changes, on_status(FreeRunStatus) every

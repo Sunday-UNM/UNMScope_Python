@@ -934,10 +934,22 @@ class FpgaScopePanel(QWidget):
 
     REFRESH_MS = 100
 
+    #: Emitted when Preview is clicked. MainWindow (which owns Scan Setup,
+    #: the calibration and the camera) computes the true waveform and hands
+    #: the result back via set_preview_snapshot() -- this widget never
+    #: computes a waveform itself, and never touches self._scope while
+    #: doing so.
+    preview_requested = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._scope: FpgaScope | None = None
         self._held = False
+        #: "hardware" (default, unchanged behaviour) or "simulated". Gates
+        #: _refresh() only -- see there. Never gates anything that reaches
+        #: self._scope or the FPGA.
+        self._mode = "hardware"
+        self._preview_snap: ScopeSnapshot | None = None
         root = QVBoxLayout(self)
         root.setContentsMargins(4, 4, 4, 4)
         root.setSpacing(4)
@@ -953,6 +965,30 @@ class FpgaScopePanel(QWidget):
         self.hold_btn.setToolTip("Freeze the screen so the captured window can be zoomed into.")
         self.hold_btn.toggled.connect(self._on_hold_toggled)
         top.addWidget(self.hold_btn)
+        top.addSpacing(12)
+
+        # Source: which data feeds this screen. Hardware is the real FPGA
+        # scope (unchanged from before this existed -- everything below is
+        # additive). Simulated NEVER touches self._scope or the FPGA in any
+        # way: it only ever displays a snapshot MainWindow builds from the
+        # already-computed AO arrays and hands in via set_preview_snapshot().
+        # No voltage can leave the card through this path, by construction.
+        top.addWidget(QLabel("Source"))
+        self.source_combo = QComboBox()
+        self.source_combo.addItems(["Hardware", "Simulated"])
+        self.source_combo.setToolTip("Hardware: the real FPGA scope (live, subject to the AO "
+                                     "clamp in Simulate-on-FPGA runs).\nSimulated: the computed "
+                                     "waveform for the current Scan Setup -- no voltage is ever "
+                                     "sent to the FPGA for this. Click Preview to (re)compute it.")
+        self.source_combo.currentIndexChanged.connect(self._on_source_changed)
+        top.addWidget(self.source_combo)
+        self.preview_btn = QPushButton("Preview")
+        self.preview_btn.setToolTip("Compute the true AO waveform for the current Scan Setup / "
+                                    "Low-Level Waveform Config values and show it here -- the "
+                                    "exact math Acquire would use, but nothing is armed and no "
+                                    "voltage leaves the FPGA card. Switches Source to Simulated.")
+        self.preview_btn.clicked.connect(self._on_preview_clicked)
+        top.addWidget(self.preview_btn)
         top.addSpacing(12)
 
         top.addWidget(QLabel("T/div"))
@@ -1192,6 +1228,38 @@ class FpgaScopePanel(QWidget):
         self.stream_chk.setEnabled(on)
         self.clear_btn.setEnabled(on)
 
+    def _on_source_changed(self, _i=None):
+        self._mode = "simulated" if self.source_combo.currentText() == "Simulated" else "hardware"
+        if self._mode == "hardware":
+            # Resume the live view immediately rather than waiting up to
+            # REFRESH_MS for the timer -- self._scope itself was never
+            # touched, so this just goes back to reading it.
+            if self._scope is not None:
+                self._refresh()
+            else:
+                self.trace.set_data(None)
+                self.status_label.setText("Scope: FPGA not connected")
+        elif self._preview_snap is None:
+            self.status_label.setText("Scope: SIMULATED -- click Preview to compute the waveform "
+                                      "(no voltage is sent to the FPGA)")
+
+    def _on_preview_clicked(self):
+        if self.source_combo.currentText() != "Simulated":
+            self.source_combo.setCurrentText("Simulated")     # fires _on_source_changed too
+        self.preview_requested.emit()
+
+    def set_preview_snapshot(self, snap: ScopeSnapshot) -> None:
+        """MainWindow calls this after computing the true waveform. Only
+        ever touches self.trace/self.status_label/self.points_label --
+        never self._scope, never anything FPGA-facing."""
+        self._preview_snap = snap
+        if self._mode == "simulated":
+            self.trace.set_data(snap)
+            self.trace.fit_each_channel()
+            self._sync_view_combos()
+        self.points_label.setText(f"# points: {len(snap.frames):,} (computed)")
+        self.status_label.setText("Scope: SIMULATED -- computed waveform, no voltage sent to the FPGA")
+
     def _on_stream_toggled(self, on: bool):
         if self._scope is None:
             return
@@ -1205,6 +1273,8 @@ class FpgaScopePanel(QWidget):
 
     # -- refresh ----------------------------------------------------------------
     def _refresh(self):
+        if self._mode == "simulated":
+            return    # the screen shows the last set_preview_snapshot() result, untouched
         scope = self._scope
         if scope is None:
             return

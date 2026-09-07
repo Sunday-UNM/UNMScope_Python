@@ -465,3 +465,54 @@ def test_exposure_edits_mid_run_do_not_reach_the_camera(app, window):
     assert any("applies at the next Acquire" in m for m in w.logs)
     w.on_acquire_clicked()
     pump(app, 0.3)
+
+
+# -- Waveforms tab, Source: Simulated (2026-09-07) --------------------------------------
+# The user's original complaint: Simulate-on-FPGA clamps every AO output to 0 V by
+# design, so the real scope reads flat even when the computed waveform (Z piezo
+# included) is correct. Preview shows the computed values directly -- no FPGA
+# involved at all, proven structurally below, not just by not calling anything.
+
+class _FpgaLandmine:
+    """Raises on ANY attribute access or call. Swapped in for w.fpga to prove a
+    code path never references the FPGA controller in any way, not just that it
+    doesn't happen to arm it today."""
+
+    def __getattr__(self, name):
+        raise AssertionError(f"preview touched .fpga.{name} -- it must never reference the FPGA")
+
+    def __call__(self, *a, **k):
+        raise AssertionError("preview called .fpga(...) -- it must never reference the FPGA")
+
+
+def test_preview_never_touches_the_fpga_and_shows_the_true_z_piezo_staircase(app, window):
+    import numpy as np
+
+    w = window
+    real_fpga = w.fpga
+    w.fpga = _FpgaLandmine()                    # any real FPGA reference would now raise
+    try:
+        w.exposure_spin.setValue(100.0)
+        w.mode_combo.setCurrentText(mw.MODE_ZSTACK)
+        w.z_start_spin.setValue(0); w.z_end_spin.setValue(4); w.z_interval_spin.setValue(1)   # 5 slices
+        pump(app, 0.05)
+        w.logs.clear()
+
+        # The real click path: FpgaScopePanel switches Source to Simulated and
+        # emits preview_requested; must not raise -- the landmine would catch it.
+        w.scope_panel.preview_btn.click()
+
+        assert w.scope_panel.source_combo.currentText() == "Simulated"
+        assert any("no voltage sent to the FPGA" in m for m in w.logs)
+        snap = w.scope_panel._preview_snap
+        assert snap is not None and len(snap.frames) > 0
+
+        zpiezo_counts = snap.frames[:, 10].astype(np.int64)     # column 10 = Z Piezo (AO), fpga_scope.md
+        assert zpiezo_counts.min() != zpiezo_counts.max(), "Z piezo must show a real staircase, not 0 V"
+        n_levels = len(np.unique(zpiezo_counts))
+        assert n_levels >= 5, f"expected close to 5 distinct Z piezo levels (one per slice), got {n_levels}"
+
+        xg_counts = snap.frames[:, 8].astype(np.int64)          # X Galvo (AO): the fast-axis sweep
+        assert xg_counts.min() != xg_counts.max()
+    finally:
+        w.fpga = real_fpga                       # restore before the window fixture's own teardown

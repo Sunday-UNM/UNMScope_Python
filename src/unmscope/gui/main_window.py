@@ -5,7 +5,7 @@ stack modes only.
 Layout modeled directly on
 `VI_Diagrams/SPIM/SPIM LV8.6 VIs/SPIM MAIN/SPIM MAINp.png` (the real
 front-panel screenshot): lavender top bar (Acquire, mode dropdown,
-Simulation checkbox, Status pill + progress bars, Exit), a tabbed left
+Status pill + progress bars, Exit), a tabbed left
 panel (Scan Setup / Camera / Utilities), and a tabbed right side
 (Waveforms / Images on top, Stack Projections / Diagnostics on the
 bottom). LouisXIV's other tabs (Preferences, Adv Setup, Bckgrd, Blank,
@@ -66,9 +66,9 @@ from PySide6.QtWidgets import (
 
 from unmscope.hardware.camera import Camera, OrcaFlash4Camera, SimulatedCamera, other_camera_holders
 from unmscope.hardware.fpga_trigger import FpgaTriggerController, TICKS_PER_S
-from unmscope.hardware.fpga_scope import FpgaScope
+from unmscope.hardware.fpga_scope import AI_CHANNEL_NAMES, FpgaScope, ScopeSnapshot
 from unmscope.hardware.waveform import COUNTS_PER_VOLT
-from unmscope.hardware.louisxiv_waveform import build_louisxiv_waveform
+from unmscope.hardware.louisxiv_waveform import LouisXivWaveform, build_louisxiv_waveform
 from unmscope.config.calibration import load_calibration
 from unmscope.analysis.projections import DEFAULT_STAGE_ANGLE_DEG, stack_projections
 from unmscope.fileio.tiff_stack import (
@@ -295,16 +295,6 @@ class MainWindow(QMainWindow):
         top_bar.addWidget(self.mode_combo)
 
         top_bar.addStretch(1)
-
-        sim_col = QVBoxLayout()
-        self.simulation_check = QCheckBox("Simulation")
-        self.simulation_check.setToolTip(
-            "Forces the Camera backend (Camera tab) to Simulated instead of the real Orca 4.0."
-        )
-        self.simulation_check.toggled.connect(self._on_simulation_toggled)
-        sim_col.addWidget(self.simulation_check)
-        sim_col.addStretch(1)
-        top_bar.addLayout(sim_col)
 
         status_box = QGroupBox("Status")
         status_box.setStyleSheet(status_box.styleSheet() + "background-color: #ececec;")
@@ -741,6 +731,7 @@ class MainWindow(QMainWindow):
         # The FPGA Scope (LouisXIV's 'HHMI - AI buffer.vi' front panel):
         # live traces from the FPGA's 'AI data' stream -- docs/fpga_scope.md.
         self.scope_panel = FpgaScopePanel()
+        self.scope_panel.preview_requested.connect(self.on_preview_waveform_requested)
         top_tabs.addTab(self.scope_panel, "Waveforms")
         top_tabs.addTab(self._build_images_tab(), "Images")
         top_tabs.setCurrentIndex(1)  # Images -- where the actual feed lives
@@ -1375,14 +1366,6 @@ class MainWindow(QMainWindow):
         for w in (self.timepoints_widget, self.multilocation_widget):
             w.setVisible(z_stack)
 
-    def _on_simulation_toggled(self, checked: bool):
-        if self._blocking_op is not None or self.camera is not None:
-            # Not just a live connection: self.camera is None for the whole
-            # of a blocking open now, so the flag is what stops a pumped
-            # toggle from swapping the backend underneath one.
-            return
-        self.backend_combo.setCurrentText("Simulated" if checked else "Orca Flash 4.0 (real)")
-
     def _clear_image_to_black(self):
         black = QPixmap(self.image_label.size())
         black.fill(QColor(0, 0, 0))
@@ -1878,6 +1861,189 @@ class MainWindow(QMainWindow):
         self._log(f"Loaded {n} x {stack.shape[1]}x{stack.shape[2]} from {path}.")
         return True
 
+    def _compute_scan_waveform(self) -> tuple[LouisXivWaveform, float, float, bool] | None:
+        """Build the TRUE AO waveform for the current Scan Setup / Low-Level
+        Waveform Config values -- exactly what Acquire arms the FPGA with.
+
+        Shared by ``_start_acquisition`` and ``on_preview_waveform_requested``
+        so the two can never drift apart: whatever the Waveforms tab's
+        Simulated source shows is provably the same computation a real run
+        would use, not a second, separately-maintained formula.
+
+        Returns ``(lx, period_s, exposure_s, sync)``, or ``None`` (having
+        already logged/warned) if no camera is connected or the waveform
+        math itself fails. Reads ``self.camera`` (queries only --
+        ``readout_ms()``, ``cycle_time_s()``, ``trigger_active`` -- never
+        writes to it) and never references ``self.fpga``: nothing in this
+        method can arm or send anything.
+
+        Trigger period = the CYCLE TIME, which the X galvo needs to fly
+        back to its resting position before the next cycle can start. It
+        is NOT the exposure, and (Custom Cycle Time off) it is LouisXIV's
+        OWN camera-cycle formula -- docs/louisxiv_cycle_time_semantics.md,
+        reconciled against the bench 2026-09-06: the user confirmed Custom
+        Cycle Time IS ticked on this rig, with 0.127 s typed (27 ms of
+        flyback over a 100 ms exposure; MEASURED, not derived from any
+        formula). engine_times()/_push_engine_times() apply exactly
+        LouisXIV's rule in both Custom modes; see config/waveform_config.py.
+
+        We had previously used only the camera's own minimum as the
+        period. In SYNCREADOUT that is max(exposure, readout + margin) =
+        the exposure itself for any realistic exposure, so the galvo got
+        ZERO flyback time and triggers landing during readout were
+        silently ignored -- fewer images than Slices. (The same class of
+        bug once came from a hard-coded 9.7 ms readout, which dropped
+        every second trigger.)
+
+        PORT-ONLY DEVIATION from LouisXIV, kept deliberately: our own
+        bench-measured safety margin (Camera.trigger_period_ms(),
+        spikes/19, docs/known_issues.md) is still enforced as a separate,
+        final floor below. LouisXIV's own formula has no such margin --
+        it protects against a different failure (retriggering the camera
+        during ITS OWN readout through this driver path), not the galvo
+        flyback question, and dropping it reintroduced dropped frames on
+        this rig's adapter even though it does not in LouisXIV's own
+        native DCAM path.
+        """
+        if self.camera is None or not self.camera.is_connected:
+            self._log("Waveform: no camera connected -- connect one (Simulated is fine) so the "
+                      "true cycle time can be computed.")
+            return None
+        exposure_ms = self.exposure_spin.value()
+        typed = self.utilities_tab.waveform_panel.config()
+        cam_exp_s, cycle_s = self._push_engine_times()
+        if typed.custom_cycle_time and cycle_s > typed.cycle_time_s + 1e-9:
+            self._log(f"Custom Cycle time {typed.cycle_time_s * 1e3:.3f} ms is below the camera's "
+                      f"own cycle; LouisXIV raises it to {cycle_s * 1e3:.3f} ms.")
+        # HHMI - Generate trigger settings for FPGA: Cycle (ticks) =
+        # max(Waveform.Cycle time (s), camera Cycle(s)) -- established, Q6.
+        period_s = max(cycle_s, self.camera.cycle_time_s(exposure_ms))
+        floor_s = self.camera.trigger_period_ms(exposure_ms) / 1000.0
+        if floor_s > period_s + 1e-9:
+            self._log(f"Trigger period raised from {period_s * 1e3:.3f} to {floor_s * 1e3:.3f} ms "
+                      "(port safety margin over the camera's own readout -- LouisXIV has no such "
+                      "margin; docs/known_issues.md).")
+            period_s = floor_s
+        period_ms = period_s * 1000.0
+        sync = self.camera.trigger_active == self.camera.TRIGGER_SYNCREADOUT
+        # free_run_timing() only needs exposure <= period; in SYNCREADOUT the
+        # interval itself is the exposure.
+        exposure_s = min(exposure_ms, period_ms) / 1000.0
+        if sync:
+            self._log(f"SYNCREADOUT: trigger period {period_ms:.2f} ms ({1000.0 / period_ms:.2f} Hz) "
+                      f"= actual exposure (requested {exposure_ms:.2f} ms; camera floor "
+                      f"{self.camera.readout_ms():.1f} ms readout + "
+                      f"{self.camera.syncreadout_margin_ms():.2f} ms)"
+                      + ("  <-- requested exposure is below the floor and was lengthened"
+                         if period_ms > exposure_ms + 1e-6 else ""))
+        else:
+            self._log(f"EDGE: trigger period {period_ms:.2f} ms ({1000.0 / period_ms:.2f} Hz) = exposure "
+                      f"{exposure_ms:.2f} ms + readout {self.camera.readout_ms():.1f} ms + margin "
+                      f"{self.camera.edge_margin_ms():.2f} ms")
+
+        # ---- AO waveform for this scan (docs/wvfrm2_packing.md) -------------
+        # X galvo: one sweep of the Scan Setup Range around Offset per
+        # trigger, over the exposure, + flyback. Z piezo / Z galvo: constant
+        # per slice, stepping by their Interval per slice in a Z stack.
+        # Microns -> volts with LouisXIV's own calibrations; volts clamped
+        # to the ini limits. Points at 100 us (4000 ticks).
+        cal = self.calibration
+        # From the SAME field Acquire uses to set z_target_frames -- not
+        # z_target_frames itself, so this is correct before a real run too
+        # (a Preview click should not require having pressed Acquire first).
+        n_slices = int(self.slice_count_field.text()) if self.slice_count_field.text().isdigit() else 1
+        x_range_v = cal.x_galvo.um_to_v(self.xg_range.value())
+        x_offset_v = cal.x_galvo.clamp_v(cal.x_galvo.um_to_v(self.xg_offset.value()))
+        zp_start_v = cal.z_piezo.clamp_v(cal.z_piezo.um_to_v(self.z_start_spin.value()))
+        zp_dir = 1.0 if self.z_end_spin.value() >= self.z_start_spin.value() else -1.0
+        zp_step_v = cal.z_piezo.um_to_v(self.z_interval_spin.value()) * zp_dir if n_slices > 1 else 0.0
+        zg_start_v = cal.z_galvo.clamp_v(cal.z_galvo.um_to_v(self.zg_start.value()))
+        zg_dir = 1.0 if self.zg_end.value() >= self.zg_start.value() else -1.0
+        zg_step_v = cal.z_galvo.um_to_v(self.zg_interval.value()) * zg_dir if n_slices > 1 else 0.0
+        dither_range_v = cal.dither_galvo.um_to_v(self.dg_range.value())
+        # LouisXIV's "Calculate Waveforms" (hardware/louisxiv_waveform.py): one
+        # fast-axis line per trigger -- cubic accel, linear sweep, cubic decel,
+        # flyback -- at the AO rate LouisXIV computes from exposure + cycle
+        # time; slow axes stepped with an S-curve. Knobs from the Low-Level
+        # Waveform Config (Utilities).
+        wcfg = self.utilities_tab.waveform_panel.config()
+        zg_moves, zp_moves = wcfg.z_axes_moving()
+        try:
+            lx = build_louisxiv_waveform(
+                exposure_s=exposure_s, cycle_s=period_s, x_range_v=x_range_v, x_offset_v=x_offset_v,
+                x_pixels=self.xg_pixels.value(), update_rate=wcfg.updates_per_pix,
+                fractional_smoothing=wcfg.fract_smoothing, fractional_flyback=wcfg.fractional_flyback,
+                x_bidirectional=not wcfg.x_single_direction, n_slices=n_slices,
+                z_galvo_start_v=zg_start_v, z_galvo_step_v=zg_step_v if zg_moves else 0.0,
+                z_piezo_start_v=zp_start_v, z_piezo_step_v=zp_step_v if zp_moves else 0.0,
+                dither_range_v=dither_range_v, dither_pulses=wcfg.dither_triangle_pulses,
+                dither_flyback_fraction=wcfg.dither_fract_flyback,
+                x_galvo_delay_us=wcfg.x_galvo_delay_us, z_galvo_delay_us=wcfg.z_galvo_delay_us,
+                z_piezo_delay_us=wcfg.z_piezo_delay_us,
+                cycle_margin_s=0.0)        # LouisXIV's rule: the block fills the cycle (measured OK on the card)
+        except ValueError as e:
+            self._log(f"Waveform calculation failed: {e}")
+            QMessageBox.warning(self, "Waveform", str(e))
+            return None
+        wf = lx.scan
+        self.last_waveform = wf              # of the current/last acquisition OR preview
+        self._log(f"LouisXIV ramp: {lx.line.total_points} pts/line = accel {lx.line.tau_elem} + linear "
+                  f"{lx.line.linear_points} + decel {lx.line.tau_elem} + return {lx.line.return_points}; "
+                  f"AO rate {lx.rate.ao_rate_hz / 1e3:.3f} kHz (exposure rule {lx.rate.rate_for_exposure_hz:.0f}, "
+                  f"flyback rule {lx.rate.rate_for_flyback_hz:.0f} pts/s, option {lx.rate.option}); "
+                  f"Pix/ms {lx.rate.pixel_per_ms:.3f}; S-curve {lx.s_curve_points} pts."
+                  + ("".join(" NOTE: " + n for n in lx.notes)))
+        # Indicators on the cluster panel: Pixel/ms (Compute AO rate from
+        # Cycle Time.vi) and the axes as Scan Setup has them. Cam exp / Cycle
+        # time were already set from the engine by _push_engine_times() above.
+        self.utilities_tab.waveform_panel.set_indicators(
+            pixel_per_ms=lx.rate.pixel_per_ms,
+            axes={"x": AxisSettings(0, self.xg_offset.value(), self.xg_interval.value(), self.xg_pixels.value()),
+                  "xwvfrm": AxisSettings(0, self.xg_offset.value(), self.xg_interval.value(), self.xg_pixels.value()),
+                  "z": AxisSettings(0, self.zg_start.value(), self.zg_interval.value(), n_slices),
+                  "zpiezo": AxisSettings(0, self.z_start_spin.value(), self.z_interval_spin.value(), n_slices),
+                  "dither": AxisSettings(0, 0.0, self.dg_range.value(), 1)})
+        block_ticks = wf.points_per_trigger * wf.ticks_between_points
+        self._log(f"Waveform: {wf.points_per_trigger} points/trigger ({block_ticks / TICKS_PER_S * 1e3:.1f} ms) x "
+                  f"{wf.n_slices} slice(s) = {len(wf.words)} words; X sweep {x_range_v * 1e3:+.1f} mV around "
+                  f"{x_offset_v * 1e3:+.1f} mV ({self.xg_range.value():g} um @ {cal.x_galvo.um_per_volt:g} um/V); "
+                  f"Z piezo {zp_start_v * 1e3:+.1f} mV step {zp_step_v * 1e3:+.2f} mV; "
+                  f"Z galvo {zg_start_v * 1e3:+.1f} mV step {zg_step_v * 1e3:+.2f} mV; "
+                  f"dither {dither_range_v * 1e3:.1f} mV pk-pk x {self.dg_sweeps.value():g} sweeps "
+                  f"(flyback {self.dg_flyback.value():.2f}) (calibration: {cal.source}).")
+        return lx, period_s, exposure_s, sync
+
+    def on_preview_waveform_requested(self):
+        """Waveforms tab, Source: Simulated, 'Preview' clicked. Computes
+        the TRUE waveform through the exact same _compute_scan_waveform()
+        Acquire uses, then hands the scope panel a snapshot to DISPLAY.
+
+        Deliberately never references self.fpga anywhere in this method:
+        no voltage can leave the FPGA card through this path, by
+        construction, regardless of what is or isn't connected.
+        """
+        result = self._compute_scan_waveform()
+        if result is None:
+            return
+        lx, period_s, exposure_s, sync = result
+        wf = lx.scan
+        n = max(1, wf.points_per_trigger * wf.n_slices)
+        frames = np.zeros((n, len(AI_CHANNEL_NAMES)), dtype=np.int16)
+        # Same column positions the real FPGA Scope uses for these four
+        # (docs/fpga_scope.md): 8 X Galvo, 9 Z Galvo, 10 Z Piezo, 11 Dither
+        # Galvo. Everything else (AI0-7, Int Sync, DIO4, AOTF, ...) isn't
+        # computed here and stays 0 -- this is the AO side only.
+        for name, col in (("X Galvo", 8), ("Z Galvo", 9), ("Z Piezo", 10), ("Dither Galvo", 11)):
+            arr = wf.channels.get(name)
+            if arr is not None and len(arr):
+                frames[:, col] = np.clip(arr, -32767, 32767).astype(np.int16)
+        snap = ScopeSnapshot(frames=frames, fs_hz=1.0 / wf.point_period_s,
+                             names=AI_CHANNEL_NAMES, end_frame_index=n)
+        self.scope_panel.set_preview_snapshot(snap)
+        self._log(f"Preview: {n} computed points ({wf.n_slices} slice(s) x {wf.points_per_trigger} "
+                  "pts/trigger) shown on the Waveforms tab (Source: Simulated) -- nothing armed, "
+                  "no voltage sent to the FPGA.")
+
     def _start_acquisition(self):
         if self.camera is None or self.fpga is None:
             return
@@ -1986,69 +2152,21 @@ class MainWindow(QMainWindow):
 
         self.camera_poll_timer.start(30)
 
-        # Trigger period = the CYCLE TIME, which the X galvo needs to fly
-        # back to its resting position before the next cycle can start. It
-        # is NOT the exposure, and (Custom Cycle Time off) it is LouisXIV's
-        # OWN camera-cycle formula -- docs/louisxiv_cycle_time_semantics.md,
-        # reconciled against the bench 2026-09-06: the user confirmed Custom
-        # Cycle Time IS ticked on this rig, with 0.127 s typed (27 ms of
-        # flyback over a 100 ms exposure; MEASURED, not derived from any
-        # formula). engine_times()/_push_engine_times() apply exactly
-        # LouisXIV's rule in both Custom modes; see config/waveform_config.py.
-        #
-        # We had previously used only the camera's own minimum as the
-        # period. In SYNCREADOUT that is max(exposure, readout + margin) =
-        # the exposure itself for any realistic exposure, so the galvo got
-        # ZERO flyback time and triggers landing during readout were
-        # silently ignored -- fewer images than Slices. (The same class of
-        # bug once came from a hard-coded 9.7 ms readout, which dropped
-        # every second trigger.)
-        #
-        # PORT-ONLY DEVIATION from LouisXIV, kept deliberately: our own
-        # bench-measured safety margin (Camera.trigger_period_ms(),
-        # spikes/19, docs/known_issues.md) is still enforced as a separate,
-        # final floor below. LouisXIV's own formula has no such margin --
-        # it protects against a different failure (retriggering the camera
-        # during ITS OWN readout through this driver path), not the galvo
-        # flyback question, and dropping it reintroduced dropped frames on
-        # this rig's adapter even though it does not in LouisXIV's own
-        # native DCAM path.
-        exposure_ms = self.exposure_spin.value()
-        typed = self.utilities_tab.waveform_panel.config()
-        cam_exp_s, cycle_s = self._push_engine_times()
-        if typed.custom_cycle_time and cycle_s > typed.cycle_time_s + 1e-9:
-            self._log(f"Custom Cycle time {typed.cycle_time_s * 1e3:.3f} ms is below the camera's "
-                      f"own cycle; LouisXIV raises it to {cycle_s * 1e3:.3f} ms.")
-        # HHMI - Generate trigger settings for FPGA: Cycle (ticks) =
-        # max(Waveform.Cycle time (s), camera Cycle(s)) -- established, Q6.
-        period_s = max(cycle_s, self.camera.cycle_time_s(exposure_ms))
-        floor_s = self.camera.trigger_period_ms(exposure_ms) / 1000.0
-        if floor_s > period_s + 1e-9:
-            self._log(f"Trigger period raised from {period_s * 1e3:.3f} to {floor_s * 1e3:.3f} ms "
-                      "(port safety margin over the camera's own readout -- LouisXIV has no such "
-                      "margin; docs/known_issues.md).")
-            period_s = floor_s
-        period_ms = period_s * 1000.0
-        sync = self.camera.trigger_active == self.camera.TRIGGER_SYNCREADOUT
-        # free_run_timing() only needs exposure <= period; in SYNCREADOUT the
-        # interval itself is the exposure.
-        exposure_s = min(exposure_ms, period_ms) / 1000.0
+        # The true AO waveform -- shared with the Waveforms tab's Simulated
+        # preview via _compute_scan_waveform(); see its docstring for the
+        # cycle-time reasoning (LouisXIV's own formula plus our port-only
+        # hardware safety margin, both explained there in full).
+        result = self._compute_scan_waveform()
+        if result is None:
+            return
+        lx, period_s, exposure_s, sync = result
+        wf = lx.scan
+        cal = self.calibration
         self._trigger_period_s = period_s
         self._triggers_fired = 0
         self._finishing = False
         self._run_closing = self.camera.closing_triggers()
         self._last_status_log_t = 0.0
-        if sync:
-            self._log(f"SYNCREADOUT: trigger period {period_ms:.2f} ms ({1000.0 / period_ms:.2f} Hz) "
-                      f"= actual exposure (requested {exposure_ms:.2f} ms; camera floor "
-                      f"{self.camera.readout_ms():.1f} ms readout + "
-                      f"{self.camera.syncreadout_margin_ms():.2f} ms)"
-                      + ("  <-- requested exposure is below the floor and was lengthened"
-                         if period_ms > exposure_ms + 1e-6 else ""))
-        else:
-            self._log(f"EDGE: trigger period {period_ms:.2f} ms ({1000.0 / period_ms:.2f} Hz) = exposure "
-                      f"{exposure_ms:.2f} ms + readout {self.camera.readout_ms():.1f} ms + margin "
-                      f"{self.camera.edge_margin_ms():.2f} ms")
 
         # FPGA-timed free run: arm ONCE and let the FPGA's 40 MHz counter
         # time every pulse (LabVIEW's own scheme; docs/trigger_free_run_plan.md).
@@ -2063,77 +2181,10 @@ class MainWindow(QMainWindow):
         # own limit registers. Real timing, nothing moves, no camera.
         sim_on_fpga = not self.camera.reacts_to_dio4
         self._sim_fed = 0
-
-        # ---- AO waveform for this scan (docs/wvfrm2_packing.md) -------------
-        # X galvo: one sweep of the Scan Setup Range around Offset per
-        # trigger, over the exposure, + flyback. Z piezo / Z galvo: constant
-        # per slice, stepping by their Interval per slice in a Z stack.
-        # Microns -> volts with LouisXIV's own calibrations; volts clamped
-        # to the ini limits. Points at 100 us (4000 ticks).
-        cal = self.calibration
-        n_slices = self.z_target_frames or 1
-        x_range_v = cal.x_galvo.um_to_v(self.xg_range.value())
-        x_offset_v = cal.x_galvo.clamp_v(cal.x_galvo.um_to_v(self.xg_offset.value()))
-        zp_start_v = cal.z_piezo.clamp_v(cal.z_piezo.um_to_v(self.z_start_spin.value()))
-        zp_dir = 1.0 if self.z_end_spin.value() >= self.z_start_spin.value() else -1.0
-        zp_step_v = cal.z_piezo.um_to_v(self.z_interval_spin.value()) * zp_dir if n_slices > 1 else 0.0
-        zg_start_v = cal.z_galvo.clamp_v(cal.z_galvo.um_to_v(self.zg_start.value()))
-        zg_dir = 1.0 if self.zg_end.value() >= self.zg_start.value() else -1.0
-        zg_step_v = cal.z_galvo.um_to_v(self.zg_interval.value()) * zg_dir if n_slices > 1 else 0.0
-        dither_range_v = cal.dither_galvo.um_to_v(self.dg_range.value())
-        # LouisXIV's "Calculate Waveforms" (hardware/louisxiv_waveform.py): one
-        # fast-axis line per trigger -- cubic accel, linear sweep, cubic decel,
-        # flyback -- at the AO rate LouisXIV computes from exposure + cycle
-        # time; slow axes stepped with an S-curve. Knobs from the Low-Level
-        # Waveform Config (Utilities).
-        wcfg = self.utilities_tab.waveform_panel.config()
-        zg_moves, zp_moves = wcfg.z_axes_moving()
-        try:
-            lx = build_louisxiv_waveform(
-                exposure_s=exposure_s, cycle_s=period_s, x_range_v=x_range_v, x_offset_v=x_offset_v,
-                x_pixels=self.xg_pixels.value(), update_rate=wcfg.updates_per_pix,
-                fractional_smoothing=wcfg.fract_smoothing, fractional_flyback=wcfg.fractional_flyback,
-                x_bidirectional=not wcfg.x_single_direction, n_slices=n_slices,
-                z_galvo_start_v=zg_start_v, z_galvo_step_v=zg_step_v if zg_moves else 0.0,
-                z_piezo_start_v=zp_start_v, z_piezo_step_v=zp_step_v if zp_moves else 0.0,
-                dither_range_v=dither_range_v, dither_pulses=wcfg.dither_triangle_pulses,
-                dither_flyback_fraction=wcfg.dither_fract_flyback,
-                x_galvo_delay_us=wcfg.x_galvo_delay_us, z_galvo_delay_us=wcfg.z_galvo_delay_us,
-                z_piezo_delay_us=wcfg.z_piezo_delay_us,
-                cycle_margin_s=0.0)        # LouisXIV's rule: the block fills the cycle (measured OK on the card)
-        except ValueError as e:
-            self._log(f"Waveform calculation failed: {e}")
-            QMessageBox.warning(self, "Waveform", str(e))
-            return
-        wf = lx.scan
-        self.last_waveform = wf
-        self._log(f"LouisXIV ramp: {lx.line.total_points} pts/line = accel {lx.line.tau_elem} + linear "
-                  f"{lx.line.linear_points} + decel {lx.line.tau_elem} + return {lx.line.return_points}; "
-                  f"AO rate {lx.rate.ao_rate_hz / 1e3:.3f} kHz (exposure rule {lx.rate.rate_for_exposure_hz:.0f}, "
-                  f"flyback rule {lx.rate.rate_for_flyback_hz:.0f} pts/s, option {lx.rate.option}); "
-                  f"Pix/ms {lx.rate.pixel_per_ms:.3f}; S-curve {lx.s_curve_points} pts."
-                  + ("".join(" NOTE: " + n for n in lx.notes)))
-        # Indicators on the cluster panel: Pixel/ms (Compute AO rate from
-        # Cycle Time.vi) and the axes as Scan Setup has them. Cam exp / Cycle
-        # time were already set from the engine by _push_engine_times() above.
-        self.utilities_tab.waveform_panel.set_indicators(
-            pixel_per_ms=lx.rate.pixel_per_ms,
-            axes={"x": AxisSettings(0, self.xg_offset.value(), self.xg_interval.value(), self.xg_pixels.value()),
-                  "xwvfrm": AxisSettings(0, self.xg_offset.value(), self.xg_interval.value(), self.xg_pixels.value()),
-                  "z": AxisSettings(0, self.zg_start.value(), self.zg_interval.value(), n_slices),
-                  "zpiezo": AxisSettings(0, self.z_start_spin.value(), self.z_interval_spin.value(), n_slices),
-                  "dither": AxisSettings(0, 0.0, self.dg_range.value(), 1)})
         block_ticks = wf.points_per_trigger * wf.ticks_between_points
         # The Int-Sync high time must cover the block or the FPGA aborts the
         # block after the last trigger of a bounded run (spikes/29b, 29c).
         trigger_up_ticks = block_ticks + 40_000
-        self._log(f"Waveform: {wf.points_per_trigger} points/trigger ({block_ticks / TICKS_PER_S * 1e3:.1f} ms) x "
-                  f"{wf.n_slices} slice(s) = {len(wf.words)} words; X sweep {x_range_v * 1e3:+.1f} mV around "
-                  f"{x_offset_v * 1e3:+.1f} mV ({self.xg_range.value():g} um @ {cal.x_galvo.um_per_volt:g} um/V); "
-                  f"Z piezo {zp_start_v * 1e3:+.1f} mV step {zp_step_v * 1e3:+.2f} mV; "
-                  f"Z galvo {zg_start_v * 1e3:+.1f} mV step {zg_step_v * 1e3:+.2f} mV; "
-                  f"dither {dither_range_v * 1e3:.1f} mV pk-pk x {self.dg_sweeps.value():g} sweeps "
-                  f"(flyback {self.dg_flyback.value():.2f}) (calibration: {cal.source}).")
         clamp_counts = self.scope_panel.test_clamp_counts() if sim_on_fpga else 0
         if sim_on_fpga:
             self._log("SIMULATE ON FPGA: AO clamp " + (f"+-{clamp_counts} counts (scope test clamp)" if clamp_counts

@@ -8,7 +8,7 @@ import pytest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from unmscope.gui.scope_view import (  # noqa: E402
-    HDIV, TIME_PER_DIV, ScopeTraceWidget, eng_time, eng_volts, envelope, time_axis_label,
+    HDIV, TIME_PER_DIV, FpgaScopePanel, ScopeTraceWidget, eng_time, eng_volts, envelope, time_axis_label,
 )
 from unmscope.hardware.fpga_scope import (  # noqa: E402
     AI_CHANNEL_NAMES, AI_VOLTS_PER_COUNT, IDX_DIO4, ScopeSnapshot,
@@ -569,3 +569,87 @@ def test_trigger_mode_asks_for_the_whole_buffer(app):
     w.set_time_per_div(20e-3)
     w.set_trigger_column(IDX_DIO4)
     assert w.seconds_needed() >= 10.0      # the panel caps it at "# of seconds to buff"
+
+
+# -- FpgaScopePanel: Source Hardware/Simulated (2026-09-07) ----------------------------
+# The user's ask: a fully simulated view where no voltage leaves the FPGA card, without
+# losing or endangering the real hardware scope. Hardware stays the default and every
+# hardware-facing line of the panel is untouched; Simulated only ever reaches
+# set_preview_snapshot(), which touches self.trace/labels and nothing else.
+
+class _FakeLiveScope:
+    """Just enough of FpgaScope's interface for _refresh() -- no hardware."""
+    def __init__(self, snap):
+        self._snap = snap
+        self.running = True
+        self.fs_hz = snap.fs_hz
+        self.channels = len(snap.names)
+        self.backlog_max = 0
+        self.ai_error: dict = {}
+        self.last_error = ""
+        self.ring = type("R", (), {"total": len(snap.frames)})()
+
+    def snapshot(self, seconds=None):
+        return self._snap
+
+    def seconds_buffered(self):
+        return len(self._snap.frames) / self._snap.fs_hz if self._snap.fs_hz else 0.0
+
+    def clear(self):
+        pass
+
+
+def test_scope_panel_defaults_to_hardware_source(app):
+    assert FpgaScopePanel().source_combo.currentText() == "Hardware"
+
+
+def test_simulated_source_ignores_the_live_scope(app):
+    """Switching to Simulated must stop _refresh() from ever pulling in
+    live data -- proves the two data paths cannot cross."""
+    p = FpgaScopePanel()
+    live = _FakeLiveScope(_quiet_snapshot())
+    p.set_scope(live)                      # as MainWindow does on FPGA connect
+    p._refresh()
+    assert p.trace._snap is live._snap     # Hardware (default): live data shown, as before
+
+    p.source_combo.setCurrentText("Simulated")
+    hot = _burst_snapshot()
+    live._snap = hot                       # the "live" scope now has fresh data
+    p._refresh()                           # a timer tick while Simulated must be a no-op
+    assert p.trace._snap is not hot
+
+    preview = _quiet_snapshot(seconds=0.05)
+    p.set_preview_snapshot(preview)
+    assert p.trace._snap is preview        # only set_preview_snapshot can reach the screen here
+
+
+def test_preview_button_switches_to_simulated_and_emits(app):
+    p = FpgaScopePanel()
+    got = []
+    p.preview_requested.connect(lambda: got.append(1))
+    p.preview_btn.click()
+    assert p.source_combo.currentText() == "Simulated"
+    assert got == [1]
+
+
+def test_switching_back_to_hardware_resumes_the_live_view_immediately(app):
+    p = FpgaScopePanel()
+    live = _FakeLiveScope(_quiet_snapshot())
+    p.set_scope(live)
+    p.source_combo.setCurrentText("Simulated")
+    p.set_preview_snapshot(_burst_snapshot())
+    p.source_combo.setCurrentText("Hardware")
+    assert p.trace._snap is live._snap     # back immediately, not on the next 100 ms tick
+
+
+def test_set_preview_snapshot_never_touches_the_live_scope(app):
+    """The structural safety property, at the panel level: feeding a
+    preview snapshot must not read or write self._scope at all."""
+    class _Landmine:
+        def __getattr__(self, name):
+            raise AssertionError(f"set_preview_snapshot touched the live scope's .{name}")
+
+    p = FpgaScopePanel()
+    p._scope = _Landmine()                 # would raise on ANY attribute access
+    p.source_combo.setCurrentText("Simulated")
+    p.set_preview_snapshot(_quiet_snapshot(seconds=0.05))   # must not touch p._scope at all

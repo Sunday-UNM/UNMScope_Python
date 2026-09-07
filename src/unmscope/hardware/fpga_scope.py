@@ -73,8 +73,16 @@ DIGITAL_TRUE = 4096
 DIGITAL_THRESHOLD = DIGITAL_TRUE / 2
 #: PCIe-7852R analog input: +-10 V over 16 bits.
 AI_VOLTS_PER_COUNT = 10.0 / 32768.0
-#: Columns 0..15 carry everything that varied; 16..28 were constant 0.
-DEFAULT_CHANNELS = 16
+#: How many of the 29 columns to stream. 16 was chosen from the 2026-09-03
+#: decode run, where "columns 16..28 were constant 0" -- but that run was a
+#: bare free-run trigger with no AOTF written. In a real acquisition the
+#: engine writes the AOTF level registers at arm, and they live at 16, 17
+#: and 19..23, so at 16 channels no AOTF signal could EVER reach the scope:
+#: they were ticked in the legend and silently drew nothing. 24 covers every
+#: column this port names and uses (through AOTF 6, Perfusion included);
+#: 24 x 100 kS/s = 2.4M I16/s, against the 2.9M (100 kS/s x 29) that was
+#: measured on this hardware with no AI error.
+DEFAULT_CHANNELS = 24
 #: 400 ticks = 100 kS/s per channel (10 us timing resolution). MEASURED
 #: 2026-09-03: the host kept up with 100 kS/s x 29 channels (2.9M I16/s,
 #: max backlog 3335 of a 4M-word buffer) and with 200 kS/s x 16 (3.2M

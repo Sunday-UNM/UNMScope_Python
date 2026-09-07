@@ -411,6 +411,40 @@ class ScopeTraceWidget(QWidget):
         self.update()
         self.view_changed.emit()
 
+    def fit_gains(self) -> None:
+        """Auto-adjust every shown channel's volts/div so its peak-to-peak
+        fills the display -- gains, not layout.
+
+        The difference from Autoset: Autoset decides WHERE each channel goes
+        (a slot each, or all on the centre line) and scales it to fit there.
+        Fit leaves the arrangement exactly as it is and just makes every
+        trace as big as the screen allows, which is what you want once six
+        channels in six slots are each too small to read.
+
+        Each trace keeps its own midpoint, so only its SIZE changes -- except
+        where growing would push it off an edge, in which case it slides back
+        on by the least amount that fits. "Fit in the display" has to mean
+        the whole trace is actually in the display.
+        """
+        seg = self._visible_segment()
+        cols = self._visible_columns()
+        if seg is None or len(seg) == 0 or not cols:
+            return
+        for c in cols:
+            col = seg[:, c].astype(np.float64) * AI_VOLTS_PER_COUNT
+            lo, hi = float(col.min()), float(col.max())
+            if not (np.isfinite(lo) and np.isfinite(hi)) or hi <= lo:
+                continue                       # a flat line has nothing to fit
+            mid = (hi + lo) / 2
+            where = mid / self.gain(c) + self.offset(c)      # divisions, as drawn now
+            need = (hi - lo) / (VDIV - 2)
+            self._gain[c] = next((v for v in VOLTS_PER_DIV if v >= need), VOLTS_PER_DIV[-1])
+            half = (hi - lo) / 2 / self._gain[c]
+            room = max(0.0, VDIV / 2 - half)
+            self._offset[c] = float(np.clip(where, -room, room)) - mid / self._gain[c]
+        self.update()
+        self.view_changed.emit()
+
     def reset_view(self) -> None:
         """Back to what a standard oscilloscope shows: the stacked view,
         every channel re-fitted, nothing left over from a hand adjustment.
@@ -1144,6 +1178,14 @@ class FpgaScopePanel(QWidget):
                                     "states its scale. Double-clicking the screen does the same.")
         self.autoset_btn.clicked.connect(self._on_autoset)
         top.addWidget(self.autoset_btn)
+        self.fit_btn = QPushButton("Fit")
+        self.fit_btn.setMinimumWidth(52)
+        self.fit_btn.setToolTip("Auto-adjust every channel's volts/div so its waveform fills the "
+                                "display, leaving the arrangement alone. Autoset decides WHERE "
+                                "each channel goes and fits it to that room; Fit just makes what "
+                                "is already there as big as the screen allows.")
+        self.fit_btn.clicked.connect(self._on_fit)
+        top.addWidget(self.fit_btn)
         self.overlay_btn = QPushButton("Overlay")
         self.overlay_btn.setCheckable(True)
         self.overlay_btn.setMinimumWidth(70)
@@ -1260,6 +1302,7 @@ class FpgaScopePanel(QWidget):
             row.addWidget(swatch)
             legend_lay.addLayout(row)
             self.channel_checks[c] = chk
+        self._streamed = len(AI_CHANNEL_NAMES)
         legend_lay.addStretch(1)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -1282,8 +1325,31 @@ class FpgaScopePanel(QWidget):
         self._on_channel_toggled()
 
     # -- wiring -----------------------------------------------------------------
+    def set_streamed_channels(self, n: int) -> None:
+        """Grey out the channels the current source does not carry.
+
+        Nothing above "AI # of channels" is in the DMA stream, so ticking one
+        drew nothing at all and gave no clue why -- which is exactly how a
+        run went by with every AOTF box ticked and no AOTF trace on screen.
+        A control that cannot work is disabled, per CLAUDE.md.
+        """
+        self._streamed = int(n)
+        for c, chk in self.channel_checks.items():
+            live = c < self._streamed
+            chk.setEnabled(live)
+            chk.setToolTip("" if live else
+                           f"Not in the stream: this source carries {self._streamed} of "
+                           f"{len(AI_CHANNEL_NAMES)} columns, and this one is column {c}.")
+            if not live and chk.isChecked():
+                chk.blockSignals(True)
+                chk.setChecked(False)
+                chk.blockSignals(False)
+        self._on_channel_toggled()
+
     def set_scope(self, scope: FpgaScope | None) -> None:
         self._scope = scope
+        if scope is not None:
+            self.set_streamed_channels(scope.channels)
         if scope is None:
             self._timer.stop()
             self.trace.set_data(None)
@@ -1329,6 +1395,10 @@ class FpgaScopePanel(QWidget):
 
     def _on_autoset(self):
         self.trace.autoset()
+        self._sync_view_combos()
+
+    def _on_fit(self):
+        self.trace.fit_gains()
         self._sync_view_combos()
 
     def _on_overlay_toggled(self, on: bool):
@@ -1395,6 +1465,7 @@ class FpgaScopePanel(QWidget):
             self.source_combo.setCurrentText("Simulated")
             self.source_combo.blockSignals(False)
         self._preview_snap = snap
+        self.set_streamed_channels(snap.frames.shape[1])
         # A Z stack's slow axes (Z Piezo included) are constant WITHIN a
         # slice and only step BETWEEN slices -- correctly flat over any one
         # trigger. Whatever T/div was last showing (left over from the live

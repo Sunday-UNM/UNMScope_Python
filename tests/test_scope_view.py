@@ -866,7 +866,7 @@ def test_double_click_autosets(app):
 def test_autoset_button_is_the_only_scaling_button(app):
     p = FpgaScopePanel()
     assert hasattr(p, "autoset_btn")
-    for gone in ("fit_btn", "center_btn", "perch_chk"):
+    for gone in ("center_btn", "perch_chk"):
         assert not hasattr(p, gone), f"{gone} should be gone"
 
 
@@ -1014,3 +1014,122 @@ def test_the_buttons_stay_in_step_with_the_mode(app):
     p.reset_btn.click()
     assert p.trace.overlay is False
     assert p.overlay_btn.isChecked() is False, "the button lied about the mode"
+
+
+# -- the AOTF columns have to actually be in the stream (2026-09-07) --------
+# "what happened to the AOTF signals again?" -- they were ticked in the
+# legend and drawing nothing, on a run that was otherwise perfectly live
+# (1,039,287 points, DIO4 at 127.0000 ms). DEFAULT_CHANNELS was 16, and
+# every AOTF column is above that: 16, 17 and 19..23. So no AOTF signal
+# could EVER have reached the hardware scope, and nothing said so.
+
+def test_the_default_stream_reaches_every_aotf_column(app):
+    from unmscope.hardware.fpga_scope import DEFAULT_CHANNELS
+    aotf = [c for c, n in enumerate(AI_CHANNEL_NAMES) if n.startswith("AOTF")]
+    assert max(aotf) < DEFAULT_CHANNELS, (
+        f"AOTF columns {aotf} but only {DEFAULT_CHANNELS} streamed -- they cannot be drawn")
+
+
+def test_channels_outside_the_stream_are_disabled_not_silently_blank(app):
+    p = FpgaScopePanel()
+    snap = _quiet_snapshot(seconds=0.2)
+    scope = _FakeLiveScope(snap)
+    scope.channels = 16                                  # an old-style 16-column stream
+    p.set_scope(scope)
+
+    assert p.channel_checks[10].isEnabled()              # Z Piezo, column 10
+    assert not p.channel_checks[19].isEnabled(), "AOTF 2 is not streamed but still offered"
+    assert not p.channel_checks[19].isChecked(), "a tick that cannot draw must not stay set"
+    assert "column 19" in p.channel_checks[19].toolTip()
+
+
+def test_the_simulated_source_carries_every_column(app):
+    """The computed waveform is full width, so everything comes back."""
+    p = FpgaScopePanel()
+    scope = _FakeLiveScope(_quiet_snapshot(seconds=0.2))
+    scope.channels = 16
+    p.set_scope(scope)
+    assert not p.channel_checks[19].isEnabled()
+
+    n = 200
+    frames = np.zeros((n, len(AI_CHANNEL_NAMES)), dtype=np.int16)
+    frames[:, 19] = 3000
+    p.show_computed_waveform(ScopeSnapshot(frames=frames, fs_hz=10_000.0,
+                                           names=AI_CHANNEL_NAMES, end_frame_index=n))
+    assert p.channel_checks[19].isEnabled()
+    assert p.channel_checks[19].isChecked()              # rescued: nothing else had data
+
+
+# -- Fit: gains only (2026-09-07, user) ------------------------------------
+# "add a fit button like before so that all waveforms auto adjust the gains
+# to fit in the display." Six channels in six slots are each 1.33 divisions
+# tall, which is too small to read. Fit makes every trace as big as the
+# screen allows without re-arranging anything.
+
+def test_fit_makes_every_trace_fill_the_display(app):
+    w = _short_buffer_widget()
+    w.set_enabled([8, 10])
+    w.autoset()
+    _painted(w)
+    small = {c: _drawn_band(w, c) for c in (8, 10)}
+    h = w._plot_rect().height()
+    assert all((b - t) < h * 0.6 for t, b in small.values())    # slot-sized, to start with
+
+    w.fit_gains()
+    _painted(w)
+    for c in (8, 10):
+        top, bot = _drawn_band(w, c)
+        assert (bot - top) > h * 0.5, f"ch{c} is still only {bot - top:.0f}px of {h:.0f}"
+
+
+def test_fit_keeps_every_trace_on_screen(app):
+    """"Fit in the display" has to mean the whole trace is in the display,
+    including one whose slot sat near an edge before it grew."""
+    w = _short_buffer_widget()
+    w.set_enabled([8, 9, 10, 11])
+    w.autoset()
+    w.fit_gains()
+    _painted(w)
+    plot = w._plot_rect()
+    for c in (8, 9, 10, 11):
+        top, bot = _drawn_band(w, c)
+        assert plot.top() - 1 <= top and bot <= plot.bottom() + 1, f"ch{c} runs off the screen"
+
+
+def test_fit_does_not_re_arrange_anything(app):
+    """The difference from Autoset: Fit changes size, not layout. Traces keep
+    their order down the screen and a flat channel is left alone."""
+    w = _short_buffer_widget()
+    snap = w._snap
+    snap.frames[:, 9] = int(0.8 / AI_VOLTS_PER_COUNT)          # flat: nothing to fit
+    w.set_enabled([8, 9, 10])
+    w.set_data(snap)
+    w.autoset()
+    _painted(w)
+
+    def mids():
+        return {c: sum(_drawn_band(w, c)) / 2 for c in (8, 9, 10)}
+
+    before, flat_gain = mids(), w.gain(9)
+    w.fit_gains()
+    _painted(w)
+    after = mids()
+    # Traces DO overlap once they fill the screen -- that is the point of Fit
+    # -- so the invariant is on where each one is CENTRED, not on which pixel
+    # row it reaches first.
+    assert sorted(after, key=after.get) == sorted(before, key=before.get)
+    assert after[9] == pytest.approx(before[9], abs=1.0)   # flat: left completely alone
+    assert w.gain(9) == flat_gain, "a flat line was rescaled to fit nothing"
+    assert w.overlay is False
+
+
+def test_fit_works_in_overlay_too(app):
+    w = _short_buffer_widget()
+    w.set_enabled([8, 10])
+    w.set_overlay(True)
+    w.fit_gains()
+    _painted(w)
+    cy = w._plot_rect().center().y()
+    for c in (8, 10):
+        top, bot = _drawn_band(w, c)
+        assert (top + bot) / 2 == pytest.approx(cy, abs=3.0), "Fit moved an overlaid trace off centre"

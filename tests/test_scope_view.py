@@ -911,3 +911,106 @@ def test_the_trace_still_lands_in_its_slot_whatever_its_dc_level(app):
         top, bot = _drawn_band(w, c)
         want = plot.center().y() - w.slot_centres()[c] * px_per_div
         assert (top + bot) / 2 == pytest.approx(want, abs=1.5)
+
+
+# -- Overlay / Reset (2026-09-07, user) ------------------------------------
+# "add a widget that centers and overlays the waveforms. Also add a reset
+# button that shows the waveforms as shown by a standard oscilloscope."
+# Two presentations of the same data: stacked (the scope default, one slot
+# per channel) and overlaid (everything on the centre line, for comparing
+# an edge on one channel against an edge on another).
+
+def test_overlay_puts_every_channel_on_the_centre_line(app):
+    w = _short_buffer_widget()
+    w.set_enabled([8, 10, 11])
+    w.autoset()
+    _painted(w)
+    stacked = {c: _drawn_band(w, c) for c in (8, 10, 11)}
+    assert stacked[8][1] <= stacked[10][0] + 1.0            # separated, to start with
+
+    w.set_overlay(True)
+    _painted(w)
+    cy = w._plot_rect().center().y()
+    for c in (8, 10, 11):
+        top, bot = _drawn_band(w, c)
+        assert (top + bot) / 2 == pytest.approx(cy, abs=2.0), f"ch{c} is not centred"
+
+
+def test_overlay_makes_the_traces_actually_overlap(app):
+    """The point of the mode: the bands have to share screen, or nothing is
+    being compared."""
+    w = _short_buffer_widget()
+    w.set_enabled([8, 10])
+    w.set_overlay(True)
+    _painted(w)
+    (t8, b8), (t10, b10) = _drawn_band(w, 8), _drawn_band(w, 10)
+    assert min(b8, b10) - max(t8, t10) > 0, "the traces do not overlap at all"
+
+
+def test_overlay_removes_the_dc_level(app):
+    """Two channels at very different DC levels must still land on top of
+    one another -- the level is exactly what you are ignoring here."""
+    w = _short_buffer_widget()
+    snap = w._snap
+    snap.frames[:, 9] = int(0.8 / AI_VOLTS_PER_COUNT)
+    snap.frames[:, 11] = int(-2.5 / AI_VOLTS_PER_COUNT)
+    w.set_enabled([9, 11])
+    w.set_data(snap)
+    w.set_overlay(True)
+    _painted(w)
+    assert _drawn_band(w, 9)[0] == pytest.approx(_drawn_band(w, 11)[0], abs=2.0)
+
+
+def test_reset_returns_the_standard_scope_view(app):
+    w = _short_buffer_widget()
+    w.set_enabled([8, 10, 11])
+    w.set_overlay(True)
+    w.set_gain(8, 5.0)                                   # and a hand adjustment on top
+    _painted(w)
+    w.reset_view()
+    _painted(w)
+
+    assert w.overlay is False
+    bands = {c: _drawn_band(w, c) for c in (8, 10, 11)}
+    order = sorted(bands, key=lambda c: bands[c][0])
+    assert order == [8, 10, 11]
+    for a, b in zip(order, order[1:]):
+        assert bands[a][1] <= bands[b][0] + 1.0, "traces still overlap after Reset"
+    assert w.gain(8) != 5.0, "Reset kept a hand-set volts/div"
+
+
+def test_reset_leaves_the_measurement_settings_alone(app):
+    """It is a display reset. Wiping the timebase, the trigger or the ticked
+    channels is the defaults-kicking-in behaviour the user objected to."""
+    w = _short_buffer_widget()
+    w.set_enabled([8, 10])
+    w.set_time_per_div(5e-3)
+    w.set_trigger_column(IDX_DIO4)
+    w.reset_view()
+    assert w.time_per_div == 5e-3
+    assert w._trigger_col == IDX_DIO4
+    assert w._visible_columns() == [8, 10]
+
+
+def test_the_readout_says_when_it_is_overlaid(app):
+    """Traces piled on one another look like a fault unless the screen says
+    it is a mode."""
+    w = _short_buffer_widget()
+    assert "OVERLAY" not in w.status_text(0.0)
+    w.set_overlay(True)
+    assert w.status_text(0.0).startswith("OVERLAY")
+    w.set_held(True)
+    assert "OVERLAY" in w.status_text(0.0) and "HOLD" in w.status_text(0.0)
+    w.reset_view()
+    assert "OVERLAY" not in w.status_text(0.0)
+
+
+def test_the_buttons_stay_in_step_with_the_mode(app):
+    p = FpgaScopePanel()
+    p.trace.resize(860, 430)
+    p.trace.set_data(_quiet_snapshot(seconds=0.5))
+    p.overlay_btn.setChecked(True)
+    assert p.trace.overlay is True
+    p.reset_btn.click()
+    assert p.trace.overlay is False
+    assert p.overlay_btn.isChecked() is False, "the button lied about the mode"

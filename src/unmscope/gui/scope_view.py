@@ -162,6 +162,10 @@ class ScopeTraceWidget(QWidget):
         self._tag_hits: list[tuple] = []          # button rects, laid out during paint
         self._tag_boxes: list[tuple] = []         # box rects, for dragging a tag aside
         self._tag_drag: tuple | None = None
+        #: False = the standard scope view, one slot per channel. True =
+        #: every channel centred on the middle line and superimposed, for
+        #: comparing edges between channels directly.
+        self._overlay = False
         self._delay_s = 0.0        # how far the right edge sits behind "now"
         #: Centre a segment SHORTER than the window instead of anchoring it
         #: at the right edge. Only bites when there is blank screen to
@@ -230,7 +234,7 @@ class ScopeTraceWidget(QWidget):
         # The slot a channel occupies depends on how many are shown, so
         # ticking or unticking one re-deals the whole stack -- keeping every
         # channel's own gain, only re-seating it in its new slot.
-        if self._enabled != before:
+        if self._enabled != before and not self._overlay:
             self._reseat_slots(was)
         self.update()
 
@@ -340,15 +344,32 @@ class ScopeTraceWidget(QWidget):
             self._gain[c] = value
         self.update()
 
-    def autoset(self) -> None:
-        """The scope's Autoset: deal the shown channels into one slot each,
-        top to bottom, and give every one its own volts/div so its
-        peak-to-peak fills its slot.
+    @property
+    def overlay(self) -> bool:
+        return self._overlay
 
-        This is what replaced Fit and Centre. Fit rescaled but left every
-        channel stacked on the centre line, so six traces drew on top of one
-        another; Centre existed only to undo a horizontal anchoring bug that
-        is now fixed at its source.
+    def set_overlay(self, on: bool) -> None:
+        """Switch between the two presentations and re-fit for the new one.
+
+        Stacked (default) is the standard scope view: one slot per channel.
+        Overlay centres every channel on the middle line and superimposes
+        them, which is what you want when the question is "does this edge
+        line up with that one" rather than "what is each channel doing".
+        """
+        on = bool(on)
+        if on == self._overlay:
+            return
+        self._overlay = on
+        self.autoset()
+
+    def autoset(self) -> None:
+        """The scope's Autoset: give every shown channel its own volts/div
+        and put it where the current presentation says it goes.
+
+        Stacked -- one slot per channel, top to bottom, each scaled so its
+        peak-to-peak fills its own slot. Overlay -- every channel centred on
+        the middle line and scaled to fill the screen, so the traces lie on
+        top of one another and edges can be compared directly.
         """
         seg = self._visible_segment()
         cols = self._visible_columns()
@@ -357,22 +378,54 @@ class ScopeTraceWidget(QWidget):
         # A stopped screen (Hold, or the Simulated source) shares its blank
         # out evenly; a live one re-anchors on "now" at the next frame.
         self._h_center = True
-        usable = (VDIV / len(cols)) * self.SLOT_FILL
-        for c, centre in self.slot_centres().items():
+        if self._overlay:
+            # Everything on the centre line, DC removed: the levels are what
+            # you are deliberately ignoring when you overlay.
+            usable, centres = VDIV - 2, {c: 0.0 for c in cols}
+        else:
+            usable, centres = (VDIV / len(cols)) * self.SLOT_FILL, self.slot_centres()
+        for c, centre in centres.items():
             col = seg[:, c].astype(np.float64) * AI_VOLTS_PER_COUNT
             lo, hi = float(col.min()), float(col.max())
             if not (np.isfinite(lo) and np.isfinite(hi)):
                 continue
-            # Peak-to-peak sets the scale, but so does the DC level: a
-            # channel parked flat at 0.8 V has no p-p at all, and scaling it
-            # on that alone picked 1 mV/div -- a meaningless readout that put
-            # its ground marker 800 divisions off screen. Taking |midpoint|
-            # into account keeps the stated volts/div a real one.
-            need = max((hi - lo) / usable, abs(hi + lo) / 2 / (VDIV / 2), 1e-4)
-            self._gain[c] = next((v for v in VOLTS_PER_DIV if v >= need), VOLTS_PER_DIV[-1])
+            # Peak-to-peak sets the scale, but stacked so does the DC level:
+            # a channel parked flat at 0.8 V has no p-p at all, and scaling
+            # it on that alone picked 1 mV/div -- a meaningless readout that
+            # put its ground marker 800 divisions off screen. Overlaid the
+            # level is removed anyway, so only p-p can set the scale there.
+            need = (hi - lo) / usable
+            if not self._overlay:
+                need = max(need, abs(hi + lo) / 2 / (VDIV / 2))
+            if need <= 0:
+                # Nothing to scale TO: a channel flat at 0 V (an AOTF under
+                # the simulate-on-FPGA clamp, say), or any flat channel once
+                # overlay has removed its level. Falling through would pick
+                # the smallest step in the list and state "1 mV/div" about a
+                # line that carries no information at all -- keep whatever
+                # scale the channel already had instead.
+                self._gain.setdefault(c, self.DEFAULT_GAIN)
+            else:
+                self._gain[c] = next((v for v in VOLTS_PER_DIV if v >= need), VOLTS_PER_DIV[-1])
             self._offset[c] = centre - ((hi + lo) / 2) / self._gain[c]
         self.update()
         self.view_changed.emit()
+
+    def reset_view(self) -> None:
+        """Back to what a standard oscilloscope shows: the stacked view,
+        every channel re-fitted, nothing left over from a hand adjustment.
+
+        Deliberately display-only. It does NOT touch the timebase, the
+        trigger or which channels are ticked -- those are measurement
+        choices the user made, and clobbering them on a "reset" is the
+        same defaults-kicking-in complaint that Acquire had.
+        """
+        self._overlay = False
+        self._gain.clear()
+        self._offset.clear()
+        self._delay_s = 0.0
+        self._h_center = False
+        self.autoset()
 
     def _px_per_div(self, plot: QRectF) -> float:
         return plot.height() / VDIV
@@ -978,7 +1031,16 @@ class ScopeTraceWidget(QWidget):
         p.drawText(QRectF(plot.left() + 6, plot.top() + 3, plot.width() / 2, 14),
                    Qt.AlignLeft | Qt.AlignTop,
                    f"{eng_time(self.time_per_div)}/div")
+        p.drawText(QRectF(plot.center().x(), plot.top() + 3, plot.width() / 2 - 6, 14),
+                   Qt.AlignRight | Qt.AlignTop, self.status_text(delay))
+
+    def status_text(self, delay: float) -> str:
+        """The top-right corner: what the screen is doing right now."""
         bits = []
+        if self._overlay:
+            # Traces piled on one another read as a fault unless the screen
+            # says it is a mode you asked for.
+            bits.append("OVERLAY")
         if self._trigger_col is not None:
             bits.append(self._trig_info or "trig")
         if self._held:
@@ -986,9 +1048,7 @@ class ScopeTraceWidget(QWidget):
         else:
             bits.append("live" if delay <= 0
                         else f"centre -{eng_time(delay + self.view_seconds / 2)}")
-        right = "   ".join(bits)
-        p.drawText(QRectF(plot.center().x(), plot.top() + 3, plot.width() / 2 - 6, 14),
-                   Qt.AlignRight | Qt.AlignTop, right)
+        return "   ".join(bits)
 
 
 class FpgaScopePanel(QWidget):
@@ -1084,6 +1144,23 @@ class FpgaScopePanel(QWidget):
                                     "states its scale. Double-clicking the screen does the same.")
         self.autoset_btn.clicked.connect(self._on_autoset)
         top.addWidget(self.autoset_btn)
+        self.overlay_btn = QPushButton("Overlay")
+        self.overlay_btn.setCheckable(True)
+        self.overlay_btn.setMinimumWidth(70)
+        self.overlay_btn.setToolTip("Centre every shown channel on the middle line and superimpose "
+                                    "them, each scaled to fill the screen. For 'does this edge line "
+                                    "up with that one' -- the DC levels are removed, so only shape "
+                                    "and timing are being compared. Press again (or Reset) to go "
+                                    "back to a slot per channel.")
+        self.overlay_btn.toggled.connect(self._on_overlay_toggled)
+        top.addWidget(self.overlay_btn)
+        self.reset_btn = QPushButton("Reset")
+        self.reset_btn.setMinimumWidth(62)
+        self.reset_btn.setToolTip("Back to what a standard scope shows: one slot per channel, every "
+                                  "one re-fitted, nothing left over from a hand adjustment. Leaves "
+                                  "the timebase, the trigger and your channel ticks alone.")
+        self.reset_btn.clicked.connect(self._on_reset)
+        top.addWidget(self.reset_btn)
         self.untag_btn = QPushButton("Untag")
         self.untag_btn.setMinimumWidth(58)
         self.untag_btn.setToolTip("Remove every pinned tag. Click a trace to pin one; the tag's "
@@ -1252,6 +1329,18 @@ class FpgaScopePanel(QWidget):
 
     def _on_autoset(self):
         self.trace.autoset()
+        self._sync_view_combos()
+
+    def _on_overlay_toggled(self, on: bool):
+        self.trace.set_overlay(on)
+        self._sync_view_combos()
+
+    def _on_reset(self):
+        self.trace.reset_view()
+        if self.overlay_btn.isChecked():
+            self.overlay_btn.blockSignals(True)      # reset_view already left overlay
+            self.overlay_btn.setChecked(False)
+            self.overlay_btn.blockSignals(False)
         self._sync_view_combos()
 
     def _on_untag(self):

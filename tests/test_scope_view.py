@@ -903,3 +903,40 @@ def test_a_computed_waveform_stays_centred_across_timer_ticks(app):
     for _ in range(5):
         p._refresh()                                    # Simulated: a no-op
     assert p.trace._h_center is True
+
+
+# -- the screen must fill, whatever the stats window is set to -------------
+# "do you not seeing the problem? The waveforms appear on the right hand
+# side of the scope." The ring is a fixed 5 s and the widest timebase
+# (0.5 s/div x 10) is a 5 s window, so the ring can ALWAYS fill the screen.
+# _refresh was clamping the screen fetch to "# of seconds to buff" (2.00 by
+# default), so at 500 ms/div the trace could only occupy the right-hand 40%.
+
+def test_the_screen_fills_regardless_of_the_stats_window(app):
+    p = FpgaScopePanel()
+    p.trace.resize(860, 430)
+    p.trig_combo.setCurrentIndex(0)                       # free run
+    p.window_spin.setValue(2.0)                           # the shipped default
+    p.trace.set_time_per_div(0.5)                         # 5 s window
+    p.set_scope(_FakeLiveScope(_quiet_snapshot(seconds=5.0)))
+    p._refresh()
+
+    have_s = len(p.trace._snap.frames) / p.trace._snap.fs_hz
+    assert have_s == pytest.approx(5.0, rel=0.01), \
+        f"only {have_s:.2f} s pulled into a 5 s window -- the rest of the screen is blank"
+
+
+def test_the_stats_window_still_honours_the_spinbox(app):
+    """The spinbox keeps its own job -- how much history DIO4's period is
+    measured over -- it just no longer starves the screen."""
+    p = FpgaScopePanel()
+    p.trig_combo.setCurrentIndex(0)
+    p.trace.set_time_per_div(0.5)
+    p.window_spin.setValue(0.25)                          # 2 trigger periods at 100 ms
+    p.set_scope(_FakeLiveScope(_snapshot(seconds=2.0)))   # DIO4 pulses 100 ms apart
+    p._refresh()
+    assert "DIO4: 2 edges" in p.status_label.text(), p.status_label.text()
+
+    p.window_spin.setValue(1.0)
+    p._refresh()
+    assert "DIO4: 10 edges" in p.status_label.text(), p.status_label.text()

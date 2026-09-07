@@ -198,10 +198,10 @@ class ScopeTraceWidget(QWidget):
         want = self.view_seconds + self._delay_s
         if self._trigger_col is None:
             return want
-        # Trigger mode: ask for every second the panel will give (it caps this
-        # at "# of seconds to buff"). A Z stack is a burst of a few hundred ms
-        # every few seconds; looking back only 3x the screen missed the burst
-        # between passes and dropped the view to a flat live line.
+        # Trigger mode: ask for every second there is -- the ring caps it at
+        # what it holds. A Z stack is a burst of a few hundred ms every few
+        # seconds; looking back only 3x the screen missed the burst between
+        # passes and dropped the view to a flat live line.
         return max(want * 3, want + 0.25, self.TRIGGER_LOOKBACK_S)
 
     def set_time_per_div(self, value: float) -> None:
@@ -1129,8 +1129,9 @@ class FpgaScopePanel(QWidget):
         self.window_spin.setDecimals(2)
         self.window_spin.setSingleStep(0.5)
         self.window_spin.setValue(2.0)
-        self.window_spin.setToolTip("How much history the scope keeps. The screen shows "
-                                    "10 x Time/div of it, positioned by the trigger.")
+        self.window_spin.setToolTip("How much history the DIO4 period/jitter readout below is "
+                                    "measured over. It does NOT limit the screen: the ring keeps "
+                                    "5 s and the trace always fills 10 x Time/div of it.")
         top2.addWidget(self.window_spin)
         top2.addSpacing(12)
         self.points_label = QLabel("# points acq: 0")
@@ -1406,20 +1407,33 @@ class FpgaScopePanel(QWidget):
         scope = self._scope
         if scope is None:
             return
+        # The screen gets EVERY second it can show. This used to be clamped to
+        # "# of seconds to buff" as well, which is not a property of the
+        # screen at all: the ring is a fixed 5 s and the widest timebase
+        # (0.5 s/div x 10) is a 5 s window, so the ring can always fill the
+        # screen -- but with the spinbox at its 2.00 default, 500 ms/div asked
+        # for 2 s of a 5 s window and the trace could only ever occupy the
+        # right-hand 40%, with the rest blank. "the waveforms appear on the
+        # right hand side of the scope". The ring itself caps the request at
+        # what it actually holds, which is the only limit that is real.
+        need = max(max(self.trace.seconds_needed(), 0.05), self.window_spin.value())
+        snap = scope.snapshot(seconds=need)      # one copy, shared with the stats below
         # Hold freezes the screen: keep the last snapshot so it can be zoomed
         # and panned, but go on reporting the live status line underneath.
         if not self._held:
-            need = min(max(self.trace.seconds_needed(), 0.05), self.window_spin.value())
-            snap = scope.snapshot(seconds=need)
             self.trace.set_data(snap)
         self.points_label.setText(f"# points acq: {scope.ring.total:,}")
         parts = [f"{scope.fs_hz:,.0f} S/s x {scope.channels} ch", f"buffered {scope.seconds_buffered():.1f} s",
                  f"backlog max {scope.backlog_max}"]
         err = [k for k, v in scope.ai_error.items() if v]
         parts.append("AI err " + (",".join(err) if err else "-"))
-        stat_snap = scope.snapshot(seconds=self.window_spin.value())
-        if scope.channels > IDX_DIO4 and len(stat_snap.frames):
-            st = measure_period(stat_snap.frames[:, IDX_DIO4], scope.fs_hz)
+        # The spinbox keeps its own meaning here -- how much history the DIO4
+        # period/jitter is measured over -- but taken as a slice of the
+        # snapshot already in hand rather than a second full copy of the ring.
+        stat_n = max(1, int(self.window_spin.value() * scope.fs_hz))
+        stat_frames = snap.frames[-stat_n:]
+        if scope.channels > IDX_DIO4 and len(stat_frames):
+            st = measure_period(stat_frames[:, IDX_DIO4], scope.fs_hz)
             if st is not None:
                 parts.append(f"DIO4: {st.edges} edges, period {st.period_ms:.4f} ms "
                              f"(sd {st.period_sd_ms:.4f}), high {st.high_ms:.3f} ms")

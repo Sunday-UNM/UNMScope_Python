@@ -86,7 +86,7 @@ from unmscope.gui.hw_config_dialog import show_hw_config_dialog
 from unmscope.gui.sample_stage_dialog import SampleStageDialog
 from unmscope.config.um_per_volt import load_calibration_from_unmscope_ini
 from unmscope.config.waveform_config import (
-    AxisSettings, WaveformConfig, engine_times,
+    AxisSettings, WaveformConfig, camera_cycle_s, engine_times,
 )
 from unmscope.fileio.tiff_stack import read_tiff_stack
 from unmscope.gui.widgets import bring_to_front
@@ -1593,8 +1593,11 @@ class MainWindow(QMainWindow):
         cfg = panel.config()
         exposure_ms = float(self.exposure_spin.value())
         cam = self.camera
+        # No camera open (planning, or LouisXIV holds the rig): the same
+        # DCAM formula on the panel's own ROI height and trigger mode.
         cam_cycle = (cam.cycle_time_s(exposure_ms) if cam is not None and cam.is_connected
-                     else exposure_ms / 1000.0)
+                     else camera_cycle_s(exposure_ms / 1000.0, self.camera_tab.roi.height,
+                                         self.sync_readout_chk.isChecked()))
         cam_exp_s, cycle_s = engine_times(exposure_ms / 1000.0, cam_cycle,
                                           cfg.cycle_time_s, cfg.custom_cycle_time)
         panel.set_engine_times(cam_exp_s, cycle_s)
@@ -1915,41 +1918,59 @@ class MainWindow(QMainWindow):
         this rig's adapter even though it does not in LouisXIV's own
         native DCAM path.
         """
-        if self.camera is None or not self.camera.is_connected:
-            self._log("Waveform: no camera connected -- connect one (Simulated is fine) so the "
-                      "true cycle time can be computed.")
-            return None
+        # Deliberately works with NOTHING connected -- no camera, no FPGA.
+        # The Simulated view exists to plan and check waveforms BEFORE they
+        # are deployed, which includes while LouisXIV holds the (exclusive)
+        # FPGA session for a side-by-side comparison. With a camera open we
+        # use its own readback; without one, the same formulas run on the
+        # panel's values, and the port-only hardware margin is skipped --
+        # there is no hardware to protect, and LouisXIV has no such margin
+        # anyway, so this is also the number to compare against it.
+        cam = self.camera if (self.camera is not None and self.camera.is_connected) else None
         exposure_ms = self.exposure_spin.value()
         typed = self.utilities_tab.waveform_panel.config()
         cam_exp_s, cycle_s = self._push_engine_times()
         if typed.custom_cycle_time and cycle_s > typed.cycle_time_s + 1e-9:
             self._log(f"Custom Cycle time {typed.cycle_time_s * 1e3:.3f} ms is below the camera's "
                       f"own cycle; LouisXIV raises it to {cycle_s * 1e3:.3f} ms.")
+        sync = (cam.trigger_active == cam.TRIGGER_SYNCREADOUT) if cam is not None \
+            else self.sync_readout_chk.isChecked()
         # HHMI - Generate trigger settings for FPGA: Cycle (ticks) =
         # max(Waveform.Cycle time (s), camera Cycle(s)) -- established, Q6.
-        period_s = max(cycle_s, self.camera.cycle_time_s(exposure_ms))
-        floor_s = self.camera.trigger_period_ms(exposure_ms) / 1000.0
-        if floor_s > period_s + 1e-9:
-            self._log(f"Trigger period raised from {period_s * 1e3:.3f} to {floor_s * 1e3:.3f} ms "
-                      "(port safety margin over the camera's own readout -- LouisXIV has no such "
-                      "margin; docs/known_issues.md).")
-            period_s = floor_s
+        if cam is not None:
+            cam_cycle_s_val = cam.cycle_time_s(exposure_ms)
+        else:
+            cam_cycle_s_val = camera_cycle_s(exposure_ms / 1000.0,
+                                             self.camera_tab.roi.height, sync)
+        period_s = max(cycle_s, cam_cycle_s_val)
+        if cam is not None:
+            floor_s = cam.trigger_period_ms(exposure_ms) / 1000.0
+            if floor_s > period_s + 1e-9:
+                self._log(f"Trigger period raised from {period_s * 1e3:.3f} to {floor_s * 1e3:.3f} ms "
+                          "(port safety margin over the camera's own readout -- LouisXIV has no such "
+                          "margin; docs/known_issues.md).")
+                period_s = floor_s
         period_ms = period_s * 1000.0
-        sync = self.camera.trigger_active == self.camera.TRIGGER_SYNCREADOUT
         # free_run_timing() only needs exposure <= period; in SYNCREADOUT the
         # interval itself is the exposure.
         exposure_s = min(exposure_ms, period_ms) / 1000.0
-        if sync:
+        mode_name = "SYNCREADOUT" if sync else "EDGE"
+        if cam is None:
+            self._log(f"{mode_name}: trigger period {period_ms:.2f} ms ({1000.0 / period_ms:.2f} Hz), "
+                      f"camera cycle {cam_cycle_s_val * 1e3:.3f} ms from the panel "
+                      f"({self.camera_tab.roi.height} rows) -- no camera open, so no readback and no "
+                      "port safety margin.")
+        elif sync:
             self._log(f"SYNCREADOUT: trigger period {period_ms:.2f} ms ({1000.0 / period_ms:.2f} Hz) "
                       f"= actual exposure (requested {exposure_ms:.2f} ms; camera floor "
-                      f"{self.camera.readout_ms():.1f} ms readout + "
-                      f"{self.camera.syncreadout_margin_ms():.2f} ms)"
+                      f"{cam.readout_ms():.1f} ms readout + "
+                      f"{cam.syncreadout_margin_ms():.2f} ms)"
                       + ("  <-- requested exposure is below the floor and was lengthened"
                          if period_ms > exposure_ms + 1e-6 else ""))
         else:
             self._log(f"EDGE: trigger period {period_ms:.2f} ms ({1000.0 / period_ms:.2f} Hz) = exposure "
-                      f"{exposure_ms:.2f} ms + readout {self.camera.readout_ms():.1f} ms + margin "
-                      f"{self.camera.edge_margin_ms():.2f} ms")
+                      f"{exposure_ms:.2f} ms + readout {cam.readout_ms():.1f} ms + margin "
+                      f"{cam.edge_margin_ms():.2f} ms")
 
         # ---- AO waveform for this scan (docs/wvfrm2_packing.md) -------------
         # X galvo: one sweep of the Scan Setup Range around Offset per

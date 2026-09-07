@@ -138,3 +138,21 @@ def test_set_engine_times_writes_both_modes(window):
     panel.custom_cycle_time.setChecked(False)
     panel.set_engine_times(0.1, 0.1004)             # the field has 4 decimals, per _dspin above
     assert panel.cycle_time_s.value() == pytest.approx(0.1004)
+
+
+def test_simulated_waveform_needs_no_camera_and_no_fpga(window):
+    """The Simulated view is for planning BEFORE deployment -- which
+    includes while LouisXIV holds the exclusive FPGA session for a
+    side-by-side comparison. It must compute with nothing connected."""
+    w = window
+    assert w.camera is None and w.fpga is None          # the fixture connects neither
+
+    w.mode_combo.setCurrentText(mw.MODE_ZSTACK)
+    w.z_start_spin.setValue(-5.0); w.z_end_spin.setValue(5.0); w.z_interval_spin.setValue(0.05)
+    result = w._compute_scan_waveform()
+
+    assert result is not None, "must compute with no camera and no FPGA at all"
+    lx, period_s, exposure_s, sync = result
+    assert lx.scan.n_slices == 201
+    assert lx.scan.points_per_trigger > 0
+    assert period_s > 0

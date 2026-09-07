@@ -279,20 +279,25 @@ def ao_rate_for_line(line: FastAxisLine, exposure_s: float, cycle_s: float, upda
     """``Compute AO rate from Cycle Time``: the larger of the two rules,
     checked against the max AO rate, rounded to the FPGA tick.
 
-    NOT YET RECONCILED (docs/louisxiv_cycle_time_semantics.md, Q1
-    -- established by two independent readers, but NOT bench-checked): a
-    source read says ``HHMI - Min AO rate needed`` leaves the timing
-    cluster's 'Exposure (sec)' input unwired and feeds 'Cycle (sec)' into
-    '# that Ramp needs' instead, i.e. rule 1 should read ``cycle_s`` here,
-    not ``exposure_s``. Left AS IS deliberately: on this rig (cam exp 0.1 s,
-    cycle 0.127 s, both already live and driving the real galvo), switching
-    the two changes actual AO-rate math on the next real acquisition, and
-    given ``on_points <= min_points`` always, it would make rule 1
-    mathematically unable to ever bind against rule 2's Option A/B (always
-    dominated) -- a big enough consequence to want a bench check first, not
-    a silent swap alongside the Cam-exp/Cycle-time widget fix. Flagged for
-    the user; do not change without their sign-off."""
-    r_exp = min_rate_for_exposure(line.on_points, exposure_s)
+    Rule 1 reads the CYCLE time, not the exposure -- ``HHMI - Min AO rate
+    needed`` leaves the timing cluster's 'Exposure (sec)' input unwired and
+    feeds 'Cycle (sec)' into '# that Ramp needs'
+    (docs/louisxiv_cycle_time_semantics.md, Q1).
+
+    CONFIRMED against the running LouisXIV, 2026-09-07. Its X Waveform
+    graph's time axis ends at the last AO point, (n-1)/rate, and reads
+    **125.159 ms** for this rig's own settings (69-point line, cycle
+    0.127 s, cam exp 0.100042 s). Cycle rule -> 543.307 Hz -> 125.159 ms,
+    exact to all six digits. Exposure rule -> 599.748 Hz -> 113.381 ms,
+    which is not what it shows. ``Pixel / ms`` on its panel reads 0.5,
+    agreeing (0.5433 vs 0.5997).
+
+    A consequence worth knowing: since ``on_points <= min_points`` always,
+    both rules now divide by the same cycle, so rule 1 can never exceed
+    rule 2's Option A -- it is dominated in every case. That looked like a
+    reason to doubt the reading; the 6-digit axis match says it is simply
+    how LouisXIV computes."""
+    r_exp = min_rate_for_exposure(line.on_points, cycle_s)
     r_fly, option, extra_counts, extra_imgs = min_rate_for_flyback(
         line.min_points, line.return_points, cycle_s, z_settle_ms, skip_images)
     rate_hz = max(r_exp, r_fly)

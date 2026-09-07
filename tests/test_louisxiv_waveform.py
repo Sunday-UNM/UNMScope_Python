@@ -60,18 +60,40 @@ def test_s_curve():
 
 
 def test_rate_rules():
+    """Both rules divide by the CYCLE time -- 'Min AO rate needed' leaves the
+    timing cluster's 'Exposure (sec)' unwired and feeds 'Cycle (sec)' into
+    '# that Ramp needs' instead. CONFIRMED against the running LouisXIV
+    2026-09-07: its X Waveform axis ends at 125.159 ms for this rig's
+    settings, which is (n-1)/rate at the cycle-derived 543.307 Hz to six
+    digits; the exposure rule would have put it at 113.381 ms."""
     ln = fast_axis_line(xrange=1.0, offset=0.0, xpix=60, update_rate=1, tau=1.0, flyback=0.1)
-    # exposure rule dominates: 100 ms exposure, long cycle
+    # exposure_s is accepted but unused -- a wildly different one changes nothing
     r = ao_rate_for_line(ln, exposure_s=0.1, cycle_s=1.0, update_rate=1)
-    assert r.rate_for_exposure_hz == pytest.approx(ln.on_points / 0.1)
+    r_other = ao_rate_for_line(ln, exposure_s=0.007, cycle_s=1.0, update_rate=1)
+    assert r.ao_rate_hz == pytest.approx(r_other.ao_rate_hz)
+    assert r.rate_for_exposure_hz == pytest.approx(ln.on_points / 1.0)      # the CYCLE, not 0.1
     assert r.option == "A" and r.rate_for_flyback_hz == pytest.approx(ln.min_points / 1.0)
-    assert abs(r.ao_rate_hz - ln.on_points / 0.1) / (ln.on_points / 0.1) < 1e-3     # tick rounding only
-    assert ln.on_points / r.ao_rate_hz <= 0.1 + 1e-9                                 # ON part fits the exposure
-    # cycle rule dominates: exposure 100 ms but the cycle is 100 ms too -> whole line in 100 ms
+    # and since on_points <= min_points, rule 2's Option A always wins
+    assert r.ao_rate_hz == pytest.approx(ln.min_points / 1.0, rel=1e-3)
+    assert ln.total_points / r.ao_rate_hz <= 1.0 + 1e-9                     # whole line fits the cycle
+    # a shorter cycle scales it: the whole line still has to fit
     r2 = ao_rate_for_line(ln, exposure_s=0.1, cycle_s=0.1, update_rate=1)
     assert r2.ao_rate_hz >= ln.min_points / 0.1 * 0.999
     assert ln.total_points / r2.ao_rate_hz <= 0.1 + 1e-9
     assert r2.pixel_per_ms == pytest.approx(r2.ao_rate_hz / 1000.0)
+
+
+def test_rate_matches_the_running_louisxiv():
+    """The 6-digit check that settled which quantity rule 1 reads. LouisXIV's
+    own settings on this rig: 60 px, Fract. Smoothing 0, Fractional Flyback
+    0.15, cycle 0.127 s -> a 69-point line whose last AO point its X
+    Waveform graph puts at 125.159 ms."""
+    ln = fast_axis_line(xrange=101.695, offset=0.0, xpix=60, update_rate=1, tau=0.0, flyback=0.15)
+    assert (ln.total_points, ln.tau_elem, ln.on_points) == (69, 0, 60)      # Tao = 0, as its panel reads
+    r = ao_rate_for_line(ln, exposure_s=0.100042, cycle_s=0.127, update_rate=1)
+    assert r.ao_rate_hz == pytest.approx(543.307, abs=0.05)
+    last_point_ms = (ln.total_points - 1) / r.ao_rate_hz * 1000.0
+    assert last_point_ms == pytest.approx(125.159, abs=0.01)
 
 
 def test_flyback_rule_z_settle():
@@ -169,9 +191,13 @@ def test_padding_holds_the_edge_values():
 def test_delays_keep_every_channel_the_same_length_and_the_block_in_its_cycle():
     kw = dict(exposure_s=0.01, cycle_s=0.02, x_range_v=1.0, x_offset_v=0.0, x_pixels=50)
     base = build_louisxiv_waveform(**kw)
-    # 300 us at this AO rate (~15 kHz, 66.7 us/sample) is 4 samples of lag
+    # the lag is round(largest delay x AO rate) samples -- derived from the
+    # rate rather than hard-coded, so it does not quietly encode which
+    # quantity rule 1 happens to read
     w = build_louisxiv_waveform(**kw, x_galvo_delay_us=300.0, z_galvo_delay_us=120.0)
-    assert w.scan.points_per_trigger == base.scan.points_per_trigger + 4
+    lag = round(300e-6 * base.rate.ao_rate_hz)
+    assert lag >= 1, "pick a delay long enough to shift at least one sample"
+    assert w.scan.points_per_trigger == base.scan.points_per_trigger + lag
     assert len({len(c) for c in w.scan.channels.values()}) == 1, "channels must stay aligned"
     # the block still fits the same cycle: LouisXIV lengthens Time Per WvFrm
     # instead, which our fixed-period free run cannot do

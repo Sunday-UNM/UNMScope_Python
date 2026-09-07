@@ -135,7 +135,13 @@ class ScopeTraceWidget(QWidget):
     #: so the panel's combos can follow.
     view_changed = Signal()
 
-    LEFT, RIGHT, TOP, BOTTOM = 58, 14, 12, 34
+    #: Left is now just the ground-marker gutter (there are no volts
+    #: numbers to print); the bottom carries the time labels AND the
+    #: per-channel volts/div bar, the way a DSO states its scales.
+    LEFT, RIGHT, TOP, BOTTOM = 30, 14, 12, 52
+
+    #: Fraction of its own slot a channel's peak-to-peak is scaled to fill.
+    SLOT_FILL = 0.72
 
     #: How near the pointer must be to a trace, in pixels, to pick it.
     HOVER_SLOP = 6
@@ -156,11 +162,6 @@ class ScopeTraceWidget(QWidget):
         self._tag_hits: list[tuple] = []          # button rects, laid out during paint
         self._tag_boxes: list[tuple] = []         # box rects, for dragging a tag aside
         self._tag_drag: tuple | None = None
-        #: True = each channel keeps its own volts/div (the default: it is
-        #: what per-channel gain was added for). False ganges them together so
-        #: one adjustment moves the lot and the axis can stay in Volts.
-        #: Either way the axis only leaves Volts once gains actually differ.
-        self._per_channel_scale = True
         self._delay_s = 0.0        # how far the right edge sits behind "now"
         #: Centre a segment SHORTER than the window instead of anchoring it
         #: at the right edge. Only bites when there is blank screen to
@@ -224,18 +225,13 @@ class ScopeTraceWidget(QWidget):
         self.update()
 
     def set_enabled(self, enabled) -> None:
-        # Sampled BEFORE the new set is applied: afterwards the newly ticked
-        # channel is already in it on the default gain, so uniform_scale()
-        # would see the mix it is supposed to prevent and do nothing.
-        uniform = None if self._per_channel_scale else self.uniform_scale()
+        before, was = set(self._enabled), self.slot_centres()
         self._enabled = set(int(i) for i in enabled)
-        if uniform is not None:
-            # In shared mode a newly ticked channel arriving on the DEFAULT
-            # gain would break the invariant and flip the axis to Divisions.
-            gain, offset = uniform
-            for c in self._enabled:
-                self._gain[c] = gain
-                self._offset[c] = offset
+        # The slot a channel occupies depends on how many are shown, so
+        # ticking or unticking one re-deals the whole stack -- keeping every
+        # channel's own gain, only re-seating it in its new slot.
+        if self._enabled != before:
+            self._reseat_slots(was)
         self.update()
 
     def set_held(self, on: bool) -> None:
@@ -255,18 +251,21 @@ class ScopeTraceWidget(QWidget):
             self._held_trig = None
         self.update()
 
-    # -- per-channel vertical scale ------------------------------------------
+    # -- vertical: one slot per channel --------------------------------------
     #
-    # Each channel maps volts to the graticule with its OWN gain and offset:
+    # A DSO gives every channel its OWN volts/div and its own vertical
+    # position, and draws a ground-reference marker at the left edge showing
+    # where that channel's 0 V sits:
     #
     #     divisions_from_centre = volts / gain(c) + offset(c)
     #
-    # A single shared scale cannot serve this instrument -- the digital flags
-    # swing 1.25 V while the X galvo is +-0.125 V -- so any gain that shows one
-    # squashes the other, and two waveforms of unequal amplitude cannot be
-    # compared shape-for-shape. The cost is that a Volts axis would then be
-    # lying about every channel it does not belong to, so when gains differ the
-    # axis switches to DIVISIONS and each tag states its own volts/div.
+    # There is deliberately no shared-scale mode any more. One gain cannot
+    # serve this instrument -- the digital flags swing 1.25 V while the X
+    # galvo is +-0.125 V -- so a Volts axis would be lying about every channel
+    # it did not belong to, and the axis flipping between "Volts" and
+    # "Divisions" depending on whether the gains happened to match was the
+    # single most confusing thing on the screen. The graticule is divisions,
+    # always; each channel's scale is stated in the bar under it.
     DEFAULT_GAIN = 0.2
     #: 0 V sits 2.5 divisions low by default, which puts -0.3 .. +1.3 V on
     #: screen at 200 mV/div: the galvos and the 1.25 V flags together.
@@ -282,165 +281,98 @@ class ScopeTraceWidget(QWidget):
         self._gain[c] = min(VOLTS_PER_DIV, key=lambda v: abs(v - value))
         self.update()
 
-    @property
-    def per_channel_scale(self) -> bool:
-        return self._per_channel_scale
-
-    def set_per_channel_scale(self, on: bool) -> None:
-        """Switch between one shared volts/div and per-channel gains.
-
-        Leaving custom mode collapses every visible channel onto the COARSEST
-        gain in play, so nothing that was on screen falls off it, and restores
-        the default vertical position. The axis can then go back to volts.
-        """
-        on = bool(on)
-        if on == self._per_channel_scale:
-            return
-        self._per_channel_scale = on
-        if not on:
-            cols = self._visible_columns()
-            if cols:
-                shared = max(self.gain(c) for c in cols)
-                for c in cols:
-                    self._gain[c] = shared
-                    self._offset[c] = self.DEFAULT_OFFSET
-        self.update()
-        self.view_changed.emit()
-
-    def _scale_targets(self, c: int) -> list[int]:
-        """Which channels a gain change applies to, honouring the mode."""
-        return [c] if self._per_channel_scale else (self._visible_columns() or [c])
-
-    def step_gain(self, c: int, steps: int, from_tag: bool = False) -> None:
-        """Move volts/div by whole 1-2-5 steps (the tag buttons).
-
-        A tag's buttons are a per-waveform control, so pressing one while the
-        scales are ganged switches to independent scales rather than silently
-        moving every other trace as well.
-        """
-        if from_tag and not self._per_channel_scale:
-            self._per_channel_scale = True
-        for t in self._scale_targets(c):
-            i = VOLTS_PER_DIV.index(self.gain(t))
-            self._gain[t] = VOLTS_PER_DIV[int(np.clip(i + steps, 0, len(VOLTS_PER_DIV) - 1))]
-        self.update()
-        self.view_changed.emit()
-
-    def uniform_scale(self) -> tuple[float, float] | None:
-        """(gain, offset) when every visible channel shares them, else None.
-
-        This is what decides whether the vertical axis can be labelled in
-        volts at all.
-        """
+    def slot_centres(self) -> dict[int, float]:
+        """Divisions from the screen centre for each shown channel's slot,
+        top of the screen first. n channels split the 8 divisions evenly."""
         cols = self._visible_columns()
         if not cols:
-            return (self.DEFAULT_GAIN, self.DEFAULT_OFFSET)
-        gains = {self.gain(c) for c in cols}
-        offsets = {self.offset(c) for c in cols}
-        if len(gains) == 1 and len(offsets) == 1:
-            return (gains.pop(), offsets.pop())
-        return None
+            return {}
+        h = VDIV / len(cols)
+        return {c: VDIV / 2 - (i + 0.5) * h for i, c in enumerate(cols)}
+
+    def slot_index(self, c: int) -> int | None:
+        """1-based position down the screen -- the number on the channel's
+        ground marker and in the volts/div bar."""
+        cols = self._visible_columns()
+        return cols.index(c) + 1 if c in cols else None
+
+    def _reseat_slots(self, was: dict[int, float]) -> None:
+        """Re-deal the stack after the shown set changed: shift each channel
+        that is still up by the DELTA between its old and new slot centre.
+
+        A delta rather than an assignment, so a channel the user has nudged
+        off its slot line keeps that position relative to the slot, and a
+        channel that has never been placed is left on the default.
+        """
+        for c, centre in self.slot_centres().items():
+            if c in self._offset and c in was:
+                self._offset[c] += centre - was[c]
+
+    def step_gain(self, c: int, steps: int, from_tag: bool = False) -> None:
+        """Move this channel's volts/div by whole 1-2-5 steps (tag buttons,
+        Shift+wheel). Only ever this channel: that is what per-channel means.
+
+        The trace expands about its own ground marker, because offset() is in
+        divisions and pins where 0 V sits -- the same thing a real scope's
+        volts/div knob does.
+        """
+        i = VOLTS_PER_DIV.index(self.gain(c))
+        self._gain[c] = VOLTS_PER_DIV[int(np.clip(i + steps, 0, len(VOLTS_PER_DIV) - 1))]
+        self.update()
+        self.view_changed.emit()
 
     @property
     def volts_per_div(self) -> float:
-        """The common gain if there is one, else the default -- what the
-        toolbar combo displays."""
-        uniform = self.uniform_scale()
-        return uniform[0] if uniform else self.DEFAULT_GAIN
+        """The gain shown in the toolbar combo: the shallowest in play, so
+        the combo names a real scale that is actually on screen."""
+        cols = self._visible_columns()
+        if not cols:
+            return self.DEFAULT_GAIN
+        return min(self.gain(c) for c in cols)
 
     def set_volts_per_div(self, value: float) -> None:
-        """Set every visible channel's gain: the toolbar combo is a 'set all'.
-        Per-channel adjustment lives on the tags."""
-        for c in self._visible_columns() or [None]:
-            if c is not None:
-                self._gain[c] = min(VOLTS_PER_DIV, key=lambda v: abs(v - value))
+        """Set every shown channel's gain: the toolbar combo is a 'set all'.
+        Per-channel adjustment lives on the tags and on Shift+wheel."""
+        # Positions are left alone: offset() pins where 0 V sits, so every
+        # trace rescales about its own ground marker and stays in its slot.
+        value = min(VOLTS_PER_DIV, key=lambda v: abs(v - value))
+        for c in self._visible_columns():
+            self._gain[c] = value
         self.update()
 
-    def fit_each_channel(self) -> None:
-        """Give every visible channel its own gain so they all fill the screen.
+    def autoset(self) -> None:
+        """The scope's Autoset: deal the shown channels into one slot each,
+        top to bottom, and give every one its own volts/div so its
+        peak-to-peak fills its slot.
 
-        This is the answer to comparing waveforms of unequal amplitude: after
-        it, shape is comparable directly and each tag says what scale it is on.
-
-        Fit also centres horizontally (as Centre does): a buffer shorter than
-        the window used to be left jammed against the right edge, which is
-        not "fitted to the screen" in any sense the user recognised.
+        This is what replaced Fit and Centre. Fit rescaled but left every
+        channel stacked on the centre line, so six traces drew on top of one
+        another; Centre existed only to undo a horizontal anchoring bug that
+        is now fixed at its source.
         """
         seg = self._visible_segment()
         cols = self._visible_columns()
         if seg is None or len(seg) == 0 or not cols:
             return
+        # A stopped screen (Hold, or the Simulated source) shares its blank
+        # out evenly; a live one re-anchors on "now" at the next frame.
         self._h_center = True
-        if not self._per_channel_scale:
-            # Shared mode: one gain that fits every visible channel at once.
-            sub = seg[:, cols].astype(np.float64) * AI_VOLTS_PER_COUNT
-            lo, hi = float(sub.min()), float(sub.max())
-            if not (np.isfinite(lo) and np.isfinite(hi)):
-                return
-            need = max((hi - lo) / (VDIV - 2), 1e-4)
-            shared = next((v for v in VOLTS_PER_DIV if v >= need), VOLTS_PER_DIV[-1])
-            for c in cols:
-                self._gain[c] = shared
-                self._offset[c] = -((hi + lo) / 2) / shared
-            self.update()
-            self.view_changed.emit()
-            return
-        for c in cols:
+        usable = (VDIV / len(cols)) * self.SLOT_FILL
+        for c, centre in self.slot_centres().items():
             col = seg[:, c].astype(np.float64) * AI_VOLTS_PER_COUNT
             lo, hi = float(col.min()), float(col.max())
             if not (np.isfinite(lo) and np.isfinite(hi)):
                 continue
-            need = max((hi - lo) / (VDIV - 2), 1e-4)
+            # Peak-to-peak sets the scale, but so does the DC level: a
+            # channel parked flat at 0.8 V has no p-p at all, and scaling it
+            # on that alone picked 1 mV/div -- a meaningless readout that put
+            # its ground marker 800 divisions off screen. Taking |midpoint|
+            # into account keeps the stated volts/div a real one.
+            need = max((hi - lo) / usable, abs(hi + lo) / 2 / (VDIV / 2), 1e-4)
             self._gain[c] = next((v for v in VOLTS_PER_DIV if v >= need), VOLTS_PER_DIV[-1])
-            self._offset[c] = -((hi + lo) / 2) / self._gain[c]     # centre it
+            self._offset[c] = centre - ((hi + lo) / 2) / self._gain[c]
         self.update()
         self.view_changed.emit()
-
-    def center_view(self) -> None:
-        """Put the waveform in the middle of the screen, both ways, WITHOUT
-        touching any volts/div or the timebase.
-
-        Horizontally: a segment shorter than the window is normally anchored
-        hard against the right edge (see _draw_traces), which is what leaves
-        a computed waveform sitting off to one side with a screenful of blank
-        beside it. This shares that blank out evenly instead. Panning or
-        zooming releases it again -- and so does the next live frame, because
-        a rolling sweep's right edge IS "now" and a centred one looks frozen
-        (see set_data). So the horizontal half only persists on a screen that
-        has stopped arriving: Hold, or the Simulated source.
-
-        Vertically: each shown channel is re-offset onto the centre line.
-        The difference from fit_each_channel() is that Fit RESCALES too, so
-        it discards gains that were set deliberately (per channel, or from a
-        tag's +/- buttons); this only ever moves things.
-        """
-        self._h_center = True
-        self._center_each_channel()
-        self.update()
-        self.view_changed.emit()
-
-    def _center_each_channel(self) -> None:
-        """The vertical half of center_view(): re-offset only, no rescale."""
-        seg = self._visible_segment()
-        cols = self._visible_columns()
-        if seg is None or len(seg) == 0 or not cols:
-            return
-        if not self._per_channel_scale:
-            # Shared mode: one offset for everything, on the combined range,
-            # or the channels stop sharing a scale and the axis leaves Volts.
-            sub = seg[:, cols].astype(np.float64) * AI_VOLTS_PER_COUNT
-            lo, hi = float(sub.min()), float(sub.max())
-            if not (np.isfinite(lo) and np.isfinite(hi)):
-                return
-            for c in cols:
-                self._offset[c] = -((hi + lo) / 2) / self.gain(c)
-        else:
-            for c in cols:
-                col = seg[:, c].astype(np.float64) * AI_VOLTS_PER_COUNT
-                lo, hi = float(col.min()), float(col.max())
-                if not (np.isfinite(lo) and np.isfinite(hi)):
-                    continue
-                self._offset[c] = -((hi + lo) / 2) / self.gain(c)
 
     def _px_per_div(self, plot: QRectF) -> float:
         return plot.height() / VDIV
@@ -704,8 +636,7 @@ class ScopeTraceWidget(QWidget):
             # walked away from signals that all sit near 0 V and went blank.
             plot = self._plot_rect()
             hovered = self.hover_hit(ev.position(), plot)
-            targets = (self._scale_targets(hovered) if hovered is not None
-                       else (self._visible_columns() or []))
+            targets = [hovered] if hovered is not None else (self._visible_columns() or [])
             d = self._y_to_div(ev.position().y(), plot)
             for c in targets:
                 anchor_v = (d - self.offset(c)) * self.gain(c)
@@ -752,7 +683,7 @@ class ScopeTraceWidget(QWidget):
             self.remove_tag(self._placed_by_press)
         self._placed_by_press = None
         self._delay_s = 0.0
-        self.fit_each_channel()
+        self.autoset()
         self.view_changed.emit()
         ev.accept()
 
@@ -769,6 +700,7 @@ class ScopeTraceWidget(QWidget):
         # names the reference and would otherwise show the previous frame's.
         delay = self._effective_delay()
         self._draw_graticule(p, plot)
+        self._draw_ground_markers(p, plot)
         self._draw_axis_labels(p, plot)
         self._draw_traces(p, plot, delay)
         self._draw_tags(p, plot)
@@ -809,18 +741,12 @@ class ScopeTraceWidget(QWidget):
         font.setPointSize(8)
         p.setFont(font)
         per_div = self.time_per_div
-        # Volts numbers ONLY while every visible channel shares one scale.
-        # Once gains differ there is no single voltage per pixel row, so the
-        # axis switches to divisions and each tag states its own volts/div --
-        # labelling it in volts anyway would be a lie about every other trace.
-        uniform = self.uniform_scale()
-        vdec = tick_decimals(uniform[0] * VDIV) if uniform else 0
-        for j in range(0, VDIV + 1, 2):
-            div = VDIV / 2 - j
-            y = plot.top() + plot.height() * j / VDIV
-            text = f"{(div - uniform[1]) * uniform[0]:.{vdec}f}" if uniform else f"{div:+.0f}"
-            p.drawText(QRectF(0, y - 8, self.LEFT - 6, 16),
-                       Qt.AlignRight | Qt.AlignVCenter, text)
+        # No numbers up the side. Each channel has its own volts/div and its
+        # own position, so no single voltage belongs to a pixel row -- a
+        # real DSO prints none either. Where a channel's 0 V sits is shown by
+        # its ground marker at the left edge; what its scale is, by the bar
+        # under the screen.
+        #
         # Time is measured backwards from the right edge, which is 'now' (or
         # 'now - delay'). Because the step is a round time/div, every label is
         # a round number and none of them move while the trace rolls.
@@ -831,14 +757,79 @@ class ScopeTraceWidget(QWidget):
                        time_axis_label((i - HDIV / 2) * per_div, per_div))
         ref = ("trigger" if self._trigger_col is not None and self._trig_info.startswith("trig'd")
                else "screen centre")
-        p.drawText(QRectF(plot.left(), plot.bottom() + 18, plot.width(), 14),
-                   Qt.AlignHCenter, f"Time from {ref} ({time_axis_unit(per_div)})")
-        p.save()
-        p.translate(12, plot.center().y())
-        p.rotate(-90)
-        p.drawText(QRectF(-60, -8, 120, 16), Qt.AlignCenter,
-                   "Volts" if self.uniform_scale() else "Divisions")
-        p.restore()
+        p.drawText(QRectF(plot.left(), plot.bottom() + 17, 260, 13), Qt.AlignLeft,
+                   f"t from {ref} ({time_axis_unit(per_div)})")
+        self._draw_channel_bar(p, plot)
+
+    def _draw_channel_bar(self, p: QPainter, plot: QRectF):
+        """The scale bar under the screen: `1 X Galvo 200mV` per shown
+        channel, in the channel's own colour -- how a DSO states per-channel
+        volts/div now that the vertical axis carries no numbers."""
+        cols = self._visible_columns()
+        if not cols:
+            return
+        font = QFont()
+        font.setPointSize(8)
+        p.setFont(font)
+        fm = p.fontMetrics()
+        y = plot.bottom() + 32
+        # Name + scale while they fit; scale alone once the row would overrun.
+        def chips(with_names: bool):
+            out = []
+            for i, c in enumerate(cols, start=1):
+                name = LEGEND_LABELS.get(c, AI_CHANNEL_NAMES[c] if c < len(AI_CHANNEL_NAMES) else str(c))
+                out.append((c, f"{i} {name} {eng_volts(self.gain(c))}" if with_names
+                            else f"{i}:{eng_volts(self.gain(c))}"))
+            return out
+        items = chips(True)
+        if sum(fm.horizontalAdvance(t) + 14 for _c, t in items) > plot.width():
+            items = chips(False)
+        x = plot.left()
+        for c, text in items:
+            w = fm.horizontalAdvance(text)
+            if x + w > plot.right():
+                break
+            p.setPen(QPen(QColor(PALETTE[c % len(PALETTE)]).darker(140)))
+            p.drawText(QRectF(x, y, w + 2, 14), Qt.AlignLeft | Qt.AlignVCenter, text)
+            x += w + 14
+        p.setPen(QColor(20, 20, 20))
+
+    def _draw_ground_markers(self, p: QPainter, plot: QRectF):
+        """A DSO's ground-reference markers: a filled arrow in the left
+        gutter at each shown channel's 0 V, numbered by its slot. This is
+        what makes a stack of traces readable -- you can see at a glance
+        which one is which and where its zero is."""
+        cols = self._visible_columns()
+        if not cols:
+            return
+        font = QFont()
+        font.setPointSize(7)
+        font.setBold(True)
+        p.setFont(font)
+        for i, c in enumerate(cols, start=1):
+            y = float(self._volts_to_y(c, 0.0, plot))
+            colour = QColor(PALETTE[c % len(PALETTE)])
+            # 0 V off screen: park the marker on the edge it went past and
+            # draw it hollow, the way a scope does, rather than dropping it
+            # -- the channel still needs a number you can find it by.
+            on_screen = plot.top() <= y <= plot.bottom()
+            y = float(np.clip(y, plot.top() + 6, plot.bottom() - 6))
+            p.setPen(QPen(colour))
+            p.setBrush(colour if on_screen else Qt.NoBrush)
+            p.drawPolygon(QPolygonF([QPointF(plot.left() - 12, y - 5),
+                                     QPointF(plot.left() - 12, y + 5),
+                                     QPointF(plot.left() - 2, y)]))
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QColor(20, 20, 20))
+            p.drawText(QRectF(plot.left() - 26, y - 7, 12, 14),
+                       Qt.AlignRight | Qt.AlignVCenter, str(i))
+            if on_screen:
+                # ...and its zero line across the screen, faintly, so a trace
+                # is read against its OWN baseline, not the graticule centre.
+                pen = QPen(QColor(colour.red() // 3, colour.green() // 3, colour.blue() // 3))
+                pen.setStyle(Qt.DotLine)
+                p.setPen(pen)
+                p.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y))
 
     def _draw_traces(self, p: QPainter, plot: QRectF, delay: float):
         # Cleared BEFORE the early return: hover, the value callout and the
@@ -986,9 +977,7 @@ class ScopeTraceWidget(QWidget):
         p.setPen(READOUT)
         p.drawText(QRectF(plot.left() + 6, plot.top() + 3, plot.width() / 2, 14),
                    Qt.AlignLeft | Qt.AlignTop,
-                   f"{eng_time(self.time_per_div)}/div    " +
-                   (f"{eng_volts(self.volts_per_div)}/div" if self.uniform_scale()
-                    else "per-channel V/div (see tags)"))
+                   f"{eng_time(self.time_per_div)}/div")
         bits = []
         if self._trigger_col is not None:
             bits.append(self._trig_info or "trig")
@@ -1086,30 +1075,15 @@ class FpgaScopePanel(QWidget):
         self.trig_combo.currentIndexChanged.connect(self._on_trig_changed)
         top.addWidget(self.trig_combo)
 
-        self.perch_chk = QCheckBox("Per-ch V/div")
-        self.perch_chk.setToolTip("On (default): each channel keeps its own volts/div, so one "
-                                  "waveform can be magnified while another stays put; each tag "
-                                  "states its own scale. Off: the channels are ganged, one "
-                                  "adjustment moves them all and the axis stays in Volts.")
-        self.perch_chk.toggled.connect(self._on_perch_toggled)
-        top.addWidget(self.perch_chk)
-
-        self.fit_btn = QPushButton("Fit")
-        self.fit_btn.setMinimumWidth(52)
-        self.fit_btn.setToolTip("Fit the traces to the screen and centre them. In Per-ch mode "
-                                "each channel gets its own volts/div, so waveforms of very "
-                                "different amplitude become comparable shape-for-shape.")
-        self.fit_btn.clicked.connect(self._on_fit)
-        top.addWidget(self.fit_btn)
-        self.center_btn = QPushButton("Centre")
-        self.center_btn.setMinimumWidth(62)
-        self.center_btn.setToolTip("Bring every shown trace back to the middle of the screen, "
-                                   "WITHOUT changing any volts/div. Fit rescales as well, which "
-                                   "throws away scales you set yourself (or from a tag's +/-). "
-                                   "A live sweep keeps rolling against the right edge; use Hold "
-                                   "first to centre one horizontally.")
-        self.center_btn.clicked.connect(self._on_center)
-        top.addWidget(self.center_btn)
+        self.autoset_btn = QPushButton("Autoset")
+        self.autoset_btn.setMinimumWidth(70)
+        self.autoset_btn.setToolTip("Deal every shown channel into its own horizontal slot, top "
+                                    "to bottom, each with its own volts/div so its peak-to-peak "
+                                    "fills that slot. The numbered arrow in the left gutter marks "
+                                    "where each channel's 0 V sits; the bar under the screen "
+                                    "states its scale. Double-clicking the screen does the same.")
+        self.autoset_btn.clicked.connect(self._on_autoset)
+        top.addWidget(self.autoset_btn)
         self.untag_btn = QPushButton("Untag")
         self.untag_btn.setMinimumWidth(58)
         self.untag_btn.setToolTip("Remove every pinned tag. Click a trace to pin one; the tag's "
@@ -1228,7 +1202,6 @@ class FpgaScopePanel(QWidget):
         self.vdiv_combo.setCurrentIndex(VOLTS_PER_DIV.index(self.trace.volts_per_div))
         self.trace.view_changed.connect(self._sync_view_combos)
         self.trig_combo.setCurrentIndex(1)          # trigger-aligned by default
-        self.perch_chk.setChecked(self.trace.per_channel_scale)
         self._on_channel_toggled()
 
     # -- wiring -----------------------------------------------------------------
@@ -1264,14 +1237,9 @@ class FpgaScopePanel(QWidget):
         self.trace.set_volts_per_div(self.vdiv_combo.currentData())
 
     def _sync_view_combos(self):
-        if self.perch_chk.isChecked() != self.trace.per_channel_scale:
-            self.perch_chk.blockSignals(True)
-            self.perch_chk.setChecked(self.trace.per_channel_scale)
-            self.perch_chk.blockSignals(False)
         """Follow a wheel zoom without re-driving the widget from the combo."""
-        pairs = [(self.tdiv_combo, TIME_PER_DIV, self.trace.time_per_div)]
-        if self.trace.uniform_scale():
-            pairs.append((self.vdiv_combo, VOLTS_PER_DIV, self.trace.volts_per_div))
+        pairs = [(self.tdiv_combo, TIME_PER_DIV, self.trace.time_per_div),
+                 (self.vdiv_combo, VOLTS_PER_DIV, self.trace.volts_per_div)]
         for combo, seq, value in pairs:
             i = seq.index(value)
             if combo.currentIndex() != i:
@@ -1282,22 +1250,12 @@ class FpgaScopePanel(QWidget):
     def _on_trig_changed(self, _i):
         self.trace.set_trigger_column(self.trig_combo.currentData())
 
-    def _on_fit(self):
-        self.trace.fit_each_channel()
-        self._sync_view_combos()
-
-    def _on_center(self):
-        self.trace.center_view()
+    def _on_autoset(self):
+        self.trace.autoset()
         self._sync_view_combos()
 
     def _on_untag(self):
         self.trace.clear_tags()
-
-    def _on_perch_toggled(self, on: bool):
-        # The V/div combo stays live in both modes: in Per-ch it is the
-        # 'set every channel back to this' reset.
-        self.trace.set_per_channel_scale(on)
-        self._sync_view_combos()
 
     def _on_hold_toggled(self, on: bool):
         self._held = on
@@ -1353,7 +1311,7 @@ class FpgaScopePanel(QWidget):
         # trigger. Whatever T/div was last showing (left over from the live
         # scope, or a previous zoom) can be much narrower than one slice,
         # let alone the whole stack, in which case every step looks like
-        # nothing is happening. fit_each_channel() only ever rescales
+        # nothing is happening. autoset() only ever rescales
         # volts, never the timebase (see its own docstring) -- widen T/div
         # first, to whatever shows the ENTIRE computed buffer.
         total_s = len(snap.frames) / snap.fs_hz if snap.fs_hz else 0.0
@@ -1384,7 +1342,7 @@ class FpgaScopePanel(QWidget):
             for col in has_data:
                 self.channel_checks[col].setChecked(True)
         self.trace.set_data(snap)
-        self.trace.fit_each_channel()
+        self.trace.autoset()
         self._sync_view_combos()
         self.points_label.setText(f"# points: {len(snap.frames):,} (computed)")
         self.status_label.setText("Scope: SIMULATED -- computed waveform, no voltage sent to the FPGA")

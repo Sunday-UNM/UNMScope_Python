@@ -8,7 +8,8 @@ import pytest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from unmscope.gui.scope_view import (  # noqa: E402
-    HDIV, TIME_PER_DIV, FpgaScopePanel, ScopeTraceWidget, eng_time, eng_volts, envelope, time_axis_label,
+    HDIV, VDIV, TIME_PER_DIV, VOLTS_PER_DIV, FpgaScopePanel, ScopeTraceWidget, eng_time, eng_volts,
+    envelope, time_axis_label,
 )
 from unmscope.hardware.fpga_scope import (  # noqa: E402
     AI_CHANNEL_NAMES, AI_VOLTS_PER_COUNT, IDX_DIO4, ScopeSnapshot,
@@ -325,70 +326,6 @@ def test_tag_close_button_removes_it(app):
     assert w.tags == []
 
 
-def test_axis_drops_volts_once_the_gains_differ(app):
-    """With per-channel gain there is no single voltage per pixel row, so a
-    Volts axis would be lying about every trace it does not belong to."""
-    w = ScopeTraceWidget()
-    w.resize(860, 430)
-    w.set_data(_offset_snapshot())
-    _painted(w)
-    assert w.uniform_scale() is not None            # all channels start equal
-    w.set_gain(9, 0.05)
-    assert w.uniform_scale() is None
-
-
-def test_fit_each_channel_equalises_amplitudes(app):
-    """The point of per-channel gain: two waveforms of very different size
-    should end up filling comparable amounts of the screen."""
-    w = ScopeTraceWidget()
-    w.resize(860, 430)
-    snap = _snapshot()
-    n = len(snap.frames)
-    t = np.arange(n) / snap.fs_hz
-    snap.frames[:, 8] = (0.02 * np.sin(2 * np.pi * 50 * t) / AI_VOLTS_PER_COUNT).astype(np.int16)
-    snap.frames[:, 11] = (0.90 * np.sin(2 * np.pi * 50 * t) / AI_VOLTS_PER_COUNT).astype(np.int16)
-    w.set_enabled([8, 11])
-    w.set_data(snap)
-    _painted(w)
-    w.fit_each_channel()
-    _painted(w)
-    heights = {}
-    for c in (8, 11):
-        _xs, ytop, ybot, _vm, _vx = w._drawn[c]
-        heights[c] = float(ybot.max() - ytop.min())
-    ratio = max(heights.values()) / max(1e-9, min(heights.values()))
-    assert ratio < 2.5, f"45x amplitude difference still renders {ratio:.1f}x apart: {heights}"
-
-
-def test_shared_mode_keeps_one_scale_for_everything(app):
-    """The mode is an invariant: in shared mode a tag's +/- must move every
-    channel, or the axis would silently stop being able to show volts."""
-    w = ScopeTraceWidget()
-    w.resize(860, 430)
-    w.set_data(_offset_snapshot())
-    _painted(w)
-    assert w.per_channel_scale is True                # independent by default
-    assert w.uniform_scale() is not None
-    w.set_per_channel_scale(False)                   # gang them for this test
-    w.step_gain(9, -1)
-    assert w.uniform_scale() is not None, "one channel drifted off the shared scale"
-
-
-def test_leaving_custom_mode_collapses_to_the_coarsest_gain(app):
-    """Nothing that was on screen may fall off it on the way back."""
-    w = ScopeTraceWidget()
-    w.resize(860, 430)
-    w.set_per_channel_scale(True)
-    w.set_data(_offset_snapshot())
-    _painted(w)
-    w.set_gain(8, 0.005)
-    w.set_gain(9, 0.5)
-    assert w.uniform_scale() is None
-    w.set_per_channel_scale(False)
-    uniform = w.uniform_scale()
-    assert uniform is not None and uniform[0] == 0.5
-
-
 def test_a_tag_box_can_be_dragged_aside_without_moving_the_waveform(app):
     from PySide6.QtCore import Qt, QPointF
     from PySide6.QtGui import QMouseEvent
@@ -472,42 +409,6 @@ def test_the_hover_readout_agrees_with_the_drawn_geometry(app):
     k = int(np.argmax(vmax))
     lines = w.hover_text(8, QPointF(float(xs[k]), float(ytop[k])), w._plot_rect())
     assert lines[-1].split()[1] == "0", f"spike at the centre reported as {lines[-1]!r}"
-
-
-def test_enabling_a_channel_keeps_the_shared_scale_intact(app):
-    """In shared mode a newly ticked channel arriving on the default gain
-    would break the invariant and flip the axis to Divisions unannounced."""
-    w = ScopeTraceWidget()
-    w.resize(860, 430)
-    w.set_enabled([8, 11])
-    w.set_per_channel_scale(False)
-    w.set_data(_offset_snapshot())
-    _painted(w)
-    w.step_gain(8, -2)                       # move the shared scale off default
-    assert w.uniform_scale() is not None
-    w.set_enabled([8, 11, 9])                # tick another legend box
-    assert w.uniform_scale() is not None, "the new channel broke the shared scale"
-    assert w.gain(9) == w.gain(8)
-
-
-def test_a_tag_button_scales_only_its_own_waveform_even_when_ganged(app):
-    """The tag buttons look per-waveform, so they must behave that way: using
-    one while the scales are ganged switches to independent scales rather than
-    quietly dragging every other trace along with it."""
-    w = ScopeTraceWidget()
-    w.resize(860, 430)
-    w.set_enabled([8, 11])
-    w.set_per_channel_scale(False)
-    w.set_data(_offset_snapshot())
-    _painted(w)
-    before_other = w.gain(11)
-    xs, ytop, _yb, _vm, _vx = w._drawn[8]
-    _click(w, float(xs[len(xs) // 2]), float(ytop[len(xs) // 2]))
-    _painted(w)
-    plus = next(r for i, kind, r in w._tag_hits if i == 0 and kind == "plus")
-    _click(w, plus.center().x(), plus.center().y())
-    assert w.per_channel_scale is True, "the tag button did not switch to independent scales"
-    assert w.gain(11) == before_other, "the other waveform moved too"
 
 
 def _burst_snapshot(seconds=0.6, fs=100_000.0, slices=5, step_v=0.05, idle_after=0.05):
@@ -749,13 +650,12 @@ def test_computed_waveform_never_unticks_the_users_own_picks(app):
     assert p.channel_checks[8].isChecked()
 
 
-# -- Centre: pan a short buffer into the middle (2026-09-07, user) ----------
-# "All I am asking for is an automatic pan action that brings the waveforms
-# to the center of the viewing window." A computed waveform is normally far
-# shorter than the window it lands in, and _draw_traces anchors a short
-# segment hard against the RIGHT edge -- so it sat off to one side with a
-# screenful of blank next to it, and Fit (which only ever rescaled) could
-# not bring it back.
+# -- Standard DSO display: one slot per channel (2026-09-07, user) ---------
+# "can we switch to a standard digital scope display. I think it has too
+# many custom display which is messing up the waveforms." Fit rescaled each
+# channel but left every one of them centred on the SAME line, so six traces
+# drew on top of one another. A scope gives each channel its own slot, its
+# own volts/div and a numbered ground marker showing where its 0 V is.
 
 def _short_buffer_widget(t_per_div=0.1, fs=10_000.0, n=2000):
     """A 0.2 s buffer shown in a 1 s window: 80% of the screen is blank."""
@@ -780,90 +680,12 @@ def _drawn_centre(w, c):
             (float(ytop.min()) + float(ybot.max())) / 2 - plot.center().y())
 
 
-def test_centre_pans_a_short_buffer_into_the_middle(app):
-    w = _short_buffer_widget()
-    before = _drawn_centre(w, 8)
-    assert before[0] > 100, f"a short buffer should start pinned right, not at {before[0]:+.0f}px"
-
-    w.center_view()
-    _painted(w)
-    for c in (8, 10):
-        x, y = _drawn_centre(w, c)
-        assert abs(x) < 2.0, f"ch{c} still {x:+.1f}px off centre horizontally"
-        assert abs(y) < 2.0, f"ch{c} still {y:+.1f}px off centre vertically"
-
-
-def test_centre_changes_no_scales(app):
-    """The whole reason Centre exists next to Fit: Fit rescales, which throws
-    away a volts/div set deliberately (per channel, or from a tag's +/-)."""
-    w = _short_buffer_widget()
-    w.set_per_channel_scale(True)
-    w.set_gain(8, 0.5)
-    w.set_gain(10, 2.0)
-    w.set_time_per_div(0.1)
-    w.center_view()
-    _painted(w)
-    assert w.gain(8) == 0.5 and w.gain(10) == 2.0
-    assert w.time_per_div == 0.1
-
-
-def test_centre_leaves_a_full_window_alone(app):
-    """With no blank to share out there is nothing to pan: the newest sample
-    must stay on the right edge, or the live view would jump on every click."""
-    w = _short_buffer_widget(t_per_div=20e-3)        # 0.2 s window == 0.2 s of data
-    before = _drawn_centre(w, 8)[0]
-    w.center_view()
-    _painted(w)
-    assert abs(_drawn_centre(w, 8)[0] - before) < 2.0
-
-
-def test_panning_by_hand_releases_the_centring(app):
-    """Centre is a mode, not a one-shot nudge -- but the moment the user
-    positions the view themselves it has to get out of the way."""
-    from PySide6.QtCore import QPoint, QPointF, Qt
-    from PySide6.QtGui import QWheelEvent
-
-    w = _short_buffer_widget()
-    w.center_view()
-    _painted(w)
-    assert abs(_drawn_centre(w, 8)[0]) < 2.0
-
-    pos = QPointF(w._plot_rect().center())
-    w.wheelEvent(QWheelEvent(pos, w.mapToGlobal(pos.toPoint()), QPoint(0, 0), QPoint(0, -120),
-                             Qt.NoButton, Qt.NoModifier, Qt.NoScrollPhase, False))
-    _painted(w)
-    assert w._h_center is False
-
-
-def test_fit_centres_horizontally_too(app):
-    """The user's original report was against Fit: "When I hit fit the
-    waveforms are not automatically centering."""
-    w = _short_buffer_widget()
-    w.fit_each_channel()
-    _painted(w)
-    assert abs(_drawn_centre(w, 8)[0]) < 2.0
-
-
-def test_centring_does_not_stretch_the_trace(app):
-    """The pan must MOVE the block, not rubber-band it back out to the right
-    edge -- the first cut computed its width as (right edge - left edge),
-    which left it only half way there and 5x too wide."""
-    w = _short_buffer_widget()
-    span_before = float(w._drawn[8][0].max() - w._drawn[8][0].min())
-    w.center_view()
-    _painted(w)
-    span_after = float(w._drawn[8][0].max() - w._drawn[8][0].min())
-    assert span_after == pytest.approx(span_before, rel=0.02)
-    # 0.2 s of data in a 1 s window occupies a fifth of the plot area
-    assert span_after == pytest.approx(w._plot_rect().width() / 5, rel=0.05)
-
-
-# -- ...but a LIVE view must keep rolling against the right edge -----------
-# Regression, same day: the centring latched onto the live sweep too, so an
-# Acquire with a buffer shorter than the window left the trace parked
-# mid-screen. "do you see that the real acquire button isn't displaying the
-# signals on scope real time" -- it was, at 5.5M points with a rock-steady
-# 127.0000 ms DIO4; it just no longer looked like it.
+# -- a LIVE view keeps rolling against the right edge ----------------------
+# Regression, same day: the horizontal centring latched onto the live sweep
+# too, so an Acquire with a buffer shorter than the window left the trace
+# parked mid-screen. "do you see that the real acquire button isn't
+# displaying the signals on scope real time" -- it was, at 5.5M points with a
+# rock-steady 127.0000 ms DIO4; it just no longer looked like it.
 
 def _panel_with_live_scope(t_per_div=0.5, seconds=0.2):
     p = FpgaScopePanel()
@@ -874,35 +696,6 @@ def _panel_with_live_scope(t_per_div=0.5, seconds=0.2):
     snap.frames[:, 8] = 600
     p.set_scope(_FakeLiveScope(snap))                   # calls _refresh() itself
     return p
-
-
-def test_a_live_frame_re_anchors_the_sweep_on_now(app):
-    p = _panel_with_live_scope()
-    p.trace.center_view()
-    assert p.trace._h_center is True
-    p._refresh()                                        # the next timer tick
-    assert p.trace._h_center is False, "a rolling view must not stay centred"
-
-
-def test_hold_lets_the_centring_stick(app):
-    """Held, no new frame arrives, so there is nothing to re-anchor on --
-    this is the state Centre is actually for on live data."""
-    p = _panel_with_live_scope()
-    p.hold_btn.setChecked(True)
-    p.trace.center_view()
-    p._refresh()                                        # status line only while held
-    assert p.trace._h_center is True
-
-
-def test_a_computed_waveform_stays_centred_across_timer_ticks(app):
-    p = _panel_with_live_scope()
-    preview = _quiet_snapshot(seconds=0.05)
-    preview.frames[:, 8] = 700
-    p.show_computed_waveform(preview)
-    assert p.trace._h_center is True                    # fit_each_channel() centres it
-    for _ in range(5):
-        p._refresh()                                    # Simulated: a no-op
-    assert p.trace._h_center is True
 
 
 # -- the screen must fill, whatever the stats window is set to -------------
@@ -940,3 +733,181 @@ def test_the_stats_window_still_honours_the_spinbox(app):
     p.window_spin.setValue(1.0)
     p._refresh()
     assert "DIO4: 10 edges" in p.status_label.text(), p.status_label.text()
+
+
+def _drawn_band(w, c):
+    """(top, bottom) pixel rows channel c's trace actually occupies."""
+    _xs, ytop, ybot, _mn, _mx = w._drawn[c]
+    return float(np.min(ytop)), float(np.max(ybot))
+
+
+def test_autoset_gives_every_channel_its_own_slot(app):
+    """The core of the change: traces must not pile up on one another."""
+    w = _short_buffer_widget()
+    w.set_enabled([8, 9, 10, 11])
+    snap = w._snap
+    snap.frames[:, 9] = 300                       # flat, and tiny
+    snap.frames[:, 11] = np.linspace(-3000, 3000, len(snap.frames)).astype(np.int16)
+    w.set_data(snap)
+    _painted(w)
+    w.autoset()
+    _painted(w)
+
+    bands = {c: _drawn_band(w, c) for c in (8, 9, 10, 11)}
+    order = sorted(bands, key=lambda c: bands[c][0])
+    assert order == [8, 9, 10, 11], f"slots are not in channel order: {order}"
+    for a, b in zip(order, order[1:]):
+        assert bands[a][1] <= bands[b][0] + 1.0, f"ch{a} and ch{b} overlap: {bands[a]} {bands[b]}"
+
+
+def test_autoset_fills_each_slot_without_overflowing_it(app):
+    w = _short_buffer_widget()
+    w.set_enabled([8, 10])
+    w.autoset()
+    _painted(w)
+    slot_px = w._plot_rect().height() / 2          # two channels -> half the screen each
+    for c in (8, 10):
+        top, bot = _drawn_band(w, c)
+        assert (bot - top) <= slot_px + 1.0, f"ch{c} overflows its slot"
+        assert (bot - top) >= slot_px * 0.4, f"ch{c} barely uses its slot ({bot - top:.0f}px)"
+
+
+def test_slot_numbers_run_top_to_bottom(app):
+    w = _short_buffer_widget()
+    w.set_enabled([10, 8, 11])                     # any order in -- sorted on screen
+    assert [w.slot_index(c) for c in (8, 10, 11)] == [1, 2, 3]
+    centres = w.slot_centres()
+    assert centres[8] > centres[10] > centres[11]  # divisions above centre are positive
+
+
+def test_ground_markers_sit_at_each_channels_zero_volts(app):
+    w = _short_buffer_widget()
+    w.set_enabled([8, 10])
+    w.autoset()
+    _painted(w)
+    plot = w._plot_rect()
+    for c in (8, 10):
+        y = float(w._volts_to_y(c, 0.0, plot))
+        # the marker is drawn at 0 V for that channel, whatever its gain is
+        assert y == pytest.approx(plot.center().y() - w.offset(c) * (plot.height() / 8))
+
+
+def test_ticking_a_channel_re_deals_the_stack(app):
+    """A slot depends on how many channels are up, so the others have to
+    move over -- keeping their own gains."""
+    w = _short_buffer_widget()
+    w.set_enabled([8, 10])
+    w.autoset()
+    _painted(w)
+    gains = {c: w.gain(c) for c in (8, 10)}
+    offs = {c: w.offset(c) for c in (8, 10)}
+    before = w.slot_centres()
+    w.set_enabled([8, 10, 11])
+    assert all(w.gain(c) == gains[c] for c in (8, 10)), "re-dealing must not rescale"
+    after = w.slot_centres()
+    assert after[8] != before[8] and after[10] != before[10]
+    # each channel moved by exactly its slot's shift -- a delta, so anything
+    # the user had nudged within the slot is carried along rather than reset
+    for c in (8, 10):
+        assert w.offset(c) - offs[c] == pytest.approx(after[c] - before[c])
+
+
+def test_a_tag_button_scales_only_its_own_channel(app):
+    w = _short_buffer_widget()
+    w.set_enabled([8, 10])
+    w.autoset()
+    other = w.gain(10)
+    w.step_gain(8, -1, from_tag=True)
+    assert w.gain(10) == other, "a per-channel control moved another channel"
+
+
+def test_the_screen_carries_no_volts_axis(app):
+    """There is no single voltage per pixel row once every channel has its
+    own scale, so the numbers up the side are gone -- the ground markers and
+    the bar under the screen say where and at what scale each trace is."""
+    w = _short_buffer_widget()
+    assert not hasattr(w, "uniform_scale")
+    assert w.LEFT < 40, "the left gutter is only wide enough for ground markers now"
+
+
+def test_autoset_survives_a_flat_channel(app):
+    """AOTF lines sit at a constant 0 V under the simulate-on-FPGA clamp;
+    autoset must place them, not divide by zero."""
+    w = _short_buffer_widget()
+    snap = w._snap
+    snap.frames[:, 12] = 0
+    w.set_enabled([8, 12])
+    w.set_data(snap)
+    _painted(w)
+    w.autoset()
+    _painted(w)
+    top, bot = _drawn_band(w, 12)
+    plot = w._plot_rect()
+    assert plot.top() <= top <= bot <= plot.bottom()
+    assert w.gain(12) in VOLTS_PER_DIV
+
+
+def test_double_click_autosets(app):
+    from PySide6.QtCore import QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+
+    w = _short_buffer_widget()
+    w.set_enabled([8, 10])
+    w.set_gain(8, 5.0)
+    w.set_gain(10, 5.0)
+    pos = QPointF(w._plot_rect().center())
+    w.mouseDoubleClickEvent(QMouseEvent(QMouseEvent.Type.MouseButtonDblClick, pos,
+                                        Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
+    _painted(w)
+    assert w.gain(8) < 5.0 and w.gain(10) < 5.0
+    assert _drawn_band(w, 8)[1] <= _drawn_band(w, 10)[0] + 1.0
+
+
+def test_autoset_button_is_the_only_scaling_button(app):
+    p = FpgaScopePanel()
+    assert hasattr(p, "autoset_btn")
+    for gone in ("fit_btn", "center_btn", "perch_chk"):
+        assert not hasattr(p, gone), f"{gone} should be gone"
+
+
+def test_a_flat_dc_channel_gets_a_real_volts_per_div(app):
+    """A channel parked at 0.8 V has no peak-to-peak at all. Scaling on p-p
+    alone picked the smallest gain in the list, 1 mV/div -- a meaningless
+    readout that also put the channel's ground marker 800 divisions off
+    screen. |midpoint| has to count towards the scale too."""
+    w = _short_buffer_widget()
+    snap = w._snap
+    snap.frames[:, 9] = int(0.8 / AI_VOLTS_PER_COUNT)      # Z galvo parked, dead flat
+    w.set_enabled([8, 9])
+    w.set_data(snap)
+    _painted(w)
+    w.autoset()
+    _painted(w)
+
+    assert w.gain(9) >= 0.1, f"a 0.8 V DC line was scaled to {w.gain(9)} V/div"
+    # the real invariant: the level is representable within half a screen of
+    # its own baseline, so "0.8 V at 200 mV/div" is a reading you can do in
+    # your head. (Where 0 V then lands can still be off screen when the slot
+    # is near an edge -- the marker parks on that edge, hollow, as a scope's
+    # does; it is not dropped.)
+    assert abs(0.8 / w.gain(9)) <= VDIV / 2
+
+
+def test_the_trace_still_lands_in_its_slot_whatever_its_dc_level(app):
+    """The DC level changes the SCALE, never the placement: offset absorbs
+    it, so every channel is drawn on its own slot line regardless."""
+    w = _short_buffer_widget()
+    snap = w._snap
+    snap.frames[:, 9] = int(0.8 / AI_VOLTS_PER_COUNT)
+    snap.frames[:, 11] = int(-2.5 / AI_VOLTS_PER_COUNT)
+    w.set_enabled([8, 9, 11])
+    w.set_data(snap)
+    _painted(w)
+    w.autoset()
+    _painted(w)
+    plot = w._plot_rect()
+    px_per_div = plot.height() / 8
+    for c in (9, 11):
+        top, bot = _drawn_band(w, c)
+        want = plot.center().y() - w.slot_centres()[c] * px_per_div
+        assert (top + bot) / 2 == pytest.approx(want, abs=1.5)

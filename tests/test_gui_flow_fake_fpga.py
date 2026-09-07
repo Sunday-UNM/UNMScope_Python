@@ -569,22 +569,19 @@ def test_preview_never_touches_the_fpga_and_shows_the_true_z_piezo_staircase(app
         for name, col in mw.MainWindow.AO_STREAM_COLUMNS.items():
             assert np.array_equal(snap.frames[:, col], streamed[name][:len(snap.frames)]), name
 
-        # The laser: MODULATED, not a DC level -- LouisXIV's rule is on
-        # through the forward sweep, off for the whole return move
-        # (louisxiv_waveform.aotf_gate). One on/off cycle per slice, at the
-        # level the Excitation rows ask for.
+        # The laser, at the level the Excitation rows ask for. With AOTF
+        # cycle = None -- the default, read off the live LouisXIV panel --
+        # there is NO per-line blanking: its own X Waveform graph holds the
+        # AOTF at full level straight through the galvo's return move
+        # (verified 2026-09-07). So this is a steady level, and the
+        # aotf_gate docstring says what would change that.
         levels, _desc = w._aotf_levels_for_run()
         assert levels, "the fixture selects one excitation row, so a level must be computed"
+        assert w.utilities_tab.waveform_panel.config().aotf_cycle == "None"
         for ch, counts in levels.items():
             col = mw.MainWindow.AOTF_LEVEL_COLUMNS[ch]
             trace = snap.frames[:, col].astype(np.int64)
             assert counts != 0
-            assert trace.max() == counts, "on during the sweep, at the requested level"
-            assert trace.min() == 0, "off during the return move -- not a DC level"
-            # blanks once per slice, in step with the galvo's flyback
-            _, falling = digital_edges(trace, threshold=counts / 2)
-            assert len(falling) == wf.n_slices, f"expected one blanking per slice, got {len(falling)}"
-            on_frac = (trace > counts / 2).sum() / len(trace)
-            assert 0.5 < on_frac < 1.0, f"on for most of each line but not all of it, got {on_frac:.2f}"
+            assert (trace == counts).all(), "AOTF cycle None: steady level, as LouisXIV shows"
     finally:
         w.fpga = real_fpga                       # restore before the window fixture's own teardown

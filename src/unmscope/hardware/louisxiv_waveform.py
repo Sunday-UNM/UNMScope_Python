@@ -51,10 +51,16 @@ IQ 3): between Z steps the slow axis moves along an S-curve of n points --
 accel half ``((i+1)/Na)^3 * half + start`` (Na = (n+1) IQ 2), decel half
 ``(1 - (reversed i/Nd)^3) * half + mid`` (Nd = n+1-Na), start point removed.
 
-Not ported (LouisXIV features our FPGA path does not use yet): AOTF arrays
-per line (our AOTF is a DC level for the run), Dual View, DOE, Z lookup
-linking, XZ coupling, galvo inertia shift (all delays are 0 / 0.02 us ->
-"No shift"), Sine waveform.
+The AOTF level envelope per line is ``aotf_gate`` -- all ones with
+``AOTF cycle`` = None, which is how this rig runs and what LouisXIV's own X
+Waveform graph shows (verified live 2026-09-07). It is carried on
+ScanWaveform.channels for inspection only: the deployed bitfile's AO DMA
+cluster has no AOTF slot (Tiling/Filter sit there), so the run still drives
+the AOTF as a DC level (docs/aotf.md).
+
+Not ported (LouisXIV features our FPGA path does not use yet): Dual View,
+DOE, Z lookup linking, XZ coupling, galvo inertia shift (all delays are
+0 -> "No shift"), Sine waveform.
 """
 from __future__ import annotations
 
@@ -154,21 +160,32 @@ def fast_axis_line(xrange: float, offset: float, xpix: int, update_rate: int, ta
 
 
 # -- slow axes -----------------------------------------------------------------------
-def aotf_gate(line: FastAxisLine) -> np.ndarray:
-    """LouisXIV's laser modulation for one fast-axis line: 1.0 while the
-    sheet sweeps forward and the camera is exposing, 0.0 for the whole
-    return move (``HHMI - Pockel Cell or AOTF Linear Ramp.vi``: "on during
-    the linear forward sweep, off for the entire return move").
+def aotf_gate(line: FastAxisLine, aotf_cycle: str = "None") -> np.ndarray:
+    """The AOTF level envelope for one fast-axis line, as a 0..1 multiplier.
 
-    The boundary is the one the rate rules already use -- ``on_points`` =
-    min points - points used for return, annotated "(AOTF on, camera
-    exposing)" on FastAxisLine itself -- so the gate and the AO rate agree
-    by construction rather than by a second, separate derivation.
+    OBSERVED on the running LouisXIV (2026-09-07, this rig's own settings:
+    ``AOTF cycle`` = None, X Single Direction, Fractional Flyback 0.15):
+    its X Waveform graph holds the AOTF trace at full level for the ENTIRE
+    125 ms cycle, straight through the galvo's return move -- no per-line
+    blanking at all. So with ``aotf_cycle`` = "None" this returns all ones,
+    which is what the rig actually does.
 
-    Bidirectional lines sweep both ways with no return move, so the gate
-    is on throughout.
+    LouisXIV's source does contain a blanking rule (``HHMI - Pockel Cell or
+    AOTF Linear Ramp.vi``: on through the linear forward sweep, off for the
+    entire return move), and it is applied here when ``aotf_cycle`` is
+    anything other than "None". **That coupling is INFERRED** -- from one
+    observation, None together with a flat trace -- not read out of the
+    source. If AOTF cycle is ever set to "per Z"/"per Stack" on the rig,
+    check LouisXIV's own X Waveform graph again and correct this if the
+    blanking does not appear.
+
+    When it does apply, the boundary is the one the rate rules already
+    use -- ``on_points`` = min points - points used for return, annotated
+    "(AOTF on, camera exposing)" on FastAxisLine itself -- so the envelope
+    and the AO rate agree by construction. Bidirectional lines sweep both
+    ways with no return move, so they stay on throughout.
     """
-    if line.bidirectional:
+    if str(aotf_cycle) == "None" or line.bidirectional:
         return np.ones(line.total_points)
     gate = np.zeros(line.total_points)
     gate[:max(0, line.on_points)] = 1.0
@@ -428,7 +445,8 @@ def build_louisxiv_waveform(*, exposure_s: float, cycle_s: float, x_range_v: flo
                             dither_flyback_fraction: float = 0.1, z_settle_ms: float = 0.0,
                             skip_images: bool = False, cycle_margin_s: float = 0.0,
                             x_galvo_delay_us: float = 0.0, z_galvo_delay_us: float = 0.0,
-                            z_piezo_delay_us: float = 0.0) -> LouisXivWaveform:
+                            z_piezo_delay_us: float = 0.0,
+                            aotf_cycle: str = "None") -> LouisXivWaveform:
     """One fast-axis line per trigger at LouisXIV's computed AO rate; slow
     axes constant per slice with an S-curve (return points IQ 3) into the
     next slice; the dither galvo's triangle across the line.
@@ -462,7 +480,7 @@ def build_louisxiv_waveform(*, exposure_s: float, cycle_s: float, x_range_v: flo
     delays = extra_counts_for_delays(x_galvo_delay_us, z_galvo_delay_us, z_piezo_delay_us,
                                      rate.ao_rate_hz)
     x_block = line.positions
-    gate_block = aotf_gate(line)
+    gate_block = aotf_gate(line, aotf_cycle)
     ticks = rate.ticks_between_points
     if delays.any_shift:
         x_block = add_hold_counts(x_block, *delays.x_galvo)

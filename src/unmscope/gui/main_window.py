@@ -567,7 +567,15 @@ class MainWindow(QMainWindow):
             chk.setChecked(is_default_on)
             slider.valueChanged.connect(lambda v, s=spin: s.setValue(v / 10.0))
             spin.valueChanged.connect(lambda v, sl=slider: sl.setValue(int(round(v * 10))))
-            row.addWidget(QLabel(f"{wavelength}"))
+            # Name the AOTF channel next to the wavelength: without it there
+            # is no way to tell from this panel which line drives which AOTF
+            # channel (and so which trace on the Waveforms tab is this laser).
+            ch = self.calibration.aotf.channel_for_row(
+                self.EXCITATION_WAVELENGTHS_NM.index(wavelength))
+            lab = QLabel(f"{wavelength}  (AOTF {ch})")
+            lab.setToolTip(f"{wavelength} nm drives AOTF channel {ch} -- the 'AOTF {ch}' trace "
+                           "on the Waveforms tab.")
+            row.addWidget(lab)
             row.addWidget(chk)
             row.addWidget(slider, stretch=1)
             row.addWidget(spin)
@@ -1981,7 +1989,7 @@ class MainWindow(QMainWindow):
                 dither_range_v=dither_range_v, dither_pulses=wcfg.dither_triangle_pulses,
                 dither_flyback_fraction=wcfg.dither_fract_flyback,
                 x_galvo_delay_us=wcfg.x_galvo_delay_us, z_galvo_delay_us=wcfg.z_galvo_delay_us,
-                z_piezo_delay_us=wcfg.z_piezo_delay_us,
+                z_piezo_delay_us=wcfg.z_piezo_delay_us, aotf_cycle=wcfg.aotf_cycle,
                 cycle_margin_s=0.0)        # LouisXIV's rule: the block fills the cycle (measured OK on the card)
         except ValueError as e:
             self._log(f"Waveform calculation failed: {e}")

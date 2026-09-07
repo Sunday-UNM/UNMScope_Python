@@ -6,13 +6,20 @@ from unmscope.config.waveform_config import AxisSettings, WaveformConfig, camera
 
 
 def test_defaults_are_the_low_level_waveform_config_panel():
+    """Read off the LIVE LouisXIV panel, 2026-09-07 (Adv Setup > Low-Level
+    Waveform Config, this rig's own running configuration) -- not the COM
+    render the first pass used, which disagreed with the rig on eight
+    fields. Fractional Flyback and Fract. Smoothing feed the ramp shape
+    directly, so the computed X waveform does not match LouisXIV's until
+    these do."""
     c = WaveformConfig()
-    assert c.waveform == "Linear" and c.pixel_per_ms == 25.6 and c.updates_per_pix == 1
-    assert c.fractional_flyback == 0.1 and c.fract_smoothing == 1.0
-    assert c.x_galvo_delay_us == 0.02 and c.duty_pct == 0.05 and c.cam_exp_s == 2.0
+    assert c.waveform == "Linear" and c.pixel_per_ms == 0.5 and c.updates_per_pix == 1
+    assert c.fractional_flyback == 0.15 and c.fract_smoothing == 0.0
+    assert c.x_galvo_delay_us == 0.0 and c.duty_pct == 100.0 and c.cam_exp_s == 2.0
     assert c.z_motion == "Z galvo & piezo" and c.x_wave == "Sawtooth" and c.z_wave == "Step"
-    assert c.aotf_cycle == "per Stack" and c.wait_for_z_settle == "No settle"
-    assert c.x_triangle_pulses == 5.5 and c.dither_triangle_pulses == 5.5 and c.dither_fract_flyback == 0.1
+    assert c.aotf_cycle == "None" and c.wait_for_z_settle == "No settle"
+    assert c.x_triangle_pulses == 1.0 and c.dither_triangle_pulses == 2.5 and c.dither_fract_flyback == 0.0
+    assert c.n_doe_beams == 0
     assert c.aotf_pulse_duty_pct == 5.0 and c.z_piezo_selector == 1
     assert c.z == AxisSettings(0, 0.0, 0.2, 4) and c.zpiezo == AxisSettings(0, 0.0, 0.0, 20)
     assert c.x == AxisSettings(0, 0.0, 0.2, 2) and c.xwvfrm.pixels == 1

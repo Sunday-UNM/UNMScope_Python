@@ -101,16 +101,16 @@ class AxisSettings:
 class WaveformConfig:
     waveform: str = "Linear"
     x_single_direction: bool = True
-    pixel_per_ms: float = 25.6              # indicator: AO rate (kHz) / Updates per Pixel
+    pixel_per_ms: float = 0.5               # indicator: AO rate (kHz) / Updates per Pixel
     updates_per_pix: int = 1
-    fractional_flyback: float = 0.1
-    fract_smoothing: float = 1.0
+    fractional_flyback: float = 0.15
+    fract_smoothing: float = 0.0
     aotf_delay_us: float = 0.0
-    x_galvo_delay_us: float = 0.02
+    x_galvo_delay_us: float = 0.0
     z_galvo_delay_us: float = 0.0
     z_piezo_delay_us: float = 0.0
     sweep_period_um: float = 0.0
-    duty_pct: float = 0.05
+    duty_pct: float = 100.0
     n_integrations: int = 1
     #: Control element of the cluster -- typeable, never an indicator, in
     #: LouisXIV -- but the engine overwrites it with the camera's own Exp(s)
@@ -131,7 +131,7 @@ class WaveformConfig:
     #: in LouisXIV, not derived from any formula here or there).
     cycle_time_s: float = 0.0
     z_motion: str = "Z galvo & piezo"
-    n_doe_beams: int = 1
+    n_doe_beams: int = 0
     x_wave: str = "Sawtooth"
     z_bidirectional: bool = False
     virtual_confocal: bool = False          # LED
@@ -145,16 +145,16 @@ class WaveformConfig:
     z_piezo_selector: int = 1
     linked: bool = True
     xz_correct: bool = True
-    aotf_cycle: str = "per Stack"
+    aotf_cycle: str = "None"
     one_exp_per: str = "Z plane"
     wait_for_z_settle: str = "No settle"
     z_wave: str = "Step"
     dual_view: str = "No D.V."
     doe_period_um: float = 1.0
-    x_triangle_pulses: float = 5.5
+    x_triangle_pulses: float = 1.0
     aotf_sweep_mode: str = "Sync"
-    dither_triangle_pulses: float = 5.5
-    dither_fract_flyback: float = 0.1
+    dither_triangle_pulses: float = 2.5
+    dither_fract_flyback: float = 0.0
     aotf_pulse_width_um: float = 0.0
     aotf_pulse_duty_pct: float = 5.0
     x: AxisSettings = field(default_factory=lambda: AxisSettings(0, 0.0, 0.2, 2))

@@ -61,7 +61,7 @@ from PySide6.QtWidgets import (
     QTextEdit, QMessageBox, QSizePolicy, QCheckBox, QTabWidget, QSlider,
     QLineEdit, QTableWidget, QTableWidgetItem, QHeaderView, QProgressBar,
     QSplitter, QRadioButton, QButtonGroup, QToolButton, QScrollArea, QFrame,
-    QApplication, QFileDialog, QToolTip,
+    QApplication, QFileDialog, QToolTip, QDialog,
 )
 
 from unmscope.hardware.camera import Camera, OrcaFlash4Camera, SimulatedCamera, other_camera_holders
@@ -77,6 +77,7 @@ from unmscope.analysis.projections import DEFAULT_STAGE_ANGLE_DEG, stack_project
 from unmscope.fileio.tiff_stack import (
     TIFF_EXTENSION, clean_base_filename, save_tiff_stack, stack_path, write_acq_info,
 )
+from unmscope.gui.save_image_dialog import SaveImageDialog
 from unmscope.gui.scope_view import FpgaScopePanel
 from unmscope.gui.camera_tab import CameraTab
 from unmscope.gui.display import FrameAverager, display_range, render_frame
@@ -251,6 +252,9 @@ class MainWindow(QMainWindow):
         self._data_dir: Path | None = None
         self._current_exp_dir: Path | None = None
         self._save_base = "img"          # replaced by what the save dialog is given
+        #: The Save Image dialog's typed fields, kept for AcqInfo / OME.
+        self._save_meta: dict = {"root": "", "user_name": "", "cell_type": "",
+                                 "cell_labeling": "", "description": ""}
         #: LouisXIV's "Save Multi-position separate folders" global. Nothing
         #: sets it yet -- Multi-location is greyed -- but stack_path honours
         #: it, so wiring the panel switch later is the only step left.
@@ -331,13 +335,22 @@ class MainWindow(QMainWindow):
             return
         if not state:
             return
+        # The Save Image dialog's typed fields are not widgets on this window,
+        # so they ride along by name. Retyping a root directory and a cell
+        # type every session is exactly the annoyance the store exists for.
+        for k in self._save_meta:
+            v = state.get(f"save_{k}")
+            if isinstance(v, str):
+                self._save_meta[k] = v
         done = ui_state.apply(self._persistent_widgets(), state)
         self._log(f"Restored {len(done)} setting(s) from the last session "
                   f"({ui_state.default_path()}).")
 
     def _save_ui_state(self) -> None:
         try:
-            ui_state.save(ui_state.collect(self._persistent_widgets()))
+            state = ui_state.collect(self._persistent_widgets())
+            state.update({f"save_{k}": v for k, v in self._save_meta.items()})
+            ui_state.save(state)
         except OSError as e:
             self._log(f"Could not save the settings: {e}")
 
@@ -1180,26 +1193,49 @@ class MainWindow(QMainWindow):
         return 0
 
     def _ensure_data_dir(self) -> Path | None:
-        """Prompt once per session for where to save, and under what name.
+        """LouisXIV's **Save Image** dialog (`OME Save Image Dialog.vi`),
+        once per session, before the first acquisition.
 
-        LouisXIV's ``Prompt for Save Path.vi`` asks for a *file*, and
-        ``Build Image Path.vi`` then appends ``_CH%02d_%06d.tif`` to the
-        name typed. So this is a save-file dialog, not a folder picker: the
-        folder becomes the data directory and the file name becomes the base
-        that every stack, projection and companion file is named from.
+        The save directory is BUILT from the typed fields, not picked. The
+        VI carries the rule as a comment on its own diagram:
+        root / username / celltype / labeling / YYMMDD / cell[n] /
+        location[n] / n.tif. This port had a bare save-file dialog instead,
+        taking the folder from whatever file name was typed, so User Name /
+        Cell Type / Cell Labeling / Experiment Description were never
+        collected at all and went into AcqInfo.txt empty.
+
+        What is returned is the DATE folder, the level above ``Cell<N>``:
+        `_save_stack` calls `next_experiment_folder` on it for every stack,
+        so a second acquisition in the same session lands in the next Cell
+        folder instead of on top of the first. The dialog's own Experiment
+        box is that same calculation, shown as a preview.
         """
         if self._data_dir is None:
-            start = str(Path.home() / f"{self._save_base}.{TIFF_EXTENSION}")
-            chosen, _ = QFileDialog.getSaveFileName(
-                self, "Choose the data folder and base file name", start,
-                f"TIFF stacks (*.{TIFF_EXTENSION});;All files (*)",
-                options=QFileDialog.DontConfirmOverwrite,   # the name is a base, not a file
+            dlg = SaveImageDialog(
+                self, root=self._save_meta["root"], user_name=self._save_meta["user_name"],
+                cell_type=self._save_meta["cell_type"],
+                cell_labeling=self._save_meta["cell_labeling"],
+                description=self._save_meta["description"],
+                next_experiment=lambda base: self.next_experiment_folder(base).name,
             )
-            if not chosen:
+            if dlg.exec() != QDialog.Accepted:
                 return None
-            self._data_dir = Path(chosen).parent
-            self._save_base = clean_base_filename(chosen, fallback=self._save_base)
-            self._log(f"Saving to {self._data_dir} with base file name '{self._save_base}'.")
+            vals = dlg.values()
+            folder = dlg.date_folder()
+            if folder is None:
+                return None
+            try:
+                folder.mkdir(parents=True, exist_ok=True)   # "created if it doesn't exist"
+            except OSError as e:
+                self._log(f"Could not create {folder}: {e}")
+                QMessageBox.warning(self, "Save Image", f"Could not create\n{folder}\n\n{e}")
+                return None
+            self._data_dir = folder
+            self._save_meta = {k: vals[k] for k in
+                               ("root", "user_name", "cell_type", "cell_labeling", "description")}
+            self._log(f"Saving under {self._data_dir} (user '{vals['user_name']}', cell type "
+                      f"'{vals['cell_type']}', labeling '{vals['cell_labeling']}'); "
+                      f"first experiment folder {vals['experiment']}.")
         return self._data_dir
 
     @staticmethod
@@ -1262,10 +1298,10 @@ class MainWindow(QMainWindow):
                                    if chk.isChecked() and spin.value() > 0)),
             "AOTFCycleMode": "per Z",           # the cluster's default; we do not cycle
             "TimeIncrement_s": period_ms / 1000.0,
-            "Username": "",                     # no panel field ported
-            "CellLabeling": "",                 # no panel field ported
-            "CellType": "",                     # no panel field ported
-            "ExperimentDescription": "",        # no panel field ported
+            "Username": self._save_meta["user_name"],
+            "CellLabeling": self._save_meta["cell_labeling"],
+            "CellType": self._save_meta["cell_type"],
+            "ExperimentDescription": self._save_meta["description"],
             "Fluor": [],                        # no panel field ported
             "ExcitationWavelength_nm": [int(wl)],
             "EmissionWavelength_nm": [],        # no panel field ported

@@ -194,3 +194,24 @@ def test_the_images_tab_display_options_come_back(app):
         assert not w2.deskew_check.isChecked()
     finally:
         w2.close()
+
+
+def test_the_save_image_fields_are_remembered(app):
+    """Retyping the root directory, user name, cell type and labeling every
+    session is exactly the annoyance this store exists for. They are not
+    widgets on the window, so they ride along by name."""
+    w = mw.MainWindow()
+    w._save_meta.update({"root": r"C:\data\Repeatability", "user_name": "CHITRA",
+                         "cell_type": "CELEGAN", "cell_labeling": "SINGLESTAIN",
+                         "description": "0.9NA secondary"})
+    w.close()
+
+    w2 = mw.MainWindow()
+    try:
+        assert w2._save_meta["root"] == r"C:\data\Repeatability"
+        assert w2._save_meta["user_name"] == "CHITRA"
+        assert w2._save_meta["cell_type"] == "CELEGAN"
+        assert w2._save_meta["cell_labeling"] == "SINGLESTAIN"
+        assert w2._save_meta["description"] == "0.9NA secondary"
+    finally:
+        w2.close()

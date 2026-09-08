@@ -252,6 +252,11 @@ class MainWindow(QMainWindow):
         self._data_dir: Path | None = None
         self._current_exp_dir: Path | None = None
         self._save_base = "img"          # replaced by what the save dialog is given
+        #: Cell folder this run will be written into, fixed when the Save
+        #: Image dialog was accepted, and the highest number handed out per
+        #: parent folder this session -- see _next_experiment_name.
+        self._experiment_dir: Path | None = None
+        self._experiment_seen: dict[str, int] = {}
         #: The Save Image dialog's typed fields, kept for AcqInfo / OME.
         self._save_meta: dict = {"root": "", "user_name": "", "cell_type": "",
                                  "cell_labeling": "", "description": ""}
@@ -1193,10 +1198,26 @@ class MainWindow(QMainWindow):
         return 0
 
     def _ensure_data_dir(self) -> Path | None:
-        """LouisXIV's **Save Image** dialog (`OME Save Image Dialog.vi`),
-        once per session, before the first acquisition.
+        """The data folder, asking for it only if nothing is set yet.
 
-        The save directory is BUILT from the typed fields, not picked. The
+        The fallback for paths that run AFTER an acquisition -- saving a
+        stack, saving a projection. Those must not put a modal dialog up
+        over finished data. Acquire uses `_prompt_save_image`, which asks
+        every time.
+        """
+        return self._data_dir if self._data_dir is not None else self._prompt_save_image()
+
+    def _prompt_save_image(self) -> Path | None:
+        """LouisXIV's **Save Image** dialog (`File IO/OME Save Image
+        Dialog.vi`), put up now whatever is already set.
+
+        Acquire calls this on EVERY run with Save Files ticked: "everytime I
+        hit acquire button and the save file is checked the software needs
+        to prompt regarding the save options." It opens on the last values,
+        so confirming an unchanged setup is one click, and the Experiment
+        box names the Cell folder this run will actually land in.
+
+        The save directory is BUILT from the typed fields, not picked -- the
         VI carries the rule as a comment on its own diagram:
         root / username / celltype / labeling / YYMMDD / cell[n] /
         location[n] / n.tif. This port had a bare save-file dialog instead,
@@ -1206,37 +1227,65 @@ class MainWindow(QMainWindow):
 
         What is returned is the DATE folder, the level above ``Cell<N>``:
         `_save_stack` calls `next_experiment_folder` on it for every stack,
-        so a second acquisition in the same session lands in the next Cell
-        folder instead of on top of the first. The dialog's own Experiment
-        box is that same calculation, shown as a preview.
+        so a second run lands in the next Cell folder instead of on top of
+        the first. The dialog's Experiment box is that same calculation.
         """
-        if self._data_dir is None:
-            dlg = SaveImageDialog(
-                self, root=self._save_meta["root"], user_name=self._save_meta["user_name"],
-                cell_type=self._save_meta["cell_type"],
-                cell_labeling=self._save_meta["cell_labeling"],
-                description=self._save_meta["description"],
-                next_experiment=lambda base: self.next_experiment_folder(base).name,
-            )
-            if dlg.exec() != QDialog.Accepted:
-                return None
-            vals = dlg.values()
-            folder = dlg.date_folder()
-            if folder is None:
-                return None
-            try:
-                folder.mkdir(parents=True, exist_ok=True)   # "created if it doesn't exist"
-            except OSError as e:
-                self._log(f"Could not create {folder}: {e}")
-                QMessageBox.warning(self, "Save Image", f"Could not create\n{folder}\n\n{e}")
-                return None
-            self._data_dir = folder
-            self._save_meta = {k: vals[k] for k in
-                               ("root", "user_name", "cell_type", "cell_labeling", "description")}
-            self._log(f"Saving under {self._data_dir} (user '{vals['user_name']}', cell type "
-                      f"'{vals['cell_type']}', labeling '{vals['cell_labeling']}'); "
-                      f"first experiment folder {vals['experiment']}.")
+        dlg = SaveImageDialog(
+            self, root=self._save_meta["root"], user_name=self._save_meta["user_name"],
+            cell_type=self._save_meta["cell_type"],
+            cell_labeling=self._save_meta["cell_labeling"],
+            description=self._save_meta["description"],
+            next_experiment=self._next_experiment_name,
+        )
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        vals = dlg.values()
+        folder = dlg.date_folder()
+        if folder is None:
+            return None
+        try:
+            folder.mkdir(parents=True, exist_ok=True)     # "created if it doesn't exist"
+        except OSError as e:
+            self._log(f"Could not create {folder}: {e}")
+            QMessageBox.warning(self, "Save Image", f"Could not create\n{folder}\n\n{e}")
+            return None
+        self._data_dir = folder
+        self._experiment_dir = folder / vals["experiment"] if vals["experiment"] else None
+        # Remember what was handed out, so the next run in the SAME parent
+        # folder gets the next number even if this one never wrote anything
+        # (cancelled, aborted, or a partial stack that is not kept).
+        n = self._experiment_number(vals["experiment"])
+        if n:
+            key = str(folder)
+            self._experiment_seen[key] = max(self._experiment_seen.get(key, 0), n)
+        self._save_meta = {k: vals[k] for k in
+                           ("root", "user_name", "cell_type", "cell_labeling", "description")}
+        self._log(f"Saving under {self._data_dir} (user '{vals['user_name']}', cell type "
+                  f"'{vals['cell_type']}', labeling '{vals['cell_labeling']}'); "
+                  f"experiment folder {vals['experiment']}.")
         return self._data_dir
+
+    EXPERIMENT_PREFIX = "Cell"
+
+    @staticmethod
+    def _experiment_number(name: str) -> int:
+        m = re.match(r"^" + MainWindow.EXPERIMENT_PREFIX + r"(\d+)$", name or "")
+        return int(m.group(1)) if m else 0
+
+    def _next_experiment_name(self, base: Path) -> str:
+        """The Cell folder a run in ``base`` should use.
+
+        The filesystem alone is not enough: "increase the Cell counter by one
+        increment if it is the same parent folder". A run that wrote nothing
+        -- cancelled, aborted, or a partial stack, which LouisXIV does not
+        keep either -- leaves no folder behind, so a scan would hand out the
+        same number again and the next run would look like the first. So the
+        number is the higher of what is on disk and what this session has
+        already handed out for this parent.
+        """
+        on_disk = self._experiment_number(self.next_experiment_folder(base).name)
+        seen = self._experiment_seen.get(str(base), 0)
+        return f"{self.EXPERIMENT_PREFIX}{max(on_disk, seen + 1)}"
 
     @staticmethod
     def next_experiment_folder(data_dir: Path, prefix: str = "Cell") -> Path:
@@ -1353,7 +1402,10 @@ class MainWindow(QMainWindow):
         if data_dir is None:
             self._log("Save cancelled: no data folder chosen.")
             return None
-        exp = self.next_experiment_folder(data_dir)
+        # The folder the Save Image dialog named for THIS run. Falling back
+        # to a fresh scan keeps the paths that never went through the dialog
+        # (loading a stack, saving a projection) working as before.
+        exp = self._experiment_dir or self.next_experiment_folder(data_dir)
         cal = self.calibration
         ch = self._selected_channel_index()
         path = stack_path(exp, self._save_base, ch, timepoint, position,
@@ -2262,8 +2314,8 @@ class MainWindow(QMainWindow):
         # here, cancelling costs nothing because nothing has started yet.
         # Still once per session: _ensure_data_dir only prompts while
         # _data_dir is None.
-        if self.save_files_chk.isChecked() and self._ensure_data_dir() is None:
-            self._log("Acquisition cancelled: no data folder chosen.")
+        if self.save_files_chk.isChecked() and self._prompt_save_image() is None:
+            self._log("Acquisition cancelled at the Save Image dialog.")
             return
 
         # LouisXIV's rule (HHMI - Check that only 1 laser is selected.vi) is

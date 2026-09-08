@@ -30,9 +30,19 @@ def pump(app, seconds, until=None):
 
 
 @pytest.fixture
-def window(app, monkeypatch):
+def window(app, monkeypatch, tmp_path):
     monkeypatch.setattr(mw.MainWindow, "fpga_controller_factory", FakeFpgaTriggerController)
     monkeypatch.setattr(mw.QMessageBox, "warning", lambda *a, **k: None)
+    # Acquire now puts the Save Image dialog up on EVERY run with Save Files
+    # ticked, and a modal dialog in a headless test hangs the whole run. This
+    # stands in for it, accepting whatever folder the test has already set;
+    # the tests that are ABOUT the dialog install their own stub over it.
+    def _stub_dialog(parent, **k):
+        folder = parent._data_dir or tmp_path
+        # Same experiment-folder calculation the real dialog shows, so the
+        # Cell counter behaves in tests exactly as it does on the panel.
+        return _AcceptedSaveDialog(folder, experiment=parent._next_experiment_name(folder))
+    monkeypatch.setattr(mw, "SaveImageDialog", _stub_dialog)
     w = mw.MainWindow()
     logs = []
     w._log = logs.append
@@ -653,8 +663,9 @@ def test_no_excitation_row_is_a_legitimate_dark_run(app, window):
 class _AcceptedSaveDialog:
     """Stands in for the modal Save Image dialog: OK, with fields filled."""
 
-    def __init__(self, folder):
+    def __init__(self, folder, experiment="Cell1"):
         self._folder = folder
+        self._experiment = experiment
 
     def exec(self):
         return mw.QDialog.Accepted
@@ -665,8 +676,8 @@ class _AcceptedSaveDialog:
     def values(self):
         return {"root": str(self._folder.parent), "user_name": "chitra",
                 "cell_type": "celegan", "cell_labeling": "singlestain",
-                "date": "260907", "experiment": "Cell1",
-                "description": "a description", "path": self._folder / "Cell1"}
+                "date": "260907", "experiment": self._experiment,
+                "description": "a description", "path": self._folder / self._experiment}
 
 
 class _CancelledSaveDialog(_AcceptedSaveDialog):
@@ -716,18 +727,34 @@ def test_cancelling_the_save_prompt_starts_nothing(app, window, monkeypatch):
     assert any("Acquisition cancelled" in m for m in w.logs)
 
 
-def test_it_only_asks_once_a_session(app, window, monkeypatch, tmp_path):
+def test_it_asks_on_every_acquire(app, window, monkeypatch, tmp_path):
+    """User, 2026-09-07: "everytime I hit acquire button and the save file is
+    checked the software needs to prompt regarding the save options." It used
+    to ask once a session, so a second run silently reused the first run's
+    cell type and labeling."""
     w = window
     w.save_files_chk.setChecked(True)
     asked = []
     monkeypatch.setattr(mw, "SaveImageDialog",
-                        lambda *a, **k: (asked.append(1), _AcceptedSaveDialog(tmp_path))[1])
+                        lambda *a, **k: (asked.append(k), _AcceptedSaveDialog(tmp_path))[1])
     w.mode_combo.setCurrentText(mw.MODE_CONTINUOUS)
     pump(app, 0.05)
-    for _ in range(2):
+    for _ in range(3):
         w.on_acquire_clicked(); pump(app, 0.3)      # start
         w.on_acquire_clicked(); pump(app, 0.3)      # stop
-    assert len(asked) == 1, f"prompted {len(asked)} times"
+    assert len(asked) == 3, f"prompted {len(asked)} times for 3 runs"
+    # ...and it opens on the last values, so an unchanged setup is one click
+    assert asked[-1]["user_name"] == "chitra" and asked[-1]["cell_type"] == "celegan"
+
+
+def test_saving_a_stack_afterwards_does_not_re_prompt(app, window, monkeypatch, tmp_path):
+    """The post-run paths must not put a modal dialog up over finished data;
+    only Acquire asks."""
+    w = window
+    w._data_dir = tmp_path
+    monkeypatch.setattr(mw, "SaveImageDialog",
+                        lambda *a, **k: pytest.fail("re-prompted while saving"))
+    assert w._ensure_data_dir() == tmp_path
 
 
 def test_no_prompt_when_save_files_is_off(app, window, monkeypatch):
@@ -743,3 +770,59 @@ def test_no_prompt_when_save_files_is_off(app, window, monkeypatch):
     assert w.acquiring
     w.on_acquire_clicked()
     pump(app, 0.3)
+
+
+def test_the_cell_counter_increments_in_the_same_parent_folder(app, window, tmp_path):
+    """"increase the Cell counter by one increment if it is the same parent
+    folder". The filesystem alone is not enough: a run that writes nothing
+    (cancelled, aborted, or a partial stack, which is not kept) leaves no
+    folder behind, so a scan would hand the same number out again."""
+    w = window
+    base = tmp_path / "CHITRA" / "CELEGAN" / "SINGLESTAIN" / "260907"
+    base.mkdir(parents=True)
+    assert w._next_experiment_name(base) == "Cell1"
+
+    w._data_dir = base
+    w.save_files_chk.setChecked(True)
+    assert w._prompt_save_image() == base                 # the fixture's stub accepts
+    assert w._experiment_dir == base / "Cell1"
+    assert w._next_experiment_name(base) == "Cell2", "the counter did not move"
+
+    assert w._prompt_save_image() == base
+    assert w._experiment_dir == base / "Cell2"
+    assert w._next_experiment_name(base) == "Cell3"
+
+
+def test_a_folder_already_on_disk_still_wins(app, window, tmp_path):
+    """Someone else's Cell7 in the same folder must not be overwritten."""
+    w = window
+    base = tmp_path / "date"
+    (base / "Cell7").mkdir(parents=True)
+    assert w._next_experiment_name(base) == "Cell8"
+
+
+def test_a_different_parent_folder_starts_again_at_cell1(app, window, tmp_path):
+    """The counter is per parent -- a different cell type is a different
+    folder with its own numbering."""
+    w = window
+    a, b = tmp_path / "typeA", tmp_path / "typeB"
+    a.mkdir(); b.mkdir()
+    w._data_dir = a
+    w._prompt_save_image()
+    assert w._next_experiment_name(a) == "Cell2"
+    assert w._next_experiment_name(b) == "Cell1"
+
+
+def test_the_dialog_opens_on_the_last_values(app, window, monkeypatch, tmp_path):
+    """"make the options pre filled out from last time"."""
+    w = window
+    w._save_meta.update({"root": str(tmp_path), "user_name": "CHITRA", "cell_type": "CELEGAN",
+                         "cell_labeling": "SINGLESTAIN", "description": "0.9NA secondary"})
+    seen = {}
+    monkeypatch.setattr(mw, "SaveImageDialog",
+                        lambda *a, **k: (seen.update(k), _AcceptedSaveDialog(tmp_path))[1])
+    w._data_dir = None
+    w._prompt_save_image()
+    assert seen["root"] == str(tmp_path)
+    assert seen["user_name"] == "CHITRA" and seen["cell_type"] == "CELEGAN"
+    assert seen["cell_labeling"] == "SINGLESTAIN" and seen["description"] == "0.9NA secondary"

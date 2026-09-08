@@ -755,3 +755,145 @@ risk for the size of the change):**
 - ~30 remaining stale-text findings (mostly docs/*.md session-log-style
   files and ROADMAP.md's own "Phase 1" framing) -- lower risk left as is;
   fix opportunistically when touching those files.
+
+## Status update (2026-09-07) -- the Waveforms tab became a real scope, and saving got its dialog
+
+A long bench session, all of it driven by the user working on the rig.
+Everything below is on `master`; 357 tests pass
+(`test_zstack_continuous_zstack` remains the one known flake -- a
+fake-FPGA load race, green when its file runs alone).
+
+### The Waveforms tab is now a standard digital oscilloscope
+
+Rebuilt on the user's call: *"can we switch to a standard digital scope
+display. I think it has too many custom display which is messing up the
+waveforms."*
+
+- **One slot per channel.** `autoset()` deals the shown channels into a
+  horizontal band each, top to bottom, every one scaled so its
+  peak-to-peak fills its own slot. The old Fit gave each channel its own
+  volts/div but left them all centred on the SAME line, so six traces drew
+  on top of one another.
+- **Numbered ground-reference markers** in the left gutter at each
+  channel's 0 V, with a faint dotted zero line across the screen. 0 V off
+  screen parks the marker on that edge, hollow, rather than dropping it.
+- **No volts axis.** There is no single voltage per pixel row once every
+  channel has its own scale, and the axis flipping between "Volts" and
+  "Divisions" depending on whether the gains happened to match was the
+  most confusing thing on the screen. Scales are stated per channel in a
+  bar under the graticule, in the channel's own colour.
+- The shared/ganged scale mode is gone with it; a DSO has no such mode.
+- **Buttons**: `Autoset` (decides where each channel goes and fits it to
+  that room) / `Fit` (makes what is already there as big as the screen
+  allows, layout untouched) / `Overlay` (everything centred and
+  superimposed, DC removed -- the view for "does this edge line up with
+  that one") / `Reset` (back to the standard stacked view, and back to the
+  live trace). Row 1 is Clear / Hold / T/div / V/div / Trig / Autoset /
+  Fit / Untag; Overlay and Reset head row 2.
+- **`LEGEND_ORDER`** drives the legend AND the slot order, the user's:
+  Z Galvo, Z Piezo, X Galvo, D4 Cam Ext Trig Out, Int Cycle Trigger,
+  Dither Galvo, then AOTF 0-6, with the raw AI inputs and unused columns
+  after. What is ticked down the side is the order the traces come out in.
+- Interaction is unchanged: pointer-anchored wheel zoom, Shift+wheel,
+  double-click, pinned tags with their own +/- buttons, envelope hover
+  callout with its honest min..max range.
+
+### Three real bugs found on the bench, all "a channel reads zero and nothing says why"
+
+1. **The AOTF columns were never streamed.** `DEFAULT_CHANNELS` was 16 and
+   every AOTF column is above it (16, 17, 19..23), so no AOTF signal could
+   reach the hardware scope -- ticked in the legend, drawing nothing. The
+   16 came from the 2026-09-03 decode run, whose note "columns 16..28 were
+   constant 0" was true only because that run was a bare free-run trigger
+   with no AOTF written. Now 24, and **the legend disables channels the
+   current source does not carry** so this cannot recur silently.
+2. **The screen could not fill.** `_refresh` clamped the screen's fetch to
+   the "# of seconds to buff" spinbox, so at 500 ms/div the trace occupied
+   the right-hand 40% with the rest blank -- the data was in the ring the
+   whole time. The ring is a fixed 5 s and the widest timebase is a 5 s
+   window, so it can always fill the screen. The spinbox keeps its real
+   job: the history the DIO4 period/jitter readout is measured over.
+3. **A live sweep must not be centred.** A same-day regression from the
+   Centre button: `set_data` now releases the horizontal centring, because
+   a rolling view's right edge IS "now" and a centred one looks frozen.
+   Hold and the computed view still centre, as they should.
+
+### The AOTF is the operator's decision
+
+**Nothing in the software zeroes or gates the AOTF any more.** Three
+places were doing it automatically and all are gone: `start_free_run`
+overriding `aotf_levels` with `{}` under `clamp_ao`;
+`ao_limits(allow_aotf_gate)` defaulting to `not clamp` (so the gate was
+refused on every clamped run AND at FPGA connect); and LouisXIV's
+one-laser rule refusing to start unless exactly one Excitation row was
+ticked, now a log line. Tick several rows and several channels are driven;
+tick none and it is a valid dark run.
+
+The AO clamp is untouched -- it freezes the galvos and the piezo, is still
+written at connect and every arm, still verified by readback. The only
+zeroing left is Stop/reset. **An AOTF control voltage out of the FPGA is
+not a laser firing**; the laser module gates that, and conflating the two
+is what put the interlock there in the first place. `docs/aotf.md` carries
+the detail.
+
+### Settings persist between sessions
+
+`config/ui_state.py`: `~/.unmscope/ui_state.json`, written on close and
+filled back in at startup, generalising what `waveform_config.py` already
+did for the Low-Level Waveform Config. Remembered: the scope's ticked
+channels / T/div / V/div / trigger / Overlay / buffer / streaming / test
+clamp; Scan Setup's backend, mode, laser and power, cycle lasers, X galvo,
+Z galvo, Z piezo, dither; the camera's exposure, sync readout, sensor mode
+and ROI corners; the Images tab's palette, scaling, Max Counts, Frames to
+Avg, Scalebar, Zoom to fit, Text Info Overlay and DeSkew; and the Save
+Image dialog's typed fields. Deliberately NOT remembered: window geometry
+(the window is pixel-matched to LouisXIV and that match is checked), Hold,
+and connection state. A value that no longer fits is clamped or ignored,
+so an older settings file can never stop the GUI starting.
+
+### Saving: LouisXIV's Save Image dialog, ported and asked first
+
+`gui/save_image_dialog.py` reproduces `File IO/OME Save Image Dialog.vi`
+(now indexed in `docs/vi_notes.md`). The save directory is **built** from
+the typed fields, not picked -- the VI carries the rule as a comment on
+its own diagram: root / username / celltype / labeling / YYMMDD / cell[n]
+/ location[n] / n.tif. The port had a bare save-file dialog instead, so
+**User Name, Cell Type, Cell Labeling and Experiment Description were
+going into AcqInfo.txt empty**; they are collected and written now.
+
+- Asked **before anything is armed or started**, on **every** Acquire with
+  Save Files ticked. Cancel and nothing runs.
+- Opens pre-filled from last time, in-session and across sessions.
+- Date (YYMMDD), Experiment and Output Path are computed and read-only,
+  updating as the fields are typed.
+- **The Cell counter is the higher of what is on disk and what this
+  session has handed out for that parent folder.** A run that writes
+  nothing -- cancelled, aborted, or a partial stack, which LouisXIV does
+  not keep either -- leaves no folder behind, so a scan alone would hand
+  the same number out again. Per parent, so a different cell type starts
+  at Cell1 with its own numbering; a folder already on disk still wins.
+- `_save_stack` writes into the folder the dialog named for that run
+  rather than re-scanning, so the Experiment box is a promise, not a guess.
+- The **Channels** tab is present but disabled: LouisXIV fills it from the
+  waveform globals and `Channel.lvclass`, and nothing here reads it yet.
+
+### Also settled today
+
+- The AO rate rule: `min_rate_for_exposure(on_points, cycle_s)`, settled
+  against the running LouisXIV (its X Waveform axis ends at 125.159 ms;
+  the cycle rule gives 543.307 Hz -> 125.159 ms to six digits, the
+  exposure rule 599.748 Hz -> 113.381 ms). The port had been ~10% fast.
+- Ten `WaveformConfig` defaults re-taken off the live LouisXIV panel.
+- The **Source** combo is gone: the mode is decided by what you Acquire,
+  not a dropdown. A Simulate-on-FPGA run shows the computed waveform
+  automatically; Reset is the way back to live. What went with it: asking
+  for a computed waveform WITHOUT acquiring is no longer reachable from
+  the UI (two lines to reattach if wanted).
+
+### Still open
+
+- **The synchronisation problem** the user saw on real hardware. Not
+  started -- waiting on which channels are misaligned and by how much. The
+  DIO4 `period ... (sd ...)` readout in the scope status line is the real
+  measurement to compare against, and Overlay is the view for it.
+- The Channels tab of the Save Image dialog.

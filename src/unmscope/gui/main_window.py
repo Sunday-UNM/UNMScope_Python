@@ -2218,6 +2218,18 @@ class MainWindow(QMainWindow):
         mode = self.mode_combo.currentText()
         self._log(f"Starting acquisition: {mode}")
 
+        # Ask where to save BEFORE anything is armed or started (user,
+        # 2026-09-07: "The saving prompt needs to happen first before the
+        # actual acquisition starts."). It used to be asked by _save_stack,
+        # i.e. after the run had finished -- so a file dialog appeared over
+        # a completed stack, and cancelling it threw the data away. Asked
+        # here, cancelling costs nothing because nothing has started yet.
+        # Still once per session: _ensure_data_dir only prompts while
+        # _data_dir is None.
+        if self.save_files_chk.isChecked() and self._ensure_data_dir() is None:
+            self._log("Acquisition cancelled: no data folder chosen.")
+            return
+
         # LouisXIV's rule (HHMI - Check that only 1 laser is selected.vi) is
         # that exactly 1 Excitation line may be checked with Power > 0%, and
         # this REFUSED to start otherwise. Relaxed to a log line on the

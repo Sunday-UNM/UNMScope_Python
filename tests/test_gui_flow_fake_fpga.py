@@ -642,3 +642,77 @@ def test_no_excitation_row_is_a_legitimate_dark_run(app, window):
     assert w._aotf_levels_for_run()[0] == {}
     w.on_acquire_clicked()
     pump(app, 0.3)
+
+
+# -- the save prompt comes first (2026-09-07, user) ------------------------
+# "The saving prompt needs to happen first before the actual acquisition
+# starts." It used to be asked by _save_stack, after the run had finished,
+# so a file dialog appeared over a completed stack and cancelling it threw
+# the data away.
+
+def test_the_save_path_is_asked_before_anything_is_armed(app, window, monkeypatch, tmp_path):
+    w = window
+    assert w._data_dir is None
+    w.save_files_chk.setChecked(True)
+
+    armed_when_asked = []
+    chosen = str(tmp_path / "run.tif")
+
+    def fake_dialog(*a, **k):
+        armed_when_asked.append((w.acquiring, w.camera.is_sequence_running()))
+        return chosen, ""
+    monkeypatch.setattr(mw.QFileDialog, "getSaveFileName", staticmethod(fake_dialog))
+
+    w.mode_combo.setCurrentText(mw.MODE_CONTINUOUS)
+    pump(app, 0.05)
+    w.on_acquire_clicked()
+    pump(app, 0.3)
+
+    assert armed_when_asked == [(False, False)], "the dialog appeared after the run had started"
+    assert w._data_dir == tmp_path
+    assert w.acquiring
+    w.on_acquire_clicked()
+    pump(app, 0.3)
+
+
+def test_cancelling_the_save_prompt_starts_nothing(app, window, monkeypatch):
+    w = window
+    w.save_files_chk.setChecked(True)
+    monkeypatch.setattr(mw.QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: ("", "")))
+    w.mode_combo.setCurrentText(mw.MODE_CONTINUOUS)
+    pump(app, 0.05)
+    w.on_acquire_clicked()
+    pump(app, 0.2)
+
+    assert not w.acquiring, "cancelling must leave the hardware alone"
+    assert not w.camera.is_sequence_running()
+    assert any("Acquisition cancelled" in m for m in w.logs)
+
+
+def test_it_only_asks_once_a_session(app, window, monkeypatch, tmp_path):
+    w = window
+    w.save_files_chk.setChecked(True)
+    asked = []
+    monkeypatch.setattr(mw.QFileDialog, "getSaveFileName",
+                        staticmethod(lambda *a, **k: (asked.append(1), (str(tmp_path / "r.tif"), ""))[1]))
+    w.mode_combo.setCurrentText(mw.MODE_CONTINUOUS)
+    pump(app, 0.05)
+    for _ in range(2):
+        w.on_acquire_clicked(); pump(app, 0.3)      # start
+        w.on_acquire_clicked(); pump(app, 0.3)      # stop
+    assert len(asked) == 1, f"prompted {len(asked)} times"
+
+
+def test_no_prompt_when_save_files_is_off(app, window, monkeypatch):
+    """Checking waveforms with nothing being written must not ask."""
+    w = window
+    w.save_files_chk.setChecked(False)
+    monkeypatch.setattr(mw.QFileDialog, "getSaveFileName",
+                        staticmethod(lambda *a, **k: pytest.fail("asked with Save Files off")))
+    w.mode_combo.setCurrentText(mw.MODE_CONTINUOUS)
+    pump(app, 0.05)
+    w.on_acquire_clicked()
+    pump(app, 0.3)
+    assert w.acquiring
+    w.on_acquire_clicked()
+    pump(app, 0.3)

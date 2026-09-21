@@ -5,6 +5,7 @@ venv/
 *.egg-info/
 dist/
 build/
+installer/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

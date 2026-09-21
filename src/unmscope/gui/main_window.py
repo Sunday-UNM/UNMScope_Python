@@ -16,19 +16,20 @@ IMPORTANT -- honesty about what's real: controls laid out to match the
 real panel but not wired to anything real are left disabled (greyed out)
 so the window looks right without claiming functionality it doesn't have.
 Wired to hardware today: Camera connect/exposure/ROI/sensor mode (Camera
-tab); FPGA connect; Scan Setup's Excitation (the one checked row sets its
+tab); FPGA connect; Scan Setup's Excitation (each checked row sets its
 AOTF channel level -- see docs/aotf.md; LouisXIV's "one laser at a time"
-gate is enforced), X galvo, Z galvo, Z piezo and Dither galvo (all feed
-hardware.louisxiv_waveform.build_louisxiv_waveform, the words the FPGA
-plays); Acquire/Stop and the live image display pipeline (gui/display.py:
-Scale mapping, palette, Frames to Avg, Zoom to fit); the Waveforms tab
-(FpgaScopePanel fed by FpgaScope); Stack Projections Calc/Save; and six of
-the Utilities tools (um per V calibration, Sample Stage Control, Camera
-Debug Panel, FPGA Scope, Reset HW, HW Config). Left greyed: the Timepoints
-and Multi-location boxes (kept for later), the Cycle lasers combo, the
-Images tab's drawing tools and camera selectors, and the five Utilities
-tools not yet ported (View Z Lookup Table, X&Z Galvo offsets per AOTF ch,
-FPGA Monitor, X Galvo Z Corrections, Imagine Optics).
+rule is logged, not enforced), X galvo, Z galvo, Z piezo and Dither galvo
+(all feed hardware.louisxiv_waveform.build_louisxiv_waveform, the words
+the FPGA plays); Acquire/Stop and the live image display pipeline
+(gui/display.py: Scale mapping, palette, Frames to Avg, Zoom to fit); the
+Waveforms tab (FpgaScopePanel fed by FpgaScope); Stack Projections
+Calc/Save; and six of the Utilities tools (um per V calibration, Sample
+Stage Control, Camera Debug Panel, FPGA Scope, Reset HW, HW Config).
+Left greyed: the Timepoints and Multi-location boxes (kept for later),
+the Cycle lasers combo, the Images tab's drawing tools and camera
+selectors, and the five Utilities tools not yet ported (View Z Lookup
+Table, X&Z Galvo offsets per AOTF ch, FPGA Monitor, X Galvo Z
+Corrections, Imagine Optics).
 
 Threading design (IMPORTANT -- see hardware/fpga_trigger.py and the
 session's crash history): Camera is touched ONLY from the GUI thread via
@@ -49,6 +50,7 @@ from __future__ import annotations
 
 import datetime
 import re
+import threading
 import time
 from pathlib import Path
 
@@ -86,6 +88,8 @@ from unmscope.gui.camera_debug_panel import CameraDebugPanel, CameraDebugStatus
 from unmscope.gui.calibration_tab import CalibrationTab
 from unmscope.gui.hw_config_dialog import show_hw_config_dialog
 from unmscope.gui.sample_stage_dialog import SampleStageDialog
+from unmscope.gui.nikon_focus_dialog import real_focus_factory
+from unmscope.gui.asi_stage_dialog import real_asi_factory
 from unmscope.config.um_per_volt import load_calibration_from_unmscope_ini
 from unmscope.config.waveform_config import (
     AxisSettings, WaveformConfig, camera_cycle_s, engine_times,
@@ -167,6 +171,19 @@ class FpgaSignals(QObject):
     error = Signal(str)
 
 
+class StackSaveSignals(QObject):
+    """Bridges the background stack-save thread back to the GUI thread --
+    same reasoning as FpgaSignals. FIXED 2026-09-18 (user: "the GUI takes
+    time to save acquired z stack"): an uncompressed multi-GB OME-TIFF write
+    (LouisXIV's own format, deliberately uncompressed -- see
+    fileio/tiff_stack.py) run synchronously on the GUI thread froze the
+    whole window for however long that write took, worse over the network
+    share this project lives on. The write itself is unchanged; only its
+    thread is."""
+    finished = Signal(object, object, int)   # (path, experiment dir, n_slices) on success
+    failed = Signal(str)
+
+
 class MainWindow(QMainWindow):
     #: The class used by "FPGA Connect". Tests swap in
     #: unmscope.hardware.fake_fpga.FakeFpgaTriggerController to run the
@@ -200,6 +217,10 @@ class MainWindow(QMainWindow):
         self.fpga_signals.frame_fired.connect(self._on_fpga_frame_fired)
         self.fpga_signals.status.connect(self._on_fpga_status)
         self.fpga_signals.error.connect(self._on_fpga_error)
+        self.save_signals = StackSaveSignals()
+        self.save_signals.finished.connect(self._on_stack_save_finished)
+        self.save_signals.failed.connect(self._on_stack_save_failed)
+        self._saving_stack = False     # one background TIFF write at a time
         self._trigger_period_s = 0.0
         self._triggers_fired = 0
         self._arm_time = 0.0           # perf_counter() when the FPGA was armed
@@ -528,6 +549,7 @@ class MainWindow(QMainWindow):
         left_col.addWidget(self.timepoints_widget)
         self.multilocation_widget = self._build_multilocation_box()
         left_col.addWidget(self.multilocation_widget)
+        left_col.addWidget(self._build_aotf_gate_box())
         left_col.addStretch(1)
         columns.addLayout(left_col, stretch=1)
 
@@ -631,17 +653,30 @@ class MainWindow(QMainWindow):
             chk.setToolTip(
                 f"{wavelength} nm enable. At Acquire this row's Power % becomes the level of "
                 f"AOTF channel {self.EXCITATION_WAVELENGTHS_NM.index(wavelength)} (0..5 V from the ini's "
-                "AOTF limits) for the whole run, 0 V at Stop. Exactly one row may be on. "
-                "Forced off in simulate-on-FPGA mode. See docs/aotf.md."
+                "AOTF limits) for the whole run, 0 V at Stop. Whatever rows are ticked with "
+                "Power > 0 % are driven, in every mode including simulate-on-FPGA. "
+                "See docs/aotf.md."
             )
             slider = QSlider(Qt.Horizontal)
             slider.setRange(0, 1000)  # 0.1% steps
             slider.setMinimumWidth(40)
+            # FIXED 2026-09-17 (user: "software slows down when some changes
+            # are made"): spin.valueChanged below writes an AOTF register to
+            # the FPGA AND reads it back (_push_aotf_levels ->
+            # set_aotf_levels), synchronously on the GUI thread. Without
+            # setTracking(False)/setKeyboardTracking(False), that round trip
+            # ran once per drag tick while dragging the slider and once per
+            # keystroke while typing a percentage -- the slider/spin now only
+            # commit (and so only push to hardware) on release / Enter /
+            # focus-loss, matching this codebase's own _spin() convention
+            # (camera_tab.py) for the same reason.
+            slider.setTracking(False)
             spin = _narrow(QDoubleSpinBox(), 78)
             spin.setRange(0.0, 100.0)
             spin.setDecimals(1)
             spin.setSingleStep(0.1)
             spin.setSuffix(" %")
+            spin.setKeyboardTracking(False)
             spin.setValue(100.0 if is_default_on else 0.1)
             slider.setValue(int(round(spin.value() * 10)))
             chk.setChecked(is_default_on)
@@ -660,7 +695,52 @@ class MainWindow(QMainWindow):
             row.addWidget(slider, stretch=1)
             row.addWidget(spin)
             form.addLayout(row)
+            # LouisXIV's "Set AOTF" mode writes the level register live, so a
+            # ticked row has to put its voltage on the pin straight away, not
+            # only at Acquire (user, 2026-09-08: "I want the AOTF mode giving
+            # out appropriate voltage everytime it is checked in"). Measured on
+            # the card that day: 'AOTF ch (V)' reaches 'AOTF ch out (V)' with
+            # nothing armed at all, so no run is needed for this to work.
+            chk.toggled.connect(lambda *_: self._push_aotf_levels())
+            spin.valueChanged.connect(lambda *_: self._push_aotf_levels())
             self.excitation_rows.append((chk, wavelength, spin))
+        return box
+
+    def _build_aotf_gate_box(self) -> QGroupBox:
+        # NOT a LouisXIV control -- there is no equivalent on the real panel.
+        # Host-timed 0V/on-volts square wave on whichever AOTF channel(s)
+        # have a ticked Excitation row (fpga_trigger.py
+        # start_aotf_digital_gate(), docs/aotf.md), built to the user's
+        # explicit direction (2026-09-15): a digital gate "irrespective of
+        # what mechanism [is] listed in the bitfile", adaptive to whatever
+        # period/waveform the run actually uses. Off by default -- it is
+        # new/experimental and changes what sits on its gated pins for
+        # the whole run, so it should never surprise someone who has not
+        # opted in. Verified on real hardware, spikes/39_aotf_digital_gate.py.
+        box = QGroupBox("AOTF Digital Gate (TTL, adaptive)")
+        box.setToolTip(
+            "Host-timed square wave on whichever AOTF channel(s) have a "
+            "ticked, driven Excitation row: 0 V when off, the voltage below "
+            "when on. An unticked row's channel is never driven by this box. "
+            "Leads each camera trigger and holds through the forward scan "
+            "(the same on-duration aotf_gate() computes for this waveform), "
+            "recomputed from the run's actual period/waveform -- not an "
+            "FPGA-timed signal (docs/aotf.md has no engine for this), so "
+            "precision is limited by Windows timer jitter (~1 ms) and "
+            "degrades gracefully when the trigger-to-trigger gap is smaller "
+            "than that."
+        )
+        form = QFormLayout(box)
+        self.aotf_gate_chk = QCheckBox("Enable")
+        self.aotf_gate_volts = _narrow(QDoubleSpinBox())
+        self.aotf_gate_volts.setRange(0.0, 10.0)
+        self.aotf_gate_volts.setDecimals(2)
+        self.aotf_gate_volts.setSuffix(" V")
+        self.aotf_gate_volts.setValue(3.3)
+        self.aotf_gate_status = QLabel("idle")
+        form.addRow(self.aotf_gate_chk)
+        form.addRow("On level", self.aotf_gate_volts)
+        form.addRow("Status", self.aotf_gate_status)
         return box
 
     def _build_x_galvo_box(self) -> QGroupBox:
@@ -943,8 +1023,14 @@ class MainWindow(QMainWindow):
         self.max_counts_spin = QSpinBox()
         self.max_counts_spin.setRange(1, 65535)
         self.max_counts_spin.setValue(4000)
+        # FIXED 2026-09-17: with Scale to Counts on, each tick re-renders the
+        # full frame (and smooth-scales it if Zoom to fit is on too) -- only
+        # do that on commit, not per drag/keystroke tick (same reasoning as
+        # the Excitation Power% controls above).
+        self.max_counts_spin.setKeyboardTracking(False)
         col.addWidget(self.max_counts_spin)
         self.max_counts_slider = QSlider(Qt.Horizontal)
+        self.max_counts_slider.setTracking(False)
         self.max_counts_slider.setRange(1, 65535)
         self.max_counts_slider.setValue(4000)
         col.addWidget(self.max_counts_slider)
@@ -1180,6 +1266,11 @@ class MainWindow(QMainWindow):
         lay.addWidget(QLabel("Log:"))
         self.log = QTextEdit()
         self.log.setReadOnly(True)
+        # FIXED 2026-09-17: unbounded -- a long session (or a control that
+        # logs on every commit, like the Excitation rows) grew this
+        # indefinitely, and QTextEdit gets progressively slower to append to
+        # as its document grows. Cap it; oldest lines drop off.
+        self.log.document().setMaximumBlockCount(5000)
         lay.addWidget(self.log)
         return tab
 
@@ -1390,17 +1481,33 @@ class MainWindow(QMainWindow):
             self._save_stack(stack)
 
     def _save_stack(self, stack, timepoint: int = 0, position: int | None = None) -> Path | None:
-        """Write one stack the way LouisXIV lays them out.
+        """Compute this stack's path the way LouisXIV lays them out, and
+        write it on a background thread.
 
         ``timepoint`` and ``position`` are the Build Image Path.vi indices.
         Both are plumbed through and tested, but nothing drives them past 0
         yet: Timepoints and Multi-location are still greyed on Scan Setup by
         the user's decision, so every acquisition today is a single timepoint
         at a single position.
+
+        FIXED 2026-09-18 (user: "the GUI takes time to save acquired z
+        stack"): the write itself -- an uncompressed, potentially multi-GB
+        OME-TIFF (LouisXIV's own format; deliberately uncompressed, see
+        fileio/tiff_stack.py) -- used to run right here, blocking the GUI
+        thread for however long that took, worse over the network share
+        this project lives on. It now runs on a daemon thread and reports
+        back through ``save_signals`` (StackSaveSignals, same
+        thread-to-GUI-signal pattern as FpgaSignals above); everything that
+        only needs to know where the stack WILL land -- callers, tests --
+        still gets the path back immediately and unchanged, since only the
+        actual disk I/O moved, not the path computation.
         """
         data_dir = self._ensure_data_dir()
         if data_dir is None:
             self._log("Save cancelled: no data folder chosen.")
+            return None
+        if self._saving_stack:
+            self._log("Save skipped: a previous stack is still being written to disk.")
             return None
         # The folder the Save Image dialog named for THIS run. Falling back
         # to a fresh scan keeps the paths that never went through the dialog
@@ -1410,18 +1517,35 @@ class MainWindow(QMainWindow):
         ch = self._selected_channel_index()
         path = stack_path(exp, self._save_base, ch, timepoint, position,
                           self.separate_position_folders)
-        try:
-            save_tiff_stack(path, stack, ome=True, pixel_size_um=cal.detection.xy_pixel_um,
-                            z_step_um=self.z_interval_spin.value(),
-                            channel_name=self.excitation_rows[ch][1])
-            write_acq_info(exp, *self._acq_info(stack))
-        except Exception as e:
-            self._log(f"Stack save FAILED: {type(e).__name__}: {e}")
-            QMessageBox.warning(self, "Save failed", str(e))
-            return None
-        self._current_exp_dir = exp
-        self._log(f"Saved {stack.shape[0]}-slice stack: {path}  (+ AcqInfo.txt)")
+        pixel_size_um = cal.detection.xy_pixel_um
+        z_step_um = self.z_interval_spin.value()
+        channel_name = self.excitation_rows[ch][1]
+        acq_fields, acq_extras = self._acq_info(stack)
+
+        def worker():
+            try:
+                save_tiff_stack(path, stack, ome=True, pixel_size_um=pixel_size_um,
+                                z_step_um=z_step_um, channel_name=channel_name)
+                write_acq_info(exp, acq_fields, acq_extras)
+            except Exception as e:                                      # noqa: BLE001
+                self.save_signals.failed.emit(f"{type(e).__name__}: {e}")
+            else:
+                self.save_signals.finished.emit(path, exp, int(stack.shape[0]))
+
+        self._saving_stack = True
+        self._log(f"Saving {stack.shape[0]}-slice stack in the background: {path}")
+        threading.Thread(target=worker, name="unmscope-stack-save", daemon=True).start()
         return path
+
+    def _on_stack_save_finished(self, path: Path, exp: Path, n_slices: int):
+        self._saving_stack = False
+        self._current_exp_dir = exp
+        self._log(f"Saved {n_slices}-slice stack: {path}  (+ AcqInfo.txt)")
+
+    def _on_stack_save_failed(self, message: str):
+        self._saving_stack = False
+        self._log(f"Stack save FAILED: {message}")
+        QMessageBox.warning(self, "Save failed", message)
 
     def _on_calc_projections(self):
         stack = self.acquired_stack()
@@ -1819,6 +1943,9 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.scope = None
             self._log(f"FPGA Scope could not start: {type(e).__name__}: {e}")
+        # Whatever rows are already ticked (a restored session, usually) go
+        # out now rather than waiting for an Acquire.
+        self._push_aotf_levels()
 
     def on_fpga_disconnect_clicked(self):
         if not self._begin_blocking("FPGA disconnect"):
@@ -1930,10 +2057,20 @@ class MainWindow(QMainWindow):
 
     def _show_sample_stage(self) -> None:
         """Utilities > Sample Stage Control and Scan Setup > Configure (both
-        SPIM MAIN event case [4]): one non-modal panel, simulated stage."""
+        SPIM MAIN event case [4]): one non-modal panel.
+
+        X/Y motion: ASI MS-2000 on COM5 (``real_asi_factory``).
+        Z motion:   Arduino/Nikon focus on COM8 (``real_focus_factory``).
+        Both factories are passed so the Settings page's 'Save Settings' can
+        reconnect each controller independently.
+        """
         if self.sample_stage_dialog is None:
             self.sample_stage_dialog = SampleStageDialog(
-                rel_offset_provider=lambda: self.rel_offset_spin.value(), log=self._log, parent=self)
+                real_stage_factory=lambda settings: real_asi_factory(settings.com_port),
+                real_z_factory=real_focus_factory,
+                z_com_port="COM8",
+                rel_offset_provider=lambda: self.rel_offset_spin.value(),
+                log=self._log, parent=self)
             self.sample_stage_dialog.rel_offset_recalled.connect(self.rel_offset_spin.setValue)
             self.sample_stage_dialog.sequence_changed.connect(self._refresh_locations_table)
             self._refresh_locations_table()
@@ -2199,11 +2336,11 @@ class MainWindow(QMainWindow):
     def _aotf_levels_for_run(self) -> tuple[dict[int, int], str]:
         """({AOTF channel: DAC counts}, a one-line description) for the
         current Excitation rows -- exactly what _start_acquisition hands to
-        start_free_run(aotf_levels=...). The one selected row (the
-        one-laser rule is enforced at Acquire) sets its AOTF channel to
-        Power% -> volts -> counts; every other channel 0. The FPGA drives
-        'AOTF ch (V)' as a DC level while armed, so the laser is on for the
-        whole run (docs/aotf.md). Shared with the Simulated view so it
+        start_free_run(aotf_levels=...). Every ticked row with Power > 0
+        (LouisXIV's one-laser rule is logged at Acquire, not enforced)
+        sets its AOTF channel to Power% -> volts -> counts; the rest 0.
+        The FPGA drives 'AOTF ch (V)' as a DC level while armed, so the
+        laser is on for the whole run (docs/aotf.md). Shared with the Simulated view so it
         shows the levels that would really be written, not a second guess
         at them."""
         cal = self.calibration
@@ -2218,6 +2355,29 @@ class MainWindow(QMainWindow):
                 desc = (f"{wl} nm at {spin.value():g} % -> AOTF ch {ch} = {v:.3f} V ({counts} counts); "
                         f"other channels 0")
         return levels, desc
+
+    def _push_aotf_levels(self) -> None:
+        """Write the current Excitation rows to 'AOTF ch (V)' now.
+
+        Called whenever a row is ticked or its Power % changes, and once at
+        FPGA connect. The FPGA holds the level as a DC value the moment it is
+        written -- verified on the card 2026-09-08 with nothing armed -- so
+        this is what puts the voltage on AO5/AO6/AO7/AO3.
+
+        Safe to call at any time: it no-ops without an FPGA, and writing the
+        register mid-run is exactly what LouisXIV's "Set AOTF" mode does.
+        Unticking a row zeroes that channel because the operator asked for
+        it -- nothing here zeroes a channel on its own (docs/aotf.md).
+        """
+        if getattr(self, "fpga", None) is None:
+            return
+        levels, desc = self._aotf_levels_for_run()
+        try:
+            self.fpga.set_aotf_levels(levels)
+        except Exception as e:                                  # noqa: BLE001
+            self._log(f"AOTF level write failed: {type(e).__name__}: {e}")
+            return
+        self._log(f"AOTF: {desc}")
 
     @staticmethod
     def _trigger_up_ticks_for(wf) -> int:
@@ -2314,7 +2474,18 @@ class MainWindow(QMainWindow):
         # here, cancelling costs nothing because nothing has started yet.
         # Still once per session: _ensure_data_dir only prompts while
         # _data_dir is None.
-        if self.save_files_chk.isChecked() and self._prompt_save_image() is None:
+        #
+        # FIXED 2026-09-18 (user): "The save file checkbox should only be
+        # related to z stack, it should have nothing to do with the
+        # continuous mode." Gated on mode because that already matches what
+        # can actually be saved: _on_stack_finished only calls _save_stack
+        # when z_target_frames is set, which Continuous leaves at 0
+        # (unbounded -- see _start_acquisition below, "Continuous: arming
+        # camera"), so nothing a Continuous run does was ever saved. This
+        # prompt was firing anyway, able to cancel a live-view run over a
+        # save location that would never be used.
+        if (mode == MODE_ZSTACK and self.save_files_chk.isChecked()
+                and self._prompt_save_image() is None):
             self._log("Acquisition cancelled at the Save Image dialog.")
             return
 
@@ -2507,6 +2678,50 @@ class MainWindow(QMainWindow):
                   f"({cycle / TICKS_PER_S * 1000:.3f} ms), Trigger up (ticks)={up} "
                   f"({up / TICKS_PER_S * 1000:.1f} ms, covers the AO block); "
                   + (f"bounded to {n_triggers} triggers." if n_triggers else "continuous until Stop."))
+
+        # ---- AOTF digital gate (host-timed; not a LouisXIV feature) --------
+        # Opt-in (main_window.py's own addition, docs/aotf.md): adaptive to
+        # THIS run's actual waveform, phased off the same
+        # self.fpga._free_run_t0 the FPGA's own trigger counter uses.
+        #
+        # Gates only channels with a ticked, driven Excitation row --
+        # aotf_levels' keys, the same set _push_aotf_levels() lights up.
+        # FIXED 2026-09-16 (user): Enable was previously hard-coded to
+        # channels=(0,1,2,3), so checking it drove all four AOTF terminals
+        # regardless of which laser row was ticked. An unticked row must
+        # stay at 0 V.
+        #
+        # on-duration = line.on_points / rate.ao_rate_hz -- the forward-sweep
+        # length aotf_gate() blanks to for this exact armed waveform, not the
+        # camera's raw exposure_s. docs/aotf.md's measured reference (user's
+        # FPGA-Scope export, 27 cycles averaged): the laser unblanks within
+        # one 5 us sample of the camera trigger and blanks 173.987 ms later
+        # at 87.0 % duty -- i.e. on_points/total_points of the cycle, which
+        # is what this now reproduces instead of approximating with
+        # exposure_s.
+        if self.aotf_gate_chk.isChecked():
+            gated_channels = tuple(sorted(aotf_levels))
+            if not gated_channels:
+                self.aotf_gate_status.setText("idle (no channel ticked)")
+                self._log("AOTF digital gate: Enable is checked but no Excitation row is ticked "
+                          "with Power > 0 -- nothing to gate.")
+            else:
+                line = lx.line
+                on_points = line.total_points if line.bidirectional else line.on_points
+                gate_on_s = on_points / lx.rate.ao_rate_hz
+                lead_used = self.fpga.start_aotf_digital_gate(
+                    period_s, gate_on_s, channels=gated_channels,
+                    on_volts=self.aotf_gate_volts.value())
+                gap_ms = self.fpga.aotf_gate_gap_s * 1e3
+                self.aotf_gate_status.setText(f"running: lead {lead_used * 1e3:.2f} ms, gap {gap_ms:.2f} ms")
+                self._log(f"AOTF digital gate: ON ({self.aotf_gate_volts.value():.2f} V) on channel(s) "
+                          f"{gated_channels}, {gate_on_s * 1e3:.3f} ms/cycle ({on_points}/{line.total_points} pts), "
+                          f"lead {lead_used * 1e3:.2f} ms of gap {gap_ms:.2f} ms available"
+                          + ("" if gap_ms > 2.0 else " -- gap is tight; expect jittery, not clean, "
+                             "off-edges (spikes/39_aotf_digital_gate.py case B)."))
+        else:
+            self.aotf_gate_status.setText("idle")
+
         if sim_on_fpga:
             self.acq_status_label.setText("ACQUIRING (SIM on FPGA)")
             self._log("SIMULATE ON FPGA: frames come from the simulated camera, one per FPGA trigger "
@@ -2531,6 +2746,11 @@ class MainWindow(QMainWindow):
         self._finishing = False
         self._arm_time = 0.0
         if self.fpga is not None:
+            # Ahead of stop_free_run()'s own safe_state() call, purely so the
+            # gate thread stops before triggers are disarmed rather than
+            # racing it -- safe_state() would catch this anyway.
+            self.fpga.stop_aotf_digital_gate()
+            self.aotf_gate_status.setText("idle")
             if self.fpga.free_run_active:
                 final = self.fpga.stop_free_run()
                 self._triggers_fired = final

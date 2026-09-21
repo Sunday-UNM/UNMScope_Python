@@ -1,0 +1,46 @@
+spikes/40_z_piezo_verify.py -- 2026-09-15, real PCIe-7852R hardware, Z Piezo
+now physically connected to AO2.
+
+FIRST ATTEMPT used the 'Static AO to set' / 'AO Mode' = "Set AO" path (the
+same mechanism safe_state() uses to zero outputs at idle): every non-zero
+commanded value came back as 0 V on BOTH the 'AO DMA' register readback and
+the AI scope's physical-pin column. Zero is exactly what safe_state() also
+asks for, so that path was never distinguishing "worked" from "already 0" --
+turns out it does not actually drive an arbitrary static value to the pin on
+this bitfile.
+
+SECOND ATTEMPT used the REAL path main_window.py drives Z Piezo through
+during any Z-stack -- the streamed Wvfrm2 mechanism via
+start_free_run(ao_words=...), with points packed by
+hardware/waveform.py's pack_points(z_piezo=counts). Result: PASS.
+
+    commanded +0.00 V ->  measured +0.0000 V
+    commanded +1.00 V ->  measured +1.0001 V
+    commanded +2.50 V ->  measured +2.5001 V
+    commanded +5.00 V ->  measured +5.0002 V
+    commanded +0.00 V ->  measured +0.0000 V
+    commanded -1.00 V ->  measured -1.0001 V
+    commanded +0.00 V ->  measured +0.0000 V
+
+All within 0.1 mV of commanded -- essentially exact, no calibration
+correction needed at the register level (the um/V conversion in
+config/calibration.py is a separate, already-handled layer on top of this).
+
+CONCLUSION: the Z Piezo backend mechanism the GUI already uses
+(WaveformConfig.z_axes_moving() -> build_louisxiv_waveform(z_piezo_start_v=,
+z_piezo_step_v=) -> start_free_run(ao_words=...)) is fully live and correct
+on the real, now-connected hardware. No activation step is missing on that
+path. The only related software gap found (not a hardware blocker): the
+"Linked" button's tooltip says Z Piezo Start/End should auto-follow Z Galvo
++ Rel. Offset when toggled on, but _on_linked_toggled() in main_window.py
+only disables the spin boxes -- it never recomputes their values. The
+current saved ui_state.json has "linked": true, so Z Piezo Start/End are
+greyed out at whatever value they last held (not auto-synced as the tooltip
+implies), though that residual value still reaches the hardware correctly.
+Separate fix if the user wants real Linked behaviour; not required for using
+Z Piezo directly (Unlinked, typing Start/End by hand).
+
+Do not re-run the 'Set AO' / 'Static AO to set' experiment to "double check"
+-- it is not the path anything in this codebase uses for real motion, and
+it already failed once for an unrelated-looking reason (probably needs its
+own investigation only if something is later found to depend on it).

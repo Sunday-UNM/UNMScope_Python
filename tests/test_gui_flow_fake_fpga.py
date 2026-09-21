@@ -239,7 +239,9 @@ def test_calc_projects_the_retained_stack_and_save_files_writes_louisxiv_layout(
     pump(app, 0.05)
     w.on_acquire_clicked()
     assert pump(app, 10.0, until=lambda: not w.acquiring), "Z stack did not finish"
-    pump(app, 0.3)
+    # The stack write now happens on a background thread (2026-09-18 fix for
+    # "the GUI takes time to save"); wait for it, not a fixed sleep.
+    assert pump(app, 5.0, until=lambda: not w._saving_stack), "stack save did not finish"
 
     # Calc
     assert w.calc_projections_btn.isEnabled() and w.deskew_check.isEnabled()
@@ -279,7 +281,7 @@ def test_calc_projects_the_retained_stack_and_save_files_writes_louisxiv_layout(
     # a second stack -> the next experiment folder
     w.on_acquire_clicked()
     assert pump(app, 10.0, until=lambda: not w.acquiring)
-    pump(app, 0.3)
+    assert pump(app, 5.0, until=lambda: not w._saving_stack), "stack save did not finish"
     assert (tmp_path / "Cell2" / f"img_CH{ch:02d}_000000.tif").exists()
 
 
@@ -313,22 +315,30 @@ def test_save_stack_honours_the_base_name_timepoint_and_position(app, window, tm
     w._save_base = "beads"                       # what the dialog would have set
     stack = np.zeros((3, 8, 8), np.uint16)
 
-    p1 = w._save_stack(stack)
+    # The write is now backgrounded (2026-09-18 fix for "the GUI takes time
+    # to save"), and _save_stack skips a call made while one is still in
+    # flight -- wait for each to land before calling the next, same as any
+    # real caller would (this test fires them back to back on purpose).
+    def save(*a, **k):
+        assert pump(app, 5.0, until=lambda: not w._saving_stack), "previous save never finished"
+        return w._save_stack(*a, **k)
+
+    p1 = save(stack)
     assert p1 is not None and p1.name == "beads_CH00_000000.tif"
 
-    p2 = w._save_stack(stack, timepoint=42)
+    p2 = save(stack, timepoint=42)
     assert p2.name == "beads_CH00_000042.tif"
 
     # no position folder while the LouisXIV global is off
-    p3 = w._save_stack(stack, position=0)
+    p3 = save(stack, position=0)
     assert p3.parent.name.startswith("Cell"), p3
 
     w.separate_position_folders = True
-    p4 = w._save_stack(stack, timepoint=1, position=0)
+    p4 = save(stack, timepoint=1, position=0)
     assert p4.parent.name == "position 1"        # 1-based, as Build Image Path is
     assert p4.name == "beads_CH00_000001.tif"
 
-    p5 = w._save_stack(stack, position=3)
+    p5 = save(stack, position=3)
     assert p5.parent.name == "position 4"
 
 
@@ -593,20 +603,36 @@ def test_preview_never_touches_the_fpga_and_shows_the_true_z_piezo_staircase(app
         for name, col in mw.MainWindow.AO_STREAM_COLUMNS.items():
             assert np.array_equal(snap.frames[:, col], streamed[name][:len(snap.frames)]), name
 
-        # The laser, at the level the Excitation rows ask for. With AOTF
-        # cycle = None -- the default, read off the live LouisXIV panel --
-        # there is NO per-line blanking: its own X Waveform graph holds the
-        # AOTF at full level straight through the galvo's return move
-        # (verified 2026-09-07). So this is a steady level, and the
-        # aotf_gate docstring says what would change that.
+        # The laser: its level, BLANKED through the galvo's return move. The
+        # blanking is unconditional -- it happens at AOTF cycle = None, which
+        # is what this rig runs. Settled 2026-09-08 against LouisXIV's own
+        # exported Full Waveform, whose AOTF Ch2 column is binary and notches
+        # once per slice (60 high / 9 low at the rig's settings). An earlier
+        # reading of its X Waveform graph said "steady level"; that graph
+        # shows one cycle at ~87 % duty pinned to the top of its axis, so the
+        # notch did not render.
         levels, _desc = w._aotf_levels_for_run()
         assert levels, "the fixture selects one excitation row, so a level must be computed"
         assert w.utilities_tab.waveform_panel.config().aotf_cycle == "None"
+        line = w.last_louisxiv.line if hasattr(w, "last_louisxiv") else None
         for ch, counts in levels.items():
             col = mw.MainWindow.AOTF_LEVEL_COLUMNS[ch]
             trace = snap.frames[:, col].astype(np.int64)
             assert counts != 0
-            assert (trace == counts).all(), "AOTF cycle None: steady level, as LouisXIV shows"
+            assert set(np.unique(trace)) == {0, counts}, "the AOTF gate is a square: level or nothing"
+            # High through the sweep, low through the return move, once per
+            # slice -- the same shape LouisXIV exports.
+            per_block = trace[:wf.points_per_trigger]
+            assert per_block[0] == counts, "the line starts with the laser on"
+            assert per_block[-1] == 0, "the return move is blanked"
+            n_high = int((per_block == counts).sum())
+            assert 0 < n_high < wf.points_per_trigger, "must blank, but not the whole line"
+            if line is not None:
+                assert n_high == line.on_points
+            # Every slice gets the same gate.
+            for k in range(1, wf.n_slices):
+                blk = trace[k * wf.points_per_trigger:(k + 1) * wf.points_per_trigger]
+                assert np.array_equal(blk, per_block), f"slice {k} gate differs"
     finally:
         w.fpga = real_fpga                       # restore before the window fixture's own teardown
 
@@ -700,7 +726,13 @@ def test_the_save_path_is_asked_before_anything_is_armed(app, window, monkeypatc
         return _AcceptedSaveDialog(tmp_path)
     monkeypatch.setattr(mw, "SaveImageDialog", fake_dialog)
 
-    w.mode_combo.setCurrentText(mw.MODE_CONTINUOUS)
+    # Z stack, not Continuous: 2026-09-18 fix scopes the save prompt (and
+    # saving at all) to Z stack only -- see test_save_prompt_is_zstack_only.
+    # Widened past the fixture's default 10 slices: the fake FPGA finishes
+    # 10 in well under the 0.3 s below, and this test wants to catch it
+    # still running to prove the dialog appeared BEFORE the arm.
+    w.z_end_spin.setValue(990.0)
+    w.mode_combo.setCurrentText(mw.MODE_ZSTACK)
     pump(app, 0.05)
     w.on_acquire_clicked()
     pump(app, 0.3)
@@ -717,7 +749,7 @@ def test_cancelling_the_save_prompt_starts_nothing(app, window, monkeypatch):
     w = window
     w.save_files_chk.setChecked(True)
     monkeypatch.setattr(mw, "SaveImageDialog", lambda *a, **k: _CancelledSaveDialog())
-    w.mode_combo.setCurrentText(mw.MODE_CONTINUOUS)
+    w.mode_combo.setCurrentText(mw.MODE_ZSTACK)
     pump(app, 0.05)
     w.on_acquire_clicked()
     pump(app, 0.2)
@@ -734,17 +766,45 @@ def test_it_asks_on_every_acquire(app, window, monkeypatch, tmp_path):
     cell type and labeling."""
     w = window
     w.save_files_chk.setChecked(True)
+    # Z stack, not Continuous (2026-09-18 fix: the save prompt is Z-stack
+    # only). Widen it well past the fixture's default 10 slices so the
+    # fake FPGA can't self-complete the stack inside a pump() window -- this
+    # loop needs to control start/stop itself, same as it did as Continuous.
+    w.z_end_spin.setValue(990.0)
     asked = []
     monkeypatch.setattr(mw, "SaveImageDialog",
                         lambda *a, **k: (asked.append(k), _AcceptedSaveDialog(tmp_path))[1])
-    w.mode_combo.setCurrentText(mw.MODE_CONTINUOUS)
+    w.mode_combo.setCurrentText(mw.MODE_ZSTACK)
     pump(app, 0.05)
     for _ in range(3):
         w.on_acquire_clicked(); pump(app, 0.3)      # start
+        assert w.acquiring, "the stack self-completed before the manual stop -- widen it further"
         w.on_acquire_clicked(); pump(app, 0.3)      # stop
     assert len(asked) == 3, f"prompted {len(asked)} times for 3 runs"
     # ...and it opens on the last values, so an unchanged setup is one click
     assert asked[-1]["user_name"] == "chitra" and asked[-1]["cell_type"] == "celegan"
+
+
+def test_save_prompt_is_zstack_only(app, window, monkeypatch, tmp_path):
+    """User, 2026-09-18: "The save file checkbox should only be related to
+    z stack, it should have nothing to do with the continuous mode." Nothing
+    a Continuous run does was ever actually saved (_on_stack_finished only
+    calls _save_stack when z_target_frames is set, which Continuous leaves
+    at 0), so the save-location prompt must not appear for it either --
+    before this fix it did, and cancelling it could abort a live-view run
+    over a save location that would never be used."""
+    w = window
+    w.save_files_chk.setChecked(True)
+    monkeypatch.setattr(mw, "SaveImageDialog",
+                        lambda *a, **k: pytest.fail("Save Files + Continuous must not prompt"))
+
+    w.mode_combo.setCurrentText(mw.MODE_CONTINUOUS)
+    pump(app, 0.05)
+    w.on_acquire_clicked()
+    pump(app, 0.3)
+    assert w.acquiring, "Continuous must start even with nothing to save"
+    w.on_acquire_clicked()
+    pump(app, 0.3)
 
 
 def test_saving_a_stack_afterwards_does_not_re_prompt(app, window, monkeypatch, tmp_path):
@@ -826,3 +886,55 @@ def test_the_dialog_opens_on_the_last_values(app, window, monkeypatch, tmp_path)
     assert seen["root"] == str(tmp_path)
     assert seen["user_name"] == "CHITRA" and seen["cell_type"] == "CELEGAN"
     assert seen["cell_labeling"] == "SINGLESTAIN" and seen["description"] == "0.9NA secondary"
+
+
+def test_ticking_a_laser_row_puts_its_voltage_out_immediately(window, app):
+    """User, 2026-09-08: "I want the AOTF mode giving out appropriate voltage
+    everytime it is checked in." Before this, the level only reached the card
+    at Acquire. Measured on the real PCIe-7852R the same day (spikes/38):
+    'AOTF ch (V)' reaches 'AOTF ch out (V)', and the pin, with nothing armed,
+    so no run is needed for a ticked row to be live."""
+    w = window
+    for chk, _wl, _spin in w.excitation_rows:
+        chk.setChecked(False)
+    pump(app, 0.02)
+    assert all(v == 0 for v in w.fpga.aotf_levels.values()), w.fpga.aotf_levels
+    assert not w.acquiring                      # nothing armed, on purpose
+
+    chk, wl, spin = w.excitation_rows[2]        # 488 nm -> AOTF ch 2 -> AO7
+    assert wl == 488
+    spin.setValue(38.5)                         # the rig's own working setting
+    chk.setChecked(True)
+    pump(app, 0.02)
+
+    # 38.5 % of the ini's 0..5 V AOTF range = 1.925 V; 3276.7 counts/V.
+    assert w.fpga.aotf_levels["AOTF ch 2"] == pytest.approx(6308, abs=2)
+    assert w.fpga.aotf_levels["AOTF ch 0"] == 0
+    assert not w.acquiring                      # still no run
+
+    # Moving the slider/spin alone re-pushes, no re-tick needed.
+    spin.setValue(77.0)
+    pump(app, 0.02)
+    assert w.fpga.aotf_levels["AOTF ch 2"] == pytest.approx(12615, abs=3)
+
+    # Unticking zeroes that channel -- the operator asked for it. Nothing
+    # else in the port zeroes an AOTF channel on its own (docs/aotf.md).
+    chk.setChecked(False)
+    pump(app, 0.02)
+    assert w.fpga.aotf_levels["AOTF ch 2"] == 0
+
+
+def test_more_than_one_row_may_be_live_at_once(window, app):
+    """The one-laser rule is logged, not enforced (2026-09-07), so two ticked
+    rows drive two AOTF channels."""
+    w = window
+    for chk, _wl, _spin in w.excitation_rows:
+        chk.setChecked(False)
+    pump(app, 0.02)
+    for i in (1, 2):
+        chk, _wl, spin = w.excitation_rows[i]
+        spin.setValue(50.0)
+        chk.setChecked(True)
+    pump(app, 0.02)
+    assert w.fpga.aotf_levels["AOTF ch 1"] > 0
+    assert w.fpga.aotf_levels["AOTF ch 2"] > 0

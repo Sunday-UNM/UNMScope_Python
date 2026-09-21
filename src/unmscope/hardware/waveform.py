@@ -135,8 +135,20 @@ def dither_block(n_pts: int, dither_range_v: float, dither_pulses: float,
     return np.zeros(n_pts)
 
 
+#: Which pack_points() slot carries the per-point 'AOTF on?' bit of the
+#: 'AO DMA' cluster. The cluster is {X Galvo, Z Galvo, Z Piezo, Dither
+#: Galvo, Tiling, Filter, AOTF on?} = six I16 plus one bool, and
+#: pack_points has eight slots, so exactly one of the two "prefix" slots
+#: is that bool. Which one is NOT established from software: the
+#: 'AO DMA'.AOTF on? indicator reads constant True even with nothing
+#: streamed (measured 2026-09-08), so it cannot tell them apart -- only a
+#: scope on AO7 can. Flip this to "prefix1" if AO7 does not blank.
+AOTF_GATE_SLOT = "prefix0"
+
+
 def assemble_scan(x_block_v: np.ndarray, slow_v: list[tuple[np.ndarray, np.ndarray]],
-                  d_block_v: np.ndarray, ticks_between_points: int) -> ScanWaveform:
+                  d_block_v: np.ndarray, ticks_between_points: int,
+                  aotf_gate_block: np.ndarray | None = None) -> ScanWaveform:
     """Repeat the fast-axis block once per slice (or use each slice's own
     pre-shifted copy, e.g. the S-curve slow-axis tail), pair each with that
     slice's (Z galvo, Z piezo) volts and the dither block, and pack into
@@ -150,10 +162,18 @@ def assemble_scan(x_block_v: np.ndarray, slow_v: list[tuple[np.ndarray, np.ndarr
     zg_c = volts_to_counts(np.concatenate([zg for zg, _ in slow_v]))
     zp_c = volts_to_counts(np.concatenate([zp for _, zp in slow_v]))
     d_c = volts_to_counts(np.concatenate([d_block_v] * n_slices))
-    words = pack_points(x_c, zg_c, zp_c, dither=d_c)
+    chans = {"X Galvo": x_c, "Z Galvo": zg_c, "Z Piezo": zp_c, "Dither Galvo": d_c}
+    kw = {}
+    if aotf_gate_block is not None:
+        # The AOTF is blanked through the galvo's return move. It is a
+        # per-point BIT, not a level: the level lives in 'AOTF ch (V)'
+        # and this only says whether it reaches the pin (docs/aotf.md).
+        gate_c = np.concatenate([np.asarray(aotf_gate_block)] * n_slices).astype(np.int64)
+        kw[AOTF_GATE_SLOT] = (gate_c != 0).astype(np.int64)
+        chans["AOTF gate"] = kw[AOTF_GATE_SLOT]
+    words = pack_points(x_c, zg_c, zp_c, dither=d_c, **kw)
     return ScanWaveform(words=words, points_per_trigger=n_pts, ticks_between_points=ticks_between_points,
-                        n_slices=n_slices,
-                        channels={"X Galvo": x_c, "Z Galvo": zg_c, "Z Piezo": zp_c, "Dither Galvo": d_c})
+                        n_slices=n_slices, channels=chans)
 
 
 def build_scan_waveform(exposure_s: float, x_range_v: float, n_slices: int = 1,

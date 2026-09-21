@@ -1,0 +1,71 @@
+spikes/38_aotf_modulation_engine.py -- real PCIe-7852R, 2026-09-08
+Laser box powered down by the user for this run; galvos/piezo clamped
+(+-100 mV), only the AOTF channels allowed to move.
+
+Level under test: 6308 counts = 1.925 V on AOTF ch 2 (488 nm -> AO7),
+i.e. the rig's own 488 setting of 38.5 % of the 0..5 V AOTF range -- the
+same value the user measured flat on the pin.
+
+RUN 1 -- extra registers spike 32 never wrote
+---------------------------------------------
+Added the 'AOTF Sweep settings' cluster (phases / ticks-per-phase /
+"on" / "off" ticks), swept 'AOTF sweep mode' over Step / Sweep / Sync,
+with and without a "Stop/Config Wvfrm" pass, with and without the clock
+registers.
+
+  baseline Set AOTF                DC        (0,0,6308,0)
+  sweep+Step / +Sweep / +Sync      ZERO
+  config+sweep+Step / +Sweep / +Sync ZERO
+  clock+sweep+Step                 (a 1-count flicker on ch 1 only --
+                                    NOT the target channel, not the level)
+  clock+sweep+Sweep                ZERO
+  many phases                      ZERO
+
+RUN 2 -- the full 3x3 mode matrix, clock + sweep registers populated
+-------------------------------------------------------------------
+'AOTF Mode' drives HHMI - AOTF Clock Control Loop.vi (timing);
+'AOTF ch Mode' drives HHMI - AOTF Channel Output Loop.vi (level).
+Verdict judged on the TARGET channel against the requested level, and
+cross-checked against AI scope column 19 (AOTF2).
+
+  Mode=Set         / chMode=Set          DC     ch2 flat 6308   scope 19:AOTF2 flat 6308
+  Mode=Set         / chMode=Start/Run    ZERO   ch2 flat 0      scope all flat 0
+  Mode=Set         / chMode=Stop/Config  ZERO   ch2 flat 0      scope all flat 0
+  Mode=Start/Run   / chMode=Set          DC     ch2 flat 6308   scope 19:AOTF2 flat 6308
+  Mode=Start/Run   / chMode=Start/Run    ZERO   ch2 flat 0
+  Mode=Start/Run   / chMode=Stop/Config  ZERO   ch2 flat 0
+  Mode=Stop/Config / chMode=Set          DC     ch2 flat 6308   scope 19:AOTF2 flat 6308
+  Mode=Stop/Config / chMode=Start/Run    ZERO   ch2 flat 0
+  Mode=Stop/Config / chMode=Stop/Config  ZERO   ch2 flat 0
+  bare Mode=Set    / chMode=Set          DC     ch2 flat 6308   (control, no extra regs)
+
+CONCLUSIONS
+-----------
+1. 'AOTF ch Mode' ALONE decides the output. = 2 ("Set AOTF ch") gives the
+   DC level; = 0 or 1 gives 0 V. The value of 'AOTF Mode' changed nothing
+   in any of the nine cells, so the AOTF **Clock** loop is not consuming
+   its register in this bitfile -- consistent with the checked-out FPGA
+   top level (HHMI - SPIM FPGA Main VI.vi) instantiating only the AO, AI
+   and Shutter loops.
+2. The AOTF channel loop's waveform mode is reachable but starves: put in
+   Start/Run it outputs 0 forever, because the trigger that should start
+   it ('AOTF start trigger' / the 'Start sweep?' global, gated on an
+   'AOTF ch FIFO' read) never arrives.
+3. The FIFO cannot be loaded from the host: the bitfile declares only
+   three DMA channels -- Wvfrm2 (HostToTarget I64), Get Exp, AI data.
+4. The AOTF DACs are not reachable through the AO stream either. All eight
+   analog outputs are spoken for: AO0 Z Galvo, AO1 X Galvo, AO2 Z Piezo,
+   AO4 Dither Galvo, and AO3/AO5/AO6/AO7 = AOTF ch 3/0/1/2. The two
+   remaining streamed slots (Tiling, Filter) have no Connector0 AO pin.
+
+=> On THIS bitfile there is no host-side path to a hardware-timed
+   modulated AOTF voltage. 'AOTF ch (V)' as a static level is the only
+   working path to those DACs. Getting per-line blanking needs either an
+   FPGA recompile that wires the AOTF clock loop, or a different physical
+   route (DIO9/10/11 carry AOTF ch 4/5/6 as digital lines, and
+   DIO6/7/12/14 are ChannelShutter0-3 -- neither investigated).
+
+Side note: the AI scope path is confirmed good for AOTF -- column 19
+(AOTF2) read 6308 whenever the register did, so the Waveforms tab can be
+trusted on these channels since commit 76ff662 raised the streamed
+channel count to 24.

@@ -1,0 +1,19 @@
+spikes/41_aotf_and_zpiezo_combined.py -- 2026-09-16, real PCIe-7852R hardware.
+
+3-slice Z-stack through the ACTUAL production path (build_louisxiv_waveform
+-> start_free_run(ao_words=...) + start_aotf_digital_gate(), the same calls
+main_window.py makes at Acquire), Z Piezo stepping 0/1/2 V, AOTF gate at
+3.3 V on ch 0-3, 100 ms period / 30 ms exposure.
+
+Z Piezo (AO) levels seen: 0.0, 0.9, 1.0, 1.9, 2.0 V -- the 0.9/1.9 readings
+are the S-curve transition caught mid-ramp between slices (expected, see
+louisxiv_waveform.py's slow-axis S-curve), 0.0/1.0/2.0 are the three held
+plateaus, matching the 3 commanded slices exactly.
+
+AOTF ch 0-3, concurrently: 14 rise/14 fall each, 0..10813 counts (0/3.3 V),
+32.3% duty -- identical clean gating to running alone (spikes/39), unaffected
+by Z Piezo motion sharing the same Wvfrm2 stream.
+
+CONCLUSION: PASS. Both mechanisms work correctly independently (spikes/39,
+40) AND together through the real acquisition code path, with no interaction
+or interference between them.

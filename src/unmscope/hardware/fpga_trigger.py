@@ -64,9 +64,9 @@ from dataclasses import dataclass
 import nifpga
 import numpy as np
 
-from unmscope.config.paths import LOUISXIV_ROOT
+from unmscope.config.paths import FPGA_BITFILE
 
-BITFILE = str(LOUISXIV_ROOT / "bin" / "data" / "SPIMFPGAProject_SPIM_MAIN_VI.lvbitx")
+BITFILE = str(FPGA_BITFILE)
 RESOURCE = "RIO0"
 
 AO_MODE_START_RUN_WVFRM = 0
@@ -141,6 +141,28 @@ def aotf_level_cluster(levels: dict | None) -> dict:
         key = AOTF_LEVEL_KEYS[int(ch)]
         out[key] = int(max(-32767, min(32767, int(counts))))
     return out
+
+
+#: DAC scale for every AO channel, AOTF included: +-10 V over the 16-bit
+#: signed range (docs/aotf.md: 16384 counts = 5.000 V measured).
+AOTF_COUNTS_PER_VOLT = 3276.7
+
+
+def volts_to_aotf_counts(volts: float) -> int:
+    """DAC counts for a voltage on an AOTF channel (see AOTF_COUNTS_PER_VOLT)."""
+    return int(round(float(volts) * AOTF_COUNTS_PER_VOLT))
+
+
+# -- AOTF digital gate (host-timed; docs/aotf.md has no FPGA engine that
+# reaches these pins) -- see FpgaTriggerController.start_aotf_digital_gate.
+#: Below this trigger-to-trigger gap, the measured host-timing precision
+#: (+0.4 ms mean / 0.7 ms spread, "Timing precision on Windows" below)
+#: cannot land a clean off-edge -- start_aotf_digital_gate() clamps the
+#: lead so the gate degrades to DC-high rather than glitching.
+AOTF_GATE_SAFETY_MARGIN_S = 0.002
+#: Default lead time ahead of the trigger, comfortably above the ~1 ms
+#: jitter floor.
+AOTF_GATE_DEFAULT_LEAD_S = 0.0025
 
 
 def ao_limits(clamp: bool, limit_counts: int = 0, allow_aotf_gate: bool | None = None) -> tuple[dict, dict]:
@@ -332,6 +354,11 @@ class FpgaTriggerController:
         self._monitor_stop = threading.Event()
         self.last_status: FreeRunStatus | None = None
         self.last_error: str | None = None
+        # -- AOTF digital gate (host-timed; see start_aotf_digital_gate) --
+        self._gate_thread: threading.Thread | None = None
+        self._gate_stop = threading.Event()
+        self.aotf_gate_active = False
+        self.aotf_gate_gap_s = 0.0
 
     # -- lifecycle --------------------------------------------------------
     def connect(self):
@@ -373,7 +400,10 @@ class FpgaTriggerController:
     def safe_state(self):
         """Static AO at 0 on every channel, AOTF gate off, every AOTF level
         at 0 V (a laser can only be lit through set_aotf_levels() + the
-        per-point gate of a running waveform)."""
+        per-point gate of a running waveform). Stops the host-timed AOTF
+        digital gate first -- otherwise its next scheduled write would
+        undo the zeroing below."""
+        self.stop_aotf_digital_gate()
         regs = self._regs()
         regs["AO Mode"].write(AO_MODE_SET_AO)
         regs["Static AO to set"].write(STATIC_ZERO)
@@ -414,9 +444,13 @@ class FpgaTriggerController:
     # -- AOTF levels ----------------------------------------------------------
     def set_aotf_levels(self, levels: dict | None) -> dict:
         """Write 'AOTF ch (V)' = {channel index: counts} (unset channels 0)
-        and read it back. The level only reaches the output while the
-        per-point 'AOTF on?' gate of the running waveform is True AND the
-        AO limits allow the gate (docs/aotf.md)."""
+        and read it back.
+
+        On the deployed bitfile the level reaches 'AOTF ch out (V)', and the
+        pin, IMMEDIATELY and unconditionally -- no run, no arm, no gate
+        needed (measured 2026-09-08, spikes/38). The per-point 'AOTF on?'
+        gate in the Wvfrm2 stream does not modulate it: that would need the
+        AOTF clock loop, which this bitfile does not run (docs/aotf.md)."""
         regs = self._regs()
         cluster = aotf_level_cluster(levels)
         regs["AOTF ch (V)"].write(cluster)
@@ -428,6 +462,116 @@ class FpgaTriggerController:
     def read_aotf_out(self) -> dict:
         """The FPGA's own 'AOTF ch out (V)' indicator (counts per channel)."""
         return dict(self._regs()["AOTF ch out (V)"].read())
+
+    # -- AOTF digital gate: host-timed, irrespective of the bitfile's own
+    # (non-instantiated) AOTF clock engine -------------------------------
+    def start_aotf_digital_gate(self, period_s: float, exposure_s: float, *,
+                                 channels=(0, 1, 2, 3), on_volts: float = 3.3,
+                                 lead_s: float | None = None,
+                                 t0: float | None = None) -> float:
+        """A 0 V / on_volts square wave on the given AOTF channel DACs, phased
+        to lead each expected camera trigger and hold through the on-duration
+        -- driven by a background thread re-writing 'AOTF ch (V)' on a
+        schedule, NOT by any FPGA engine (there isn't one that reaches
+        these pins; docs/aotf.md). This is the user's explicit direction
+        (2026-09-15): "irrespective of what mechanism is listed in the
+        bitfile." ``channels`` should be only the AOTF channels actually
+        being driven (e.g. the ticked Excitation rows) -- the caller is
+        responsible for that filtering; this method gates whatever it is
+        given.
+
+        ``exposure_s`` is really "on-duration for this cycle": the caller
+        (main_window.py) passes ``line.on_points / rate.ao_rate_hz`` from the
+        same armed waveform's ``aotf_gate()`` model, not the camera's raw
+        exposure setting -- docs/aotf.md's measured reference shows the real
+        relationship is "on for the forward-sweep fraction of the cycle",
+        not "on for a fixed exposure time". A literal camera exposure_s is
+        still a fine value to pass for a simpler gate that only needs to
+        outlast the shutter.
+
+        Adaptive: on-duration = lead_s + exposure_s, recomputed from
+        whatever period_s/exposure_s the caller passes -- a change picked up
+        on the next call, nothing here is a fixed absolute number except the
+        lead safety margin and the requested voltage. ``t0`` defaults to
+        ``self._free_run_t0`` (the
+        same time.perf_counter() reference start_free_run() stamps at the
+        moment 'Trigger Enable?' goes True), so cycle n's target trigger
+        is at t0 + n*period_s -- exactly the reference the FPGA's own
+        counter uses (see achieved_hz()); pass it explicitly for a gate
+        not tied to an active free run.
+
+        Scheduling uses _wait_until(), the same primitive start_continuous()
+        uses -- measured +0.4 ms mean / 0.7 ms spread with this process's
+        timer resolution raised (see "Timing precision on Windows" above).
+        That measured precision is the hard limit on how tight a
+        trigger-to-trigger gap this can actually gate: the requested lead
+        is silently clamped so the ON write, the OFF write and a safety
+        margin all fit inside ``period_s - exposure_s``. When that gap is
+        already smaller than the margin (e.g. this rig's own SyncReadout
+        default: ~10.15 ms period, ~10.00 ms exposure -- a ~150 us gap),
+        the clamp floors lead_s at 0 and the pin reads as effectively DC
+        high for the whole run: not a bug, a real Windows/PCIe latency
+        floor. The return value is the lead actually used; compare it to
+        the request (or read ``self.aotf_gate_gap_s`` afterwards) to tell
+        the two cases apart.
+
+        'AOTF ch (V)' is one cluster register, so every write -- on or off --
+        covers all four channels at once: the ones in ``channels`` get
+        ``on_volts``/0 V, every other channel gets 0 V for as long as the
+        gate runs (there is no partial-field write). That is the intended
+        behaviour for an unticked Excitation row (it must not be driven by
+        this gate), but it means this call is not safe to combine with an
+        independent DC level on a channel outside ``channels`` -- that level
+        would be zeroed the moment the gate starts."""
+        self.stop_aotf_digital_gate()
+        gap_s = max(0.0, float(period_s) - float(exposure_s))
+        self.aotf_gate_gap_s = gap_s
+        requested_lead = AOTF_GATE_DEFAULT_LEAD_S if lead_s is None else float(lead_s)
+        lead = max(0.0, min(requested_lead, gap_s - AOTF_GATE_SAFETY_MARGIN_S))
+        on_s = lead + float(exposure_s)
+        on_counts = volts_to_aotf_counts(on_volts)
+        on_cluster = aotf_level_cluster({ch: on_counts for ch in channels})
+        off_cluster = aotf_level_cluster({ch: 0 for ch in channels})
+        t_ref = self._free_run_t0 if t0 is None else float(t0)
+        self._gate_stop.clear()
+        self._gate_thread = threading.Thread(
+            target=self._aotf_gate_loop,
+            args=(t_ref, float(period_s), lead, on_s, on_cluster, off_cluster),
+            name="fpga-aotf-gate", daemon=True)
+        self.aotf_gate_active = True
+        self._gate_thread.start()
+        return lead
+
+    def _aotf_gate_loop(self, t0, period_s, lead_s, on_s, on_cluster, off_cluster):
+        regs = self._regs()
+        n = 0
+        while not self._gate_stop.is_set():
+            on_deadline = t0 + n * period_s - lead_s
+            if not _wait_until(on_deadline, self._gate_stop):
+                return
+            regs["AOTF ch (V)"].write(on_cluster)
+            regs["Set F.P. (T)"].write(True)
+            if not _wait_until(on_deadline + on_s, self._gate_stop):
+                return
+            regs["AOTF ch (V)"].write(off_cluster)
+            regs["Set F.P. (T)"].write(True)
+            n += 1
+
+    def stop_aotf_digital_gate(self) -> None:
+        """Stop the gate thread and force the gated channels back to 0 V.
+        Safe to call whether or not a gate is running."""
+        self._gate_stop.set()
+        if self._gate_thread is not None:
+            self._gate_thread.join(timeout=2.0)
+        self._gate_thread = None
+        self.aotf_gate_active = False
+        if self._session is not None:
+            try:
+                regs = self._regs()
+                regs["AOTF ch (V)"].write(dict(AOTF_ZERO))
+                regs["Set F.P. (T)"].write(True)
+            except Exception:
+                pass
 
     # -- Wvfrm2 content ----------------------------------------------------------
     def _set_pattern(self, words) -> None:
@@ -735,14 +879,13 @@ class FpgaTriggerController:
             self.safe_state()
             self.last_error = f"AO clamp did not take: Max/Min={self._last_ao_limits}"
             return False
-        # AOTF levels for the run: 0 V whenever clamped (nothing may light
-        # up), otherwise what the caller asked for. Read back.
-        # Whatever the caller asked for, clamped or not. This used to be
-        # overridden to {} under clamp_ao, which meant a simulate-on-FPGA run
-        # could never show any AOTF voltage at all -- the caller decides the
-        # policy now (MainWindow._start_acquisition), because "the AO outputs
-        # must not move" and "the laser must not light" are separate
-        # questions and only the operator knows the answer to the second.
+        # AOTF levels for the run: whatever the caller asked for, clamped or
+        # not. This used to be overridden to {} under clamp_ao, which meant a
+        # simulate-on-FPGA run could never show any AOTF voltage at all -- the
+        # caller decides the policy now (MainWindow._start_acquisition),
+        # because "the AO outputs must not move" and "the laser must not
+        # light" are separate questions and only the operator knows the
+        # answer to the second.
         self.set_aotf_levels(aotf_levels)
         # Waveform content: a repeating pattern of I64 words (all-zero by
         # default = every AO channel at 0 V). See pack_ao_word().

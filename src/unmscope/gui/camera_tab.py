@@ -138,6 +138,13 @@ class CameraTab(QWidget):
         self.exposure_spin.setDecimals(3)
         self.exposure_spin.setValue(100.0)
         self.exposure_spin.setAlignment(Qt.AlignRight)
+        # FIXED 2026-09-17 (user: "software slows down when some changes are
+        # made"): on_exposure_changed() does a camera SDK write + readback
+        # and a synchronous waveform-config disk save on every valueChanged.
+        # Without this, each of those runs once per keystroke while typing a
+        # number (Qt parses every partial digit) -- see _spin() in this file
+        # for the same fix already applied to the ROI/pixel fields.
+        self.exposure_spin.setKeyboardTracking(False)
         # Not on the LouisXIV panel (it is an ini setting there); placed in the
         # box's empty band. Read by the acquisition start.
         self.sync_readout_chk = QCheckBox("Sync readout (frame = exposure)", self)

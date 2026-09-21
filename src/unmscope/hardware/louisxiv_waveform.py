@@ -163,12 +163,26 @@ def fast_axis_line(xrange: float, offset: float, xpix: int, update_rate: int, ta
 def aotf_gate(line: FastAxisLine, aotf_cycle: str = "None") -> np.ndarray:
     """The AOTF level envelope for one fast-axis line, as a 0..1 multiplier.
 
-    OBSERVED on the running LouisXIV (2026-09-07, this rig's own settings:
-    ``AOTF cycle`` = None, X Single Direction, Fractional Flyback 0.15):
-    its X Waveform graph holds the AOTF trace at full level for the ENTIRE
-    125 ms cycle, straight through the galvo's return move -- no per-line
-    blanking at all. So with ``aotf_cycle`` = "None" this returns all ones,
-    which is what the rig actually does.
+    SETTLED 2026-09-08 against LouisXIV's own exported waveform (the
+    "Full Waveform" save, 13869 points at this rig's live settings: X range
+    100 um / 60 pixels, exposure 0.1 s, cycle 125.159 ms, Fractional
+    Flyback 0.15, 201 slices, AOTF cycle = None). Its ``AOTF (V) Ch2``
+    column is BINARY and blanks every line:
+
+        60 points high, 9 points low, repeated 201 times
+        = one on/off per slice, 69 points per line, 86.957 % duty
+
+    which is exactly ``on_points`` high and the return move low. This
+    function reproduces that array point-for-point over the whole stack.
+
+    **The blanking is therefore UNCONDITIONAL** -- it happens with
+    ``AOTF cycle`` = "None", which is what this rig runs. An earlier
+    reading of LouisXIV's X Waveform graph (2026-09-07) concluded the trace
+    was flat and made "None" return all ones; that was wrong. On that graph
+    a single 125 ms cycle is 86.96 % high and pinned to the top of its own
+    axis, so the 9-point notch simply did not render. ``aotf_cycle`` no
+    longer gates the blanking; it is kept as a parameter because LouisXIV
+    still has the control and it may yet select BETWEEN blanking patterns.
 
     LouisXIV's source does contain a blanking rule (``HHMI - Pockel Cell or
     AOTF Linear Ramp.vi``: on through the linear forward sweep, off for the
@@ -185,7 +199,8 @@ def aotf_gate(line: FastAxisLine, aotf_cycle: str = "None") -> np.ndarray:
     and the AO rate agree by construction. Bidirectional lines sweep both
     ways with no return move, so they stay on throughout.
     """
-    if str(aotf_cycle) == "None" or line.bidirectional:
+    if line.bidirectional:
+        # Both sweeps expose; there is no return move to blank.
         return np.ones(line.total_points)
     gate = np.zeros(line.total_points)
     gate[:max(0, line.on_points)] = 1.0
@@ -500,13 +515,13 @@ def build_louisxiv_waveform(*, exposure_s: float, cycle_s: float, x_range_v: flo
         _, ticks = _fit_block_to_cycle(len(x_block), n_pts, rate)
         n_pts = len(x_block)
 
-    scan = assemble_scan(x_block, slow_v, d_block, ticks)
-    # The laser modulation, one line's gate repeated per slice, alongside the
-    # AO channels so it can be inspected against them. Kept OUT of the packed
-    # AO words on purpose: the deployed bitfile's DMA cluster has no AOTF slot
-    # (Tiling/Filter sit there), so this is the planned modulation, not
-    # something the stream carries -- see the module docstring.
-    scan.channels["AOTF gate"] = np.tile(gate_block, len(slow_v))
+    # The laser modulation now travels IN the stream, as the per-point
+    # 'AOTF on?' bit of the AO DMA cluster, so the AOTF blanks through the
+    # galvo's return move the way LouisXIV's own exported waveform does
+    # (verified point-for-point, 2026-09-08 -- see aotf_gate). It used to be
+    # attached afterwards as a display-only channel, on the assumption that
+    # the deployed cluster had no AOTF slot; that assumption was never tested.
+    scan = assemble_scan(x_block, slow_v, d_block, ticks, aotf_gate_block=gate_block)
     notes = []
     if delays.any_shift:
         notes.append(

@@ -11,6 +11,7 @@ dependencies = [
     "pymmcore-plus",
     "qtpy",
     "nifpga",
+    "pyserial",
 ]
 
 [project.optional-dependencies]

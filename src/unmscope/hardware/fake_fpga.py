@@ -233,7 +233,8 @@ class FakeSession:
                 # Measured on the deployed bitfile (spikes/32): in the default
                 # AOTF mode, 'AOTF ch out (V)' follows 'AOTF ch (V)' as a DC
                 # level -- but only while the AO limits permit the gate
-                # ('AOTF on?'), so the clamp forces the AOTF off two ways.
+                # ('AOTF on?'). That permission now defaults to True, so the
+                # AO clamp on its own no longer turns the AOTF off.
                 self._recompute_aotf_out()
 
     def _recompute_aotf_out(self):

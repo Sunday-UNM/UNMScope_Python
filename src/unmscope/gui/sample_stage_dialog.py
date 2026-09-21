@@ -78,10 +78,12 @@ indicators' folder glyphs; the button icons.
 from __future__ import annotations
 
 import math
+import queue
+import time as _time
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QTimer, Qt, Signal
+from PySide6.QtCore import QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFrame,
@@ -99,7 +101,11 @@ from unmscope.fileio.stage_locations import (
 from unmscope.hardware.stage import (
     RotationStage, SimulatedMP285, SimulatedRotationStage, StageError, Vec3, XYZStage,
 )
+from unmscope.hardware.arduino_focus import (
+    DEFAULT_STEPS_PER_UM, FocusError, SimulatedArduinoFocus, ZFocusStage,
+)
 from unmscope.gui.widgets import rect_mapper
+from unmscope.gui.grid_sequence_dialog import GridSequenceDialog
 
 # -- measured colours (render, 2026-09-05) ------------------------------------------
 PANEL_BG = "#dddddd"        # (221,221,221) window background
@@ -124,10 +130,120 @@ SEQ_HEADERS = ["#", "Name", "X", "Y", "Z", "Z Rel. Off.", "Theta"]
 SEQ_WIDTHS = [26, 128, 66, 64, 59, 81, 71]
 ROW_H, HEADER_H = 18, 19
 LOCK_GLYPH, UNLOCK_GLYPH = "■ ", "□ "   # stand-ins for the lock / unlock item symbols
+Z_POLL_MS = 250          # Arduino Z position refresh interval (ms)
 
 
 #: Render rect -> tab-page rect.
 _pg = rect_mapper(PX, PY)
+
+
+# ---------------------------------------------------------------------------
+# Arduino Z focus workers (actor pattern: one thread owns the serial port)
+# ---------------------------------------------------------------------------
+
+class _ZConnectWorker(QThread):
+    """3 s Arduino boot warmup in a background thread."""
+    connected = Signal(object)   # ready ZFocusStage
+    error = Signal(str)
+
+    def __init__(self, stage: ZFocusStage, parent=None):
+        super().__init__(parent)
+        self._stage = stage
+
+    def run(self) -> None:
+        try:
+            self._stage.connect()
+            self.connected.emit(self._stage)
+        except FocusError as exc:
+            self.error.emit(str(exc))
+        except Exception as exc:
+            self.error.emit(f"{type(exc).__name__}: {exc}")
+
+
+class _ZActor(QThread):
+    """The ONE thread that owns the Arduino Z serial port.
+
+    Commands arrive via ``send_cmd()`` (a tuple); results leave via Qt signals.
+    Polling (GET_POS every Z_POLL_MS ms) happens automatically when idle.
+    """
+
+    z_position   = Signal(int)    # periodic GET_POS step count
+    z_move_done  = Signal(int)    # MOVE finished: final step count
+    z_move_error = Signal(str)    # MOVE or SET_ZERO failed
+    z_zero_done  = Signal()       # SET_ZERO finished
+    z_poll_error = Signal(str)    # GET_POS failed
+
+    _STOP = object()
+
+    def __init__(self, stage: ZFocusStage, parent=None):
+        super().__init__(parent)
+        self._stage = stage
+        self._q: queue.Queue = queue.Queue()
+
+    def send_cmd(self, cmd) -> None:
+        self._q.put(cmd)
+
+    def stop(self) -> None:
+        self._q.put(self._STOP)
+
+    def run(self) -> None:
+        poll_interval = Z_POLL_MS / 1000.0
+        last_poll = _time.monotonic() - poll_interval
+        while True:
+            cmd = None
+            try:
+                cmd = self._q.get_nowait()
+            except queue.Empty:
+                pass
+            if cmd is self._STOP:
+                break
+            if cmd is not None:
+                kind = cmd[0]
+                if kind == 'move':
+                    try:
+                        final = self._stage.move_relative_steps(cmd[1])
+                        self.z_move_done.emit(final)
+                    except FocusError as exc:
+                        self.z_move_error.emit(str(exc))
+                    last_poll = _time.monotonic()
+                    continue
+                elif kind == 'set_zero':
+                    try:
+                        self._stage.set_zero()
+                        self.z_zero_done.emit()
+                    except FocusError as exc:
+                        self.z_move_error.emit(str(exc))
+                    continue
+            now = _time.monotonic()
+            if now - last_poll >= poll_interval:
+                if self._stage.is_connected:
+                    try:
+                        steps = self._stage.get_position_steps()
+                        self.z_position.emit(steps)
+                    except FocusError as exc:
+                        self.z_poll_error.emit(str(exc))
+                last_poll = now
+            else:
+                _time.sleep(0.02)
+
+
+class _XYConnectWorker(QThread):
+    """Connect the ASI X/Y stage on a background thread."""
+    connected = Signal(object)   # ready XYZStage
+    error = Signal(str)
+
+    def __init__(self, stage: XYZStage, parent=None):
+        super().__init__(parent)
+        self._stage = stage
+
+    def run(self) -> None:
+        try:
+            self._stage.connect()
+            self.connected.emit(self._stage)
+        except StageError as exc:
+            self.error.emit(str(exc))
+        except Exception as exc:
+            self.error.emit(f"{type(exc).__name__}: {exc}")
 
 
 def _label(parent, text, rect, *, bold=False, align=Qt.AlignLeft | Qt.AlignVCenter, color=None) -> QLabel:
@@ -305,6 +421,12 @@ class SampleStageDialog(QWidget):
                  sequence: LocationSequence | None = None, saved: SavedLocations | None = None,
                  settings: Simp285Settings | None = None, ini_path: Path | None = None,
                  real_stage_factory: Callable[[Simp285Settings], XYZStage] | None = None,
+                 # --- Arduino Z focus ---
+                 z_stage: ZFocusStage | None = None,
+                 real_z_factory: Callable[[str], ZFocusStage] | None = None,
+                 z_com_port: str = "COM8",
+                 z_steps_per_um: float = DEFAULT_STEPS_PER_UM,
+                 # ---
                  rel_offset_provider: Callable[[], float] | None = None,
                  log: Callable[[str], None] | None = None, parent=None):
         super().__init__(parent, Qt.Window)
@@ -313,16 +435,34 @@ class SampleStageDialog(QWidget):
         self.setStyleSheet(f"SampleStageDialog {{ background: {PANEL_BG}; }}")
         self._log = log or (lambda msg: None)
         self._real_factory = real_stage_factory
+        self._real_z_factory = real_z_factory
         self._rel_offset_provider = rel_offset_provider or (lambda: 0.0)
         self._busy = False
         self._confirm: Callable[[str], bool] = self._ask
         self._notify: Callable[[str], None] = self._info
 
+        # Z-axis state (Arduino Z focus)
+        self._z_steps_per_um: float = float(z_steps_per_um)
+        self._current_z_um: float = 0.0
+        self._z_actor: _ZActor | None = None
+        self._z_connect_worker: _ZConnectWorker | None = None
+        self._z_com_port = z_com_port
+        self._xy_connect_worker: _XYConnectWorker | None = None
+        self._grid_dialog: GridSequenceDialog | None = None
+
         # settings: the UNMScope ini copy ('Init Controls' reads the register)
         self.ini_path = ini_path if ini_path is not None else ensure_user_ini(dest=user_ini_path())
         self.settings = settings if settings is not None else Simp285Settings.load(self.ini_path)
         self.rotation_settings = RotationStageSettings.load(self.ini_path)
+        # X/Y stage (ASI MS-2000 or simulated MP-285 for X/Y; Z always via Arduino)
         self.stage: XYZStage = stage if stage is not None else self._make_stage(self.settings, True)
+        # Z stage (Arduino or simulated)
+        if z_stage is not None:
+            self.z_stage: ZFocusStage = z_stage
+        else:
+            sim_z = SimulatedArduinoFocus(steps_per_um=z_steps_per_um)
+            sim_z.connect()
+            self.z_stage = sim_z
         self.rotation: RotationStage = rotation if rotation is not None else SimulatedRotationStage(
             self.rotation_settings.speed_deg_s, self.rotation_settings.settling_ms)
         self.saved = saved if saved is not None else SavedLocations(
@@ -332,6 +472,7 @@ class SampleStageDialog(QWidget):
         self.sequence.add_listener(lambda _seq: self._refresh_sequence_table())
 
         self._build()
+        self._start_z_actor()
         self._initialize()
         self._timer = QTimer(self)
         self._timer.setInterval(self.AUTO_REFRESH_MS)
@@ -389,10 +530,8 @@ class SampleStageDialog(QWidget):
         self.seq_recall_btn = _button(self, "Recall", (575, 421, 117, 33), self.on_recall_sequence)
         self.seq_remove_btn = _button(self, "Remove", (575, 469, 117, 33), self.on_remove_sequence)
         self.seq_remove_all_btn = _button(self, "Remove All", (577, 517, 118, 34), self.on_sequence_remove_all)
-        self.gen_grid_btn = _button(self, "Gen. Grid Sequence", (577, 566, 118, 34))
-        self.gen_grid_btn.setEnabled(False)
-        self.gen_grid_btn.setToolTip("Generate Multipoint Grid Sequence GUI: not ported (multi-position "
-                                     "acquisition is out of scope for now)")
+        self.gen_grid_btn = _button(self, "Gen. Grid Sequence", (577, 566, 118, 34),
+                                    self._show_grid_sequence)
 
         # Simulate? (the VI's connector-pane switch)
         _label(self, "Simulate?", (216, 664, 60, 16))
@@ -407,6 +546,11 @@ class SampleStageDialog(QWidget):
 
     def _build_xyz_page(self, page: QWidget) -> None:
         _label(page, "Current Location (um)", _pg(14, 39, 140, 18), bold=True)
+        # Connection status indicators — compact dots right of the title label
+        self.asi_ctrl_indicator = _label(page, "● ASI: Simulated", (152, 13, 120, 16))
+        self.asi_ctrl_indicator.setStyleSheet("color: #888888; background: transparent;")
+        self.z_ctrl_indicator = _label(page, "● Z: Simulated", (284, 13, 100, 16))
+        self.z_ctrl_indicator.setStyleSheet("color: #888888; background: transparent;")
         self.readout = QFrame(page)
         self.readout.setGeometry(*_pg(19, 62, 424, 30))
         self.readout.setStyleSheet(f"background: {READOUT_BG};")
@@ -435,27 +579,55 @@ class SampleStageDialog(QWidget):
         self.com_error_label.hide()
 
     def _build_settings_page(self, page: QWidget) -> None:
-        _label(page, "COM Port", _pg(23, 30, 80, 16))
-        frame = QFrame(page); frame.setGeometry(*_pg(25, 49, 116, 34)); frame.setObjectName("visaFrame")
-        frame.setStyleSheet("QFrame#visaFrame { border: 1px solid #cccccc; border-radius: 4px; background: white; }")
+        # -- row 1: two COM ports side-by-side, Enable/Simulate, XYZ assignment --
+        _label(page, "ASI X/Y COM Port", (12, 4, 112, 16))
+        frame_asi = QFrame(page); frame_asi.setGeometry(12, 23, 108, 30)
+        frame_asi.setObjectName("visaFrameASI")
+        frame_asi.setStyleSheet("QFrame#visaFrameASI { border: 1px solid #cccccc; border-radius: 4px; background: white; }")
         self.com_port_combo = QComboBox(page)
-        self.com_port_combo.setGeometry(*_pg(43, 54, 92, 20))
+        self.com_port_combo.setGeometry(27, 28, 86, 18)
         self.com_port_combo.setEditable(True)
         self.com_port_combo.addItems(["COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8"])
-        self.enable_stage_chk = _checkbox(page, "Enable Stage", _pg(159, 56, 110, 13))
-        self.simulate_chk = _checkbox(page, "Simulate", _pg(276, 56, 90, 13))
+
+        _label(page, "Arduino Z COM Port", (130, 4, 120, 16))
+        frame_ard = QFrame(page); frame_ard.setGeometry(130, 23, 108, 30)
+        frame_ard.setObjectName("visaFrameZ")
+        frame_ard.setStyleSheet("QFrame#visaFrameZ { border: 1px solid #cccccc; border-radius: 4px; background: white; }")
+        self.z_com_port_combo = QComboBox(page)
+        self.z_com_port_combo.setGeometry(145, 28, 82, 18)
+        self.z_com_port_combo.setEditable(True)
+        self.z_com_port_combo.addItems(["COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8"])
+
+        self.enable_stage_chk = _checkbox(page, "Enable Stage", (260, 26, 110, 14))
+        self.simulate_chk = _checkbox(page, "Simulate", (260, 44, 90, 14))
         _label(page, "XYZ Assignment", _pg(400, 32, 120, 16))
         self.assignment_combo = QComboBox(page)
         self.assignment_combo.setGeometry(*_pg(400, 51, 116, 21))
         self.assignment_combo.addItems(list(XYZ_ASSIGNMENTS))
         _label(page, ASSIGNMENT_CAPTION, _pg(403, 76, 130, 16))
-        _label(page, "Stage Velocity", _pg(25, 92, 90, 16))
-        self.velocity = _NumericControl(page, _pg(25, 111, 68, 35), _pg(48, 116, 39, 23), decimals=0, lo=0, hi=3000, step=100)
-        _label(page, "um/s", _pg(93, 124, 30, 16))
-        _label(page, "Settling Time", _pg(155, 92, 90, 16))
-        self.settling = _NumericControl(page, _pg(155, 111, 68, 35), _pg(178, 116, 39, 23), decimals=0, lo=0, hi=100000, step=10)
-        _label(page, "ms", _pg(225, 126, 20, 16))
-        self.save_settings_btn = _button(page, "Save Settings", _pg(473, 134, 86, 34), self.on_save_settings)
+
+        # -- row 2: Connect / Disconnect for each stage (status indicator + buttons) --
+        # ASI X/Y row
+        self.asi_status_indicator = _label(page, "●", (12, 59, 10, 16))
+        self.asi_status_indicator.setStyleSheet("color: #888888; background: transparent;")
+        self.asi_status_text = _label(page, "Simulated", (24, 59, 78, 16))
+        self.asi_connect_btn = _button(page, "Connect", (104, 56, 56, 20), self._on_asi_connect_clicked)
+        self.asi_disconnect_btn = _button(page, "Disconnect", (162, 56, 70, 20), self._on_asi_disconnect_clicked)
+        # Arduino Z row
+        self.z_status_indicator = _label(page, "●", (12, 79, 10, 16))
+        self.z_status_indicator.setStyleSheet("color: #888888; background: transparent;")
+        self.z_status_text = _label(page, "Simulated", (24, 79, 78, 16))
+        self.z_connect_btn = _button(page, "Connect", (104, 76, 56, 20), self._on_z_connect_clicked)
+        self.z_disconnect_btn = _button(page, "Disconnect", (162, 76, 70, 20), self._on_z_disconnect_clicked)
+
+        # -- row 3: Stage Velocity, Settling Time, Save Settings (shifted down to make room) --
+        _label(page, "Stage Velocity", (14, 102, 90, 16))
+        self.velocity = _NumericControl(page, (14, 120, 68, 32), (36, 125, 39, 22), decimals=0, lo=0, hi=3000, step=100)
+        _label(page, "um/s", (82, 132, 30, 16))
+        _label(page, "Settling Time", (144, 102, 90, 16))
+        self.settling = _NumericControl(page, (144, 120, 68, 32), (166, 125, 39, 22), decimals=0, lo=0, hi=100000, step=10)
+        _label(page, "ms", (214, 132, 20, 16))
+        self.save_settings_btn = _button(page, "Save Settings", (462, 118, 86, 34), self.on_save_settings)
 
     def _build_rotation_page(self, page: QWidget) -> None:
         # Laid out from the render; greyed: the PI U-651 is disabled in the ini.
@@ -528,12 +700,16 @@ class SampleStageDialog(QWidget):
         self.load_locations_file()
         self.load_sequence_file()
         self.refresh_position()
+        # Initial connection status (both stages start simulated)
+        self._update_asi_status('simulated')
+        self._update_z_status('simulated')
 
     def _init_controls(self) -> None:
         """'Init Controls': SIMP-285 INI FG 'Read Register' -> the settings page."""
         s = self.settings
         self.enable_stage_chk.setChecked(s.enabled)
         self.com_port_combo.setCurrentText(s.com_port)
+        self.z_com_port_combo.setCurrentText(self._z_com_port)
         self.velocity.setValue(s.velocity_um_s)
         self.settling.setValue(s.settling_ms)
         self.simulate_chk.setChecked(s.simulate)
@@ -548,6 +724,210 @@ class SampleStageDialog(QWidget):
             stage = self._real_factory(settings)
         stage.connect()
         return stage
+
+    # -- Z axis (Arduino focus) management ------------------------------------------------
+    def _start_z_actor(self) -> None:
+        """Create and start the Z serial actor (called after z_stage is ready)."""
+        if self._z_actor is not None:
+            self._z_actor.stop()
+            self._z_actor.wait()
+        self._z_actor = _ZActor(self.z_stage, parent=self)
+        self._z_actor.z_position.connect(self._on_z_position, Qt.QueuedConnection)
+        self._z_actor.z_move_done.connect(self._on_z_move_done, Qt.QueuedConnection)
+        self._z_actor.z_move_error.connect(self._on_z_move_error, Qt.QueuedConnection)
+        self._z_actor.z_zero_done.connect(self._on_z_zero_done, Qt.QueuedConnection)
+        self._z_actor.z_poll_error.connect(self._on_z_poll_error, Qt.QueuedConnection)
+        self._z_actor.start()
+
+    def _connect_z_stage(self, com_port: str) -> None:
+        """(Re-)connect the Arduino Z stage on a background thread."""
+        if self._z_actor is not None:
+            self._z_actor.stop()
+            self._z_actor.wait()
+            self._z_actor = None
+        try:
+            self.z_stage.disconnect()
+        except Exception:
+            pass
+        if self._real_z_factory is not None:
+            self.z_stage = self._real_z_factory(com_port)
+        else:
+            sim = SimulatedArduinoFocus(steps_per_um=self._z_steps_per_um)
+            sim.connect()
+            self.z_stage = sim
+            self._start_z_actor()
+            self._update_z_status('simulated')
+            return
+        worker = _ZConnectWorker(self.z_stage, parent=self)
+        self._z_connect_worker = worker
+        worker.connected.connect(self._on_z_connected, Qt.QueuedConnection)
+        worker.error.connect(self._on_z_connect_error, Qt.QueuedConnection)
+        worker.start()
+
+    def _on_z_connected(self, stage: ZFocusStage) -> None:
+        self.z_stage = stage
+        self._start_z_actor()
+        self._update_z_status('connected')
+        self._log("Arduino Z focus connected")
+
+    def _on_z_connect_error(self, msg: str) -> None:
+        self._update_z_status('error', f"Error: {msg}")
+        self._log(f"Arduino Z focus connect error: {msg}")
+        # Fall back to simulated so polling continues
+        sim = SimulatedArduinoFocus(steps_per_um=self._z_steps_per_um)
+        sim.connect()
+        self.z_stage = sim
+        self._start_z_actor()
+
+    # -- connection status helpers ---------------------------------------------------
+    _STATUS_COLORS = {
+        'connected':    "#00cc00",   # green
+        'disconnected': "#cc3333",   # red
+        'connecting':   "#ff9900",   # amber
+        'simulated':    "#888888",   # grey
+        'error':        "#cc3333",   # red
+    }
+    _STATUS_TEXTS = {
+        'connected':    "Connected",
+        'disconnected': "Not connected",
+        'connecting':   "Connecting...",
+        'simulated':    "Simulated",
+        'error':        "Error",
+    }
+
+    def _update_asi_status(self, state: str, detail: str = "") -> None:
+        """Update all ASI X/Y connection indicators. state: 'connected'|'disconnected'|
+        'connecting'|'simulated'|'error'. Provide detail for error messages."""
+        color = self._STATUS_COLORS.get(state, "#888888")
+        text = detail if detail else self._STATUS_TEXTS.get(state, state)
+        if hasattr(self, 'asi_status_indicator'):
+            self.asi_status_indicator.setStyleSheet(f"color: {color}; background: transparent;")
+            self.asi_status_text.setText(text)
+        if hasattr(self, 'asi_ctrl_indicator'):
+            self.asi_ctrl_indicator.setStyleSheet(f"color: {color}; background: transparent;")
+            self.asi_ctrl_indicator.setText(f"● ASI: {text}")
+
+    def _update_z_status(self, state: str, detail: str = "") -> None:
+        """Update all Arduino Z connection indicators."""
+        color = self._STATUS_COLORS.get(state, "#888888")
+        text = detail if detail else self._STATUS_TEXTS.get(state, state)
+        if hasattr(self, 'z_status_indicator'):
+            self.z_status_indicator.setStyleSheet(f"color: {color}; background: transparent;")
+            self.z_status_text.setText(text)
+        if hasattr(self, 'z_ctrl_indicator'):
+            self.z_ctrl_indicator.setStyleSheet(f"color: {color}; background: transparent;")
+            self.z_ctrl_indicator.setText(f"● Z: {text}")
+
+    # -- ASI X/Y connect/disconnect buttons -----------------------------------------
+    def _on_asi_connect_clicked(self) -> None:
+        com_port = self.com_port_combo.currentText().strip()
+        if not com_port:
+            return
+        self._update_asi_status('connecting')
+        self._connect_xy_stage(com_port)
+
+    def _on_asi_disconnect_clicked(self) -> None:
+        """Force-disconnect ASI stage and fall back to simulated."""
+        if self._xy_connect_worker is not None and self._xy_connect_worker.isRunning():
+            return  # don't interrupt an in-flight connect
+        try:
+            self.stage.disconnect()
+        except Exception:
+            pass
+        sim = SimulatedMP285(self.settings.velocity_um_s, self.settings.settling_ms,
+                             self.settings.xyz_assignment)
+        sim.connect()
+        self.stage = sim
+        self._update_asi_status('disconnected')
+
+    def _connect_xy_stage(self, com_port: str) -> None:
+        """(Re-)connect the ASI X/Y stage on a background thread."""
+        if self._real_factory is None:
+            self._update_asi_status('simulated')
+            return
+        # Build a settings snapshot with the target COM port
+        s = Simp285Settings()
+        s.enabled = True
+        s.com_port = com_port
+        s.velocity_um_s = self.settings.velocity_um_s
+        s.settling_ms = self.settings.settling_ms
+        s.simulate = False
+        s.xyz_assignment = self.settings.xyz_assignment
+        try:
+            new_stage = self._real_factory(s)
+        except Exception as exc:
+            self._update_asi_status('error', f"Init: {exc}")
+            self._log(f"ASI init error: {exc}")
+            return
+        try:
+            self.stage.disconnect()
+        except Exception:
+            pass
+        worker = _XYConnectWorker(new_stage, parent=self)
+        self._xy_connect_worker = worker
+        worker.connected.connect(self._on_xy_connected, Qt.QueuedConnection)
+        worker.error.connect(self._on_xy_connect_error, Qt.QueuedConnection)
+        worker.start()
+
+    def _on_xy_connected(self, stage: XYZStage) -> None:
+        self.stage = stage
+        self._update_asi_status('connected')
+        self.com_error_label.hide()
+        self._log("ASI X/Y stage connected")
+
+    def _on_xy_connect_error(self, msg: str) -> None:
+        self._update_asi_status('error', f"Error: {msg}")
+        self._log(f"ASI X/Y connect error: {msg}")
+        sim = SimulatedMP285(self.settings.velocity_um_s, self.settings.settling_ms,
+                             self.settings.xyz_assignment)
+        sim.connect()
+        self.stage = sim
+
+    # -- Arduino Z connect/disconnect buttons ----------------------------------------
+    def _on_z_connect_clicked(self) -> None:
+        com_port = self.z_com_port_combo.currentText().strip()
+        if not com_port:
+            return
+        self._z_com_port = com_port
+        self._update_z_status('connecting')
+        self._connect_z_stage(com_port)
+
+    def _on_z_disconnect_clicked(self) -> None:
+        """Force-disconnect Arduino Z and fall back to simulated."""
+        if self._z_actor is not None:
+            self._z_actor.stop()
+            self._z_actor.wait()
+            self._z_actor = None
+        try:
+            self.z_stage.disconnect()
+        except Exception:
+            pass
+        sim = SimulatedArduinoFocus(steps_per_um=self._z_steps_per_um)
+        sim.connect()
+        self.z_stage = sim
+        self._start_z_actor()
+        self._update_z_status('disconnected')
+
+    # -- Z position / command slots -------------------------------------------------------
+    def _on_z_position(self, steps: int) -> None:
+        """Called by _ZActor on each GET_POS poll."""
+        self._current_z_um = steps / self._z_steps_per_um
+        self._show_position((self._current[0], self._current[1], self._current_z_um))
+
+    def _on_z_move_done(self, steps: int) -> None:
+        self._current_z_um = steps / self._z_steps_per_um
+        self._show_position((self._current[0], self._current[1], self._current_z_um))
+
+    def _on_z_move_error(self, msg: str) -> None:
+        self.com_error_label.show()
+        self._log(f"Z focus: {msg}")
+
+    def _on_z_zero_done(self) -> None:
+        self._current_z_um = 0.0
+        self._show_position((self._current[0], self._current[1], 0.0))
+
+    def _on_z_poll_error(self, msg: str) -> None:
+        self._log(f"Z focus poll: {msg}")
 
     # -- helpers -------------------------------------------------------------------------
     def _ask(self, text: str) -> bool:
@@ -605,12 +985,12 @@ class SampleStageDialog(QWidget):
 
     # -- stage cases ------------------------------------------------------------------------
     def refresh_position(self) -> None:
-        """'Refresh Position': Query Position -> Current Location; the COM
-        error indicator follows the error status."""
+        """'Refresh Position': Query X/Y from the ASI stage; Z comes from the
+        cached Arduino Z position (updated continuously by _ZActor)."""
         try:
-            pos = self.stage.get_position_um()
+            pos = self.stage.get_position_um()  # (x, y, 0.0) for ASI
             self.moving = self.stage.is_moving()
-            self._show_position(pos)
+            self._show_position((pos[0], pos[1], self._current_z_um))
             self.com_error_label.hide()
         except StageError as e:
             self.com_error_label.show()
@@ -638,29 +1018,42 @@ class SampleStageDialog(QWidget):
         self._busy_call(lambda: self.set_position(xyz))
 
     def set_position(self, xyz: Vec3) -> None:
-        """'Set Position': SIMP-285 Set Position with Wait for Move = 'Wait for Moves'."""
+        """'Set Position': X/Y to ASI stage; Z delta to the Arduino Z actor."""
+        # Move X/Y via ASI (blocking; typically < 1 s for jog-sized moves)
         try:
-            self.stage.move_absolute_um(xyz, wait=self.wait_for_moves_chk.isChecked())
+            self.stage.move_absolute_um((xyz[0], xyz[1], 0.0),
+                                        wait=self.wait_for_moves_chk.isChecked())
             self.moving = self.stage.is_moving()
-            self._show_position(self.stage.get_position_um())
+            pos = self.stage.get_position_um()
+            self._show_position((pos[0], pos[1], self._current_z_um))
             self.com_error_label.hide()
         except StageError as e:
             self.com_error_label.show()
             self._log(f"Stage: {e}")
+        # Move Z via Arduino actor (non-blocking: move_done signal updates display)
+        if self._z_actor is not None and self.z_stage.is_connected:
+            delta_um = xyz[2] - self._current_z_um
+            delta_steps = int(round(delta_um * self._z_steps_per_um))
+            if delta_steps != 0:
+                self._z_actor.send_cmd(('move', delta_steps))
 
     def on_set_origin(self) -> None:
-        """[2] "Set current position as origin?" -> 'Set Origin'."""
+        """[2] "Set current position as origin?" -> 'Set Origin' on XY + SET_ZERO on Z."""
         if not self._confirm("Set current position as origin?"):
             return
 
         def do():
             try:
                 self.stage.set_origin()
-                self._show_position(self.stage.get_position_um())
+                pos = self.stage.get_position_um()
+                self._show_position((pos[0], pos[1], self._current_z_um))
             except StageError as e:
                 self.com_error_label.show()
                 self._log(f"Stage: {e}")
         self._busy_call(do)
+        # Also zero the Arduino Z (non-blocking via actor)
+        if self._z_actor is not None and self.z_stage.is_connected:
+            self._z_actor.send_cmd(('set_zero',))
 
     def _on_simulate_toggled(self, checked: bool) -> None:
         self.simulate_switch.setText("Simulated" if checked else "Real")
@@ -681,20 +1074,31 @@ class SampleStageDialog(QWidget):
             self.stage = SimulatedMP285(self.settings.velocity_um_s, self.settings.settling_ms,
                                         self.settings.xyz_assignment)
             self.stage.connect()
+        is_sim = isinstance(self.stage, SimulatedMP285)
+        self._update_asi_status('simulated' if is_sim else 'connected')
         self.refresh_position()
 
     # -- settings page -----------------------------------------------------------------------
     def on_save_settings(self) -> None:
         """[14] 'Update Settings': write the [SIMP-285 3D Stage] section of the
-        UNMScope ini copy, then 'Init HW'."""
-        s = Simp285Settings(
-            enabled=self.enable_stage_chk.isChecked(), com_port=self.com_port_combo.currentText().strip(),
-            velocity_um_s=self.velocity.value(), settling_ms=self.settling.value(),
-            simulate=self.simulate_chk.isChecked(), xyz_assignment=self.assignment_combo.currentIndex())
+        UNMScope ini copy, then re-init the X/Y stage and reconnect Arduino Z."""
+        s = Simp285Settings()
+        s.enabled = self.enable_stage_chk.isChecked()
+        s.com_port = self.com_port_combo.currentText().strip()
+        s.velocity_um_s = self.velocity.value()
+        s.settling_ms = self.settling.value()
+        s.simulate = self.simulate_chk.isChecked()
+        s.xyz_assignment = self.assignment_combo.currentIndex()
         s.save(self.ini_path)
         self.settings = s
         self.settings_saved.emit(s)
         self._busy_call(self.init_hw)
+        # Reconnect the Arduino Z if the COM port changed
+        new_z_port = self.z_com_port_combo.currentText().strip()
+        if new_z_port and new_z_port != self._z_com_port:
+            self._z_com_port = new_z_port
+            self._update_z_status('connecting')
+            self._connect_z_stage(new_z_port)
 
     # -- saved locations ----------------------------------------------------------------------
     def load_locations_file(self) -> None:
@@ -837,6 +1241,21 @@ class SampleStageDialog(QWidget):
             self.sequence.remove_all()
             self.sequence_changed.emit()
 
+    # -- Generate Grid Sequence ----------------------------------------------------------------
+    def _show_grid_sequence(self) -> None:
+        """[22] Gen. Grid Sequence -> opens/raises the GenerateMultipointGridSequenceGUI."""
+        if self._grid_dialog is None:
+            self._grid_dialog = GridSequenceDialog(
+                current_xyz_provider=lambda: self._current,
+                sequence=self.sequence,
+                sequence_changed=self.sequence_changed,
+                log=self._log,
+                parent=self,
+            )
+        self._grid_dialog.show()
+        self._grid_dialog.raise_()
+        self._grid_dialog.activateWindow()
+
     # -- window ----------------------------------------------------------------------------------
     def closeEvent(self, event) -> None:
         """[7] Panel Close? -> 'Exit': the panel is hidden, not destroyed."""
@@ -844,9 +1263,17 @@ class SampleStageDialog(QWidget):
         self.hide()
 
     def shutdown(self) -> None:
-        """For the owner's exit: stop polling and release the stage."""
+        """For the owner's exit: stop polling, stop Z actor, release both stages."""
         self._timer.stop()
+        if self._z_actor is not None:
+            self._z_actor.stop()
+            self._z_actor.wait()
+            self._z_actor = None
         try:
             self.stage.disconnect()
+        except Exception:
+            pass
+        try:
+            self.z_stage.disconnect()
         except Exception:
             pass

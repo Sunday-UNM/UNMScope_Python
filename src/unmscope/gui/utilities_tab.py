@@ -32,6 +32,9 @@ TOOLS = [  # (label, wired-callback name or None), LouisXIV's reading order
     ("X Galvo Z\nCorrections", None), ("HW Config", "hw_config"),
     ("Imagine Optics", None),
 ]
+# Note: "Nikon Z Focus" and "ASI X/Y Stage" were removed (2026-09-14):
+# both are now integrated into the unified "Sample Stage Control" window,
+# which has two COM port connections (COM5 for ASI X/Y, COM8 for Arduino Z).
 COL_X = (21 - 8, 201 - 8)
 ROW_Y0, ROW_PITCH = 113 - 76, 72
 BTN_W, BTN_H = 152, 56

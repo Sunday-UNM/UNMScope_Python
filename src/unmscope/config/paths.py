@@ -15,8 +15,32 @@ def user_dir() -> Path:
 
 
 #: LouisXIV's install (read-only input everywhere; Python never writes here).
-LOUISXIV_ROOT = Path(r"H:\UNM_Lightsheet\UNMScope_Source")
+LOUISXIV_ROOT = Path(r"D:\UNM_Lightsheet\UNMScope_Source")
 LOUISXIV_SUPPORT_DIR = LOUISXIV_ROOT / "SPIM" / "SPIM Support files"
+
+# ---------------------------------------------------------------------------
+# FPGA bitfile -- searched in order; first path that exists wins.
+# The canonical LouisXIV location is under LOUISXIV_ROOT / bin / data /,
+# but on this workstation the bitfile lives under C:\UnmScopeOpen\fpga\.
+# ---------------------------------------------------------------------------
+_BITFILE_NAME = "SPIMFPGAProject_SPIM_MAIN_VI.lvbitx"
+_BITFILE_CANDIDATES = [
+    # Canonical LouisXIV install location (primary)
+    LOUISXIV_ROOT / "bin" / "data" / _BITFILE_NAME,
+    # UNMScope open-source versioned builds -- use the newest hardware build
+    # (v0_3_4) whose register names match what fpga_trigger.py expects.
+    # The bare C:\UnmScopeOpen\fpga\ copy is an older bitfile with different
+    # AOTF register names ("AOTF0" instead of "AOTF ch 0") and must NOT be
+    # used.
+    Path(r"C:\UnmScopeOpen\microscope_gui_hardware_v0_3_4\hardware") / _BITFILE_NAME,
+    Path(r"C:\UnmScopeOpen\microscope_gui_hardware_v0_3_3\hardware") / _BITFILE_NAME,
+    Path(r"C:\UnmScopeOpen\microscope_gui_hardware_v0_3_2\hardware") / _BITFILE_NAME,
+    Path(r"C:\UnmScopeOpen\microscope_gui_hardware_v0_3_1\hardware") / _BITFILE_NAME,
+]
+FPGA_BITFILE: Path = next(
+    (p for p in _BITFILE_CANDIDATES if p.exists()),
+    _BITFILE_CANDIDATES[0],   # fall back to original so errors stay meaningful
+)
 
 
 def user_ini() -> Path:

@@ -52,6 +52,7 @@ import datetime
 import re
 import threading
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -90,6 +91,7 @@ from unmscope.gui.hw_config_dialog import show_hw_config_dialog
 from unmscope.gui.sample_stage_dialog import SampleStageDialog
 from unmscope.gui.nikon_focus_dialog import real_focus_factory
 from unmscope.gui.asi_stage_dialog import real_asi_factory
+from unmscope.hardware.stage import StageError, Vec3
 from unmscope.config.um_per_volt import load_calibration_from_unmscope_ini
 from unmscope.config.waveform_config import (
     AxisSettings, WaveformConfig, camera_cycle_s, engine_times,
@@ -184,6 +186,65 @@ class StackSaveSignals(QObject):
     failed = Signal(str)
 
 
+class SequenceSignals(QObject):
+    """Bridges the background sequence-transition thread (stage moves,
+    timepoint-round waits) back to the GUI thread -- same reasoning as
+    FpgaSignals/StackSaveSignals. Added 2026-09-22 for multi-timepoint/
+    multi-position acquisition: the transition between two stacks can
+    involve a real stage move (seconds) or a user-set Timepoint Delay
+    (up to a full day), and doing either on the GUI thread would freeze
+    the window for that whole span -- the exact class of bug the
+    StackSaveSignals fix above already exists to avoid for the TIFF write,
+    happening here far more often (every position, not just every stack)."""
+    advance = Signal()      # transition finished normally -- arm the next stack
+    error = Signal(str)     # stage move failed or timed out -- abort the sequence
+
+
+@dataclass
+class _SaveJob:
+    """One queued background stack write -- see MainWindow._save_stack's
+    2026-09-22 fix (queued, not dropped, when a save is already in flight)."""
+    path: Path
+    stack: object
+    pixel_size_um: float
+    z_step_um: float
+    channel_name: str
+    exp: Path
+    acq_fields_extras: tuple[dict, dict]
+
+
+@dataclass
+class _AcqSequence:
+    """One multi-timepoint x multi-position acquisition run: an ordered
+    walk of (timepoint_idx, position_idx, xyz-or-None) steps. Built once by
+    MainWindow._build_acquisition_sequence; advanced one step at a time as
+    each stack finishes naturally. ``xyz`` is None when Multi-location is
+    off (Timepoints=Multi alone still repeats at the one implicit position,
+    xyz never moves)."""
+    steps: list[tuple[int, int, Vec3 | None]]
+    n_timepoints: int
+    n_positions: int
+    timepoint_delay_s: float
+    index: int = 0
+
+    def total_steps(self) -> int:
+        return len(self.steps)
+
+    def current(self) -> tuple[int, int, Vec3 | None]:
+        return self.steps[self.index]
+
+    def is_last(self) -> bool:
+        return self.index >= len(self.steps) - 1
+
+    def starts_new_timepoint_round(self) -> bool:
+        """True when advancing from the current step to the next one
+        crosses into a new timepoint round (so the transition should wait
+        out timepoint_delay_s first)."""
+        if self.is_last():
+            return False
+        return self.steps[self.index + 1][1] == 0 and self.steps[self.index + 1][0] != self.steps[self.index][0]
+
+
 class MainWindow(QMainWindow):
     #: The class used by "FPGA Connect". Tests swap in
     #: unmscope.hardware.fake_fpga.FakeFpgaTriggerController to run the
@@ -221,6 +282,21 @@ class MainWindow(QMainWindow):
         self.save_signals.finished.connect(self._on_stack_save_finished)
         self.save_signals.failed.connect(self._on_stack_save_failed)
         self._saving_stack = False     # one background TIFF write at a time
+        self._save_queue: list[_SaveJob] = []   # further stacks wait their turn, never dropped
+        # -- multi-timepoint / multi-position sequence (2026-09-22) --------
+        self.sequence_signals = SequenceSignals()
+        self.sequence_signals.advance.connect(self._on_sequence_advance)
+        self.sequence_signals.error.connect(self._on_sequence_error)
+        self._sequence: _AcqSequence | None = None     # None = plain single-stack run
+        self._sequence_abort = threading.Event()
+        # True only at the ONE true natural per-stack-completion call site
+        # (_on_fpga_frame_fired); every other _stop_acquisition() call site
+        # (Stop click, FPGA error, buffer overflow, disconnect, closeEvent,
+        # arm failure, frame-timeout) leaves this False, so a sequence
+        # defaults to ABORT, not advance, everywhere except the one place
+        # that means "this stack really finished" -- the safe direction for
+        # something that drives a stage unattended.
+        self._stack_finished_naturally = False
         self._trigger_period_s = 0.0
         self._triggers_fired = 0
         self._arm_time = 0.0           # perf_counter() when the FPGA was armed
@@ -822,29 +898,83 @@ class MainWindow(QMainWindow):
 
     def _build_timepoints_box(self) -> QWidget:
         # Borderless (matches the real panel -- no box outline around this
-        # section, unlike Z Galvo/Z Piezo/Dither Galvo). Only Single/1
-        # Timepoint Interval+Delay rows are visible in that case on the
-        # real panel (both user screenshots), so those 2 rows are omitted.
+        # section, unlike Z Galvo/Z Piezo/Dither Galvo). Single/1 hides the
+        # Timepoint Interval/Delay rows below (real panel, both user
+        # screenshots); Multi shows them.
+        #
+        # ADDED 2026-09-22 (user, reference photo of the real panel mid
+        # multi-position setup): "Single" was the only option; wired up
+        # "Multi" for real multi-timepoint acquisition (see
+        # _build_acquisition_sequence). Timepoint Interval is read-only/
+        # computed, NOT a separate wait timer -- no VI has been read for
+        # this rig's exact semantics, and the reference photo's own numbers
+        # (4 positions x 24.52 s Stack Acq Time is close to the shown
+        # 1:40.52 Timepoint Interval) suggest it reports how long one full
+        # timepoint round takes, not something to pad out to. Treating a
+        # possibly-computed field as a real wait if it isn't would silently
+        # add unwanted delays -- the safe failure direction is read-only.
+        # Timepoint Delay is the one true editable extra-pause-between-
+        # rounds field.
         box = QWidget()
         form = QGridLayout(box)
         form.setContentsMargins(0, 0, 0, 0)
         form.addWidget(QLabel("Timepoints"), 0, 0)
-        tp_combo = QComboBox(); tp_combo.addItems(["Single"]); tp_combo.setMinimumWidth(90)
+        self.tp_combo = tp_combo = QComboBox()
+        tp_combo.addItems(["Single", "Multi"])
+        tp_combo.setMinimumWidth(90)
         form.addWidget(tp_combo, 0, 1)
-        tp_spin = _narrow(QSpinBox(), 55); tp_spin.setRange(1, 9999); tp_spin.setValue(1)
+        self.tp_spin = tp_spin = _narrow(QSpinBox(), 55)
+        tp_spin.setRange(1, 9999)
+        tp_spin.setValue(1)
         form.addWidget(tp_spin, 0, 2)
         self.save_files_chk = QCheckBox("Save Files")
         form.addWidget(self.save_files_chk, 1, 0, 1, 3)
 
+        self.tp_interval_field = _narrow(QLineEdit("00:00.00"), 110)
+        self.tp_interval_field.setReadOnly(True)
+        self.tp_interval_field.setToolTip(
+            "Computed: how long one full timepoint round (all positions) "
+            "takes. Not independently settable -- see Timepoint Delay for "
+            "an extra pause between rounds.")
+        self.tp_delay_spin = _narrow(QDoubleSpinBox(), 110)
+        self.tp_delay_spin.setRange(0.0, 86400.0)
+        self.tp_delay_spin.setDecimals(4)
+        self.tp_delay_spin.setSuffix(" s")
+        self.tp_delay_spin.setToolTip("Extra pause after finishing all positions in a "
+                                      "timepoint round, before the next one starts.")
+
+        self.tp_extra_rows: list[QWidget] = []
+        for r, (label, widget) in enumerate([
+            ("Timepoint Interval", self.tp_interval_field),
+            ("Timepoint Delay", self.tp_delay_spin),
+        ], start=2):
+            lab = QLabel(label)
+            form.addWidget(lab, r, 0)
+            form.addWidget(widget, r, 1, 1, 2)
+            self.tp_extra_rows += [lab, widget]
+
         for r, (label, default) in enumerate([
             ("Stack Acq. Time", "00:00.00"),
             ("Total time", "00:00:00"),
-        ], start=2):
+        ], start=4):
             form.addWidget(QLabel(label), r, 0)
             field = _narrow(QLineEdit(default), 110)
             field.setReadOnly(True)
             form.addWidget(field, r, 1, 1, 2)
+            if label == "Stack Acq. Time":
+                self.stack_acq_time_field = field
+            else:
+                self.total_time_field = field
+
+        tp_combo.currentTextChanged.connect(self._on_timepoints_mode_changed)
+        self._on_timepoints_mode_changed(tp_combo.currentText())
         return box
+
+    def _on_timepoints_mode_changed(self, text: str) -> None:
+        multi = text == "Multi"
+        self.tp_spin.setEnabled(multi)
+        for w in self.tp_extra_rows:
+            w.setVisible(multi)
 
     def _build_multilocation_box(self) -> QWidget:
         box = QWidget()
@@ -867,6 +997,15 @@ class MainWindow(QMainWindow):
         table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         table.setMaximumHeight(110)
         lay.addWidget(table)
+        # ADDED 2026-09-22: previously read from nowhere -- ticking it had
+        # no effect at all. The table itself was already a live, correct
+        # mirror of the stage's position sequence (_refresh_locations_table);
+        # this just makes the checkbox gate whether an Acquire actually
+        # steps through it (_build_acquisition_sequence) and grey the table
+        # when not in use, matching Single/Multi-location's other enable
+        # state (_update_scan_setup_enable_state).
+        chk.toggled.connect(lambda on: table.setEnabled(on))
+        table.setEnabled(False)
         return box
 
     def _build_camera_tab(self) -> QWidget:
@@ -1391,7 +1530,7 @@ class MainWindow(QMainWindow):
                     highest = max(highest, int(m.group(1)))
         return data_dir / f"{prefix}{highest + 1}"
 
-    def _acq_info(self, stack=None) -> tuple[dict, dict]:
+    def _acq_info(self, stack=None, position_xyz: Vec3 | None = None) -> tuple[dict, dict]:
         """(LouisXIV's AcqInfo fields, our extras block).
 
         The keys and their order are LouisXIV's, from `Companion Metadata
@@ -1405,6 +1544,14 @@ class MainWindow(QMainWindow):
         format has nowhere to put. Dropping it would lose information the
         file used to record, so the user chose to keep it, clearly fenced
         off under its own heading.
+
+        ``position_xyz`` (ADDED 2026-09-22): the stage position this stack
+        was taken at, or None for a single-position run. Sets
+        Multi-positionAcq and the PositionX/Y/Z_mm fields -- previously
+        Multi-positionAcq was unconditionally False and the position keys
+        were entirely missing from the dict (not just skipped by
+        render_acq_info's own skip? logic), because multi-position was
+        never wired up before now.
         """
         cal = self.calibration
         sel = self._selected_channel_index()
@@ -1430,7 +1577,7 @@ class MainWindow(QMainWindow):
             "PhysicalSizeX_um": pixel_um,
             "PhysicalSizeY_um": pixel_um,
             "PhysicalSizeZ_um": float(self.z_interval_spin.value()),
-            "Timepoints": 1,
+            "Timepoints": self._sequence.n_timepoints if self._sequence is not None else 1,
             "Cameras": 1,
             # LouisXIV always writes 1 (it gates to one laser); this follows
             # what is actually ticked, since that rule is now the user's call.
@@ -1447,9 +1594,15 @@ class MainWindow(QMainWindow):
             "EmissionWavelength_nm": [],        # no panel field ported
             "FilterType": "",                   # no panel field ported
             "CamExposure_s": exposure_ms / 1000.0,
-            "Multi-positionAcq": False,         # multi-position is not wired
-            # PositionX/Y/Z_mm and StageAngle_deg are skipped while
-            # Multi-positionAcq is false, exactly as the VI's skip? does.
+            "Multi-positionAcq": position_xyz is not None,
+            # PositionX/Y/Z_mm and StageAngle_deg are skipped by
+            # render_acq_info while Multi-positionAcq is false, exactly as
+            # the VI's skip? does -- always included here, same as
+            # StageAngle_deg already was, rather than only ever writing them
+            # when true (position_xyz um -> mm).
+            "PositionX_mm": position_xyz[0] / 1000.0 if position_xyz is not None else 0.0,
+            "PositionY_mm": position_xyz[1] / 1000.0 if position_xyz is not None else 0.0,
+            "PositionZ_mm": position_xyz[2] / 1000.0 if position_xyz is not None else 0.0,
             "StageAngle_deg": float(DEFAULT_STAGE_ANGLE_DEG),
         }
 
@@ -1478,17 +1631,22 @@ class MainWindow(QMainWindow):
         self.stack_max_slider.setValue(stack_max)
         complete = bool(self.z_target_frames) and self.frame_count >= self.z_target_frames
         if self.save_files_chk.isChecked() and complete:
-            self._save_stack(stack)
+            # ADDED 2026-09-22: defaults to today's (0, None, None) whenever
+            # no sequence is active -- unchanged single-stack behaviour.
+            timepoint, position, position_xyz = 0, None, None
+            if self._sequence is not None:
+                timepoint, position, position_xyz = self._sequence.current()
+            self._save_stack(stack, timepoint=timepoint, position=position, position_xyz=position_xyz)
 
-    def _save_stack(self, stack, timepoint: int = 0, position: int | None = None) -> Path | None:
+    def _save_stack(self, stack, timepoint: int = 0, position: int | None = None,
+                    position_xyz: Vec3 | None = None) -> Path | None:
         """Compute this stack's path the way LouisXIV lays them out, and
         write it on a background thread.
 
-        ``timepoint`` and ``position`` are the Build Image Path.vi indices.
-        Both are plumbed through and tested, but nothing drives them past 0
-        yet: Timepoints and Multi-location are still greyed on Scan Setup by
-        the user's decision, so every acquisition today is a single timepoint
-        at a single position.
+        ``timepoint`` and ``position`` are the Build Image Path.vi indices;
+        ``position_xyz`` (ADDED 2026-09-22, wiring up Timepoints=Multi and
+        Multi-location -- see _build_acquisition_sequence) is the actual
+        stage position in um, written into AcqInfo.txt's PositionX/Y/Z_mm.
 
         FIXED 2026-09-18 (user: "the GUI takes time to save acquired z
         stack"): the write itself -- an uncompressed, potentially multi-GB
@@ -1506,9 +1664,6 @@ class MainWindow(QMainWindow):
         if data_dir is None:
             self._log("Save cancelled: no data folder chosen.")
             return None
-        if self._saving_stack:
-            self._log("Save skipped: a previous stack is still being written to disk.")
-            return None
         # The folder the Save Image dialog named for THIS run. Falling back
         # to a fresh scan keeps the paths that never went through the dialog
         # (loading a stack, saving a projection) working as before.
@@ -1517,35 +1672,51 @@ class MainWindow(QMainWindow):
         ch = self._selected_channel_index()
         path = stack_path(exp, self._save_base, ch, timepoint, position,
                           self.separate_position_folders)
-        pixel_size_um = cal.detection.xy_pixel_um
-        z_step_um = self.z_interval_spin.value()
-        channel_name = self.excitation_rows[ch][1]
-        acq_fields, acq_extras = self._acq_info(stack)
+        job = _SaveJob(path=path, stack=stack, pixel_size_um=cal.detection.xy_pixel_um,
+                      z_step_um=self.z_interval_spin.value(), channel_name=self.excitation_rows[ch][1],
+                      exp=exp, acq_fields_extras=self._acq_info(stack, position_xyz=position_xyz))
+        # FIXED 2026-09-22: a multi-position/timepoint sequence can legitimately
+        # finish a stack before the PREVIOUS stack's background write is done
+        # (small stacks, a fast stage); this used to just log "Save skipped"
+        # and silently drop that stack's data. Now queued instead of dropped --
+        # one write in flight at a time, in order, none lost.
+        self._save_queue.append(job)
+        if not self._saving_stack:
+            self._dispatch_next_save_job()
+        return path
+
+    def _dispatch_next_save_job(self) -> None:
+        if not self._save_queue:
+            return
+        job = self._save_queue.pop(0)
+        acq_fields, acq_extras = job.acq_fields_extras
 
         def worker():
             try:
-                save_tiff_stack(path, stack, ome=True, pixel_size_um=pixel_size_um,
-                                z_step_um=z_step_um, channel_name=channel_name)
-                write_acq_info(exp, acq_fields, acq_extras)
+                save_tiff_stack(job.path, job.stack, ome=True, pixel_size_um=job.pixel_size_um,
+                                z_step_um=job.z_step_um, channel_name=job.channel_name)
+                write_acq_info(job.exp, acq_fields, acq_extras)
             except Exception as e:                                      # noqa: BLE001
                 self.save_signals.failed.emit(f"{type(e).__name__}: {e}")
             else:
-                self.save_signals.finished.emit(path, exp, int(stack.shape[0]))
+                self.save_signals.finished.emit(job.path, job.exp, int(job.stack.shape[0]))
 
         self._saving_stack = True
-        self._log(f"Saving {stack.shape[0]}-slice stack in the background: {path}")
+        self._log(f"Saving {job.stack.shape[0]}-slice stack in the background: {job.path}"
+                  + (f" ({len(self._save_queue)} more queued)" if self._save_queue else ""))
         threading.Thread(target=worker, name="unmscope-stack-save", daemon=True).start()
-        return path
 
     def _on_stack_save_finished(self, path: Path, exp: Path, n_slices: int):
         self._saving_stack = False
         self._current_exp_dir = exp
         self._log(f"Saved {n_slices}-slice stack: {path}  (+ AcqInfo.txt)")
+        self._dispatch_next_save_job()
 
     def _on_stack_save_failed(self, message: str):
         self._saving_stack = False
         self._log(f"Stack save FAILED: {message}")
         QMessageBox.warning(self, "Save failed", message)
+        self._dispatch_next_save_job()
 
     def _on_calc_projections(self):
         stack = self.acquired_stack()
@@ -1651,6 +1822,13 @@ class MainWindow(QMainWindow):
         self.z_end_spin.setEnabled(z_stack and not linked)
         for w in (self.timepoints_widget, self.multilocation_widget):
             w.setVisible(z_stack)
+        # ADDED 2026-09-22: while acquiring, only mode_combo was force-
+        # disabled -- the Timepoints/Multi-location controls (and the
+        # sequence they define) were left editable mid-run.
+        for w in (self.tp_combo, self.tp_spin, self.tp_delay_spin,
+                  self.multilocation_chk, self.multilocation_configure_btn):
+            w.setEnabled(not self.acquiring)
+        self.locations_table.setEnabled(self.multilocation_chk.isChecked() and not self.acquiring)
 
     def _clear_image_to_black(self):
         black = QPixmap(self.image_label.size())
@@ -2066,7 +2244,8 @@ class MainWindow(QMainWindow):
         """
         if self.sample_stage_dialog is None:
             self.sample_stage_dialog = SampleStageDialog(
-                real_stage_factory=lambda settings: real_asi_factory(settings.com_port),
+                real_stage_factory=lambda settings: real_asi_factory(
+                    settings.com_port, settings.velocity_um_s, settings.settling_ms),
                 real_z_factory=real_focus_factory,
                 z_com_port="COM8",
                 rel_offset_provider=lambda: self.rel_offset_spin.value(),
@@ -2461,6 +2640,16 @@ class MainWindow(QMainWindow):
                              names=AI_CHANNEL_NAMES, end_frame_index=n)
 
     def _start_acquisition(self):
+        """The Acquire-button entry point -- one-time session setup, then
+        the first stack's arm. See _arm_one_stack for the repeatable part
+        (FIXED 2026-09-22: this used to also BE the repeatable part, which
+        would have meant showing the modal Save Image dialog once per
+        stack in a multi-timepoint/multi-position sequence, dozens of
+        times over a real run, and risked scattering stacks across
+        different experiment folders)."""
+        self._begin_acquisition_session()
+
+    def _begin_acquisition_session(self):
         if self.camera is None or self.fpga is None:
             return
         mode = self.mode_combo.currentText()
@@ -2542,6 +2731,31 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Error", f"Failed to set external trigger:\n{e}")
             return
 
+        # ADDED 2026-09-22: build the multi-timepoint/multi-position walk
+        # for this session, if either is actually in use. None (the
+        # existing, unchanged behaviour) whenever Timepoints=Single and
+        # Multi-location is unchecked.
+        try:
+            self._sequence = self._build_acquisition_sequence(mode)
+        except StageError as e:
+            self._log(f"Cannot start a Multi-location sequence: {e}")
+            QMessageBox.warning(self, "Sample Stage", str(e))
+            return
+        if self._sequence is not None:
+            self._log(f"Sequence: {self._sequence.n_timepoints} timepoint(s) x "
+                      f"{self._sequence.n_positions} position(s) = "
+                      f"{self._sequence.total_steps()} stack(s).")
+            self._sequence_abort.clear()
+
+        self._arm_one_stack()
+
+    def _arm_one_stack(self):
+        """The repeatable per-stack arm -- everything that must happen
+        again for every stack in a sequence, reused unchanged from a plain
+        single-stack run so SYNCREADOUT's warm-up-discard logic sees
+        exactly the same "arm again" shape it already handles correctly
+        between independent Acquire clicks (test_zstack_continuous_zstack)."""
+        mode = self.mode_combo.currentText()   # mode_combo is disabled while acquiring/sequencing
         self.frame_count = 0
         self.frame_counter_label.setText("0")
         self.acq_progress.setValue(0)
@@ -2592,6 +2806,7 @@ class MainWindow(QMainWindow):
         self.disconnect_btn.setEnabled(False)
         self.fpga_connect_btn.setEnabled(False)
         self.fpga_disconnect_btn.setEnabled(False)
+        self._update_scan_setup_enable_state()
 
         self.camera_poll_timer.start(30)
 
@@ -2727,6 +2942,109 @@ class MainWindow(QMainWindow):
             self._log("SIMULATE ON FPGA: frames come from the simulated camera, one per FPGA trigger "
                       f"(fed from '# of triggers read'); AO clamp verified = {self.fpga.ao_clamped}.")
 
+    def _build_acquisition_sequence(self, mode: str) -> _AcqSequence | None:
+        """Reads Timepoints/Multi-location and returns the ordered walk of
+        (timepoint, position, xyz) steps for this run, or None for the
+        existing plain single-stack behaviour (Timepoints=Single and
+        Multi-location unchecked -- or Continuous mode, which has no
+        defined stop and so no "repeat N times" equivalent).
+
+        Raises StageError (caught by the caller, shown as a warning) rather
+        than silently constructing/connecting real stage hardware for the
+        first time in the middle of launching an unattended run.
+        """
+        if mode != MODE_ZSTACK:
+            return None
+        multi_tp = self.tp_combo.currentText() == "Multi"
+        n_timepoints = self.tp_spin.value() if multi_tp else 1
+
+        positions: list[Vec3 | None]
+        if self.multilocation_chk.isChecked():
+            if self.sample_stage_dialog is None:
+                raise StageError(
+                    "Multi-location is checked, but Sample Stage Control has never been "
+                    "opened -- open it (Configure) and set up a position sequence first.")
+            xyz_list = list(self.sample_stage_dialog.sequence.positions_um())
+            if not xyz_list:
+                raise StageError(
+                    "Multi-location is checked, but the position sequence is empty -- "
+                    "add positions in Sample Stage Control first.")
+            positions = xyz_list
+        else:
+            positions = [None]
+
+        n_positions = len(positions)
+        if n_timepoints * n_positions <= 1:
+            return None   # plain single-stack case -- unchanged behaviour
+
+        if n_positions > 1:
+            if not self.separate_position_folders:
+                self._log("Multi-location: forcing 'separate position folders' on for "
+                          "this run (otherwise every position at a timepoint would "
+                          "overwrite the same file).")
+            self.separate_position_folders = True
+            # Honesty check (2026-09-22): a still-simulated axis would
+            # otherwise silently produce identically-positioned stacks.
+            dlg = self.sample_stage_dialog
+            self._log(f"Multi-location stage backends this run: X/Y={type(dlg.stage).__name__}, "
+                      f"Z={type(dlg.z_stage).__name__}.")
+            # Hand exclusive stage control to the sequence for the whole
+            # run -- see begin_sequence_control's docstring for why.
+            dlg.begin_sequence_control()
+
+        steps = [(t, p, positions[p]) for t in range(n_timepoints) for p in range(n_positions)]
+        delay_s = self.tp_delay_spin.value() if multi_tp else 0.0
+        return _AcqSequence(steps=steps, n_timepoints=n_timepoints, n_positions=n_positions,
+                            timepoint_delay_s=delay_s)
+
+    def _start_sequence_transition(self) -> None:
+        """After a stack finishes naturally, mid-sequence: advance the step
+        index and, off the GUI thread, move the stage (if the position
+        changed) and/or wait out the timepoint delay (if this crosses into
+        a new round), then signal the GUI thread to arm the next stack.
+
+        Runs on a short-lived thread per transition rather than one
+        persistent thread for the whole sequence -- simpler lifecycle, and
+        each transition is naturally bounded (a move plus at most one
+        delay), unlike the sequence as a whole which can run for hours.
+        Never touches self.sample_stage_dialog's widgets directly (headless
+        move_to_position_blocking only) since this is not the GUI thread.
+        """
+        seq = self._sequence
+        prev_position = seq.current()[1]
+        wait_s = seq.timepoint_delay_s if seq.starts_new_timepoint_round() else 0.0
+        seq.index += 1
+        _, position, xyz = seq.current()
+
+        def run():
+            try:
+                if xyz is not None and position != prev_position:
+                    self.sample_stage_dialog.move_to_position_blocking(xyz)
+                if wait_s > 0 and self._sequence_abort.wait(timeout=wait_s):
+                    return   # aborted during the timepoint delay
+                if self._sequence_abort.is_set():
+                    return   # aborted right after the move, before the signal
+                self.sequence_signals.advance.emit()
+            except Exception as e:                                     # noqa: BLE001
+                self.sequence_signals.error.emit(f"{type(e).__name__}: {e}")
+
+        threading.Thread(target=run, name="unmscope-sequence-transition", daemon=True).start()
+
+    def _on_sequence_advance(self) -> None:
+        if self._sequence is None or not self.acquiring:
+            return   # a stray signal after the sequence was already aborted
+        t, p, _ = self._sequence.current()
+        self._log(f"Sequence: arming timepoint {t + 1}/{self._sequence.n_timepoints}, "
+                  f"position {p + 1}/{self._sequence.n_positions}.")
+        self.acq_status_label.setText(f"ACQUIRING ({self._sequence.index + 1}/{self._sequence.total_steps()})")
+        self._arm_one_stack()
+
+    def _on_sequence_error(self, message: str) -> None:
+        self._log(f"Sequence transition FAILED: {message} -- aborting the rest of the run.")
+        QMessageBox.warning(self, "Sample Stage", f"Sequence aborted:\n{message}")
+        self._sequence = None
+        self._stop_acquisition()
+
     def _stop_acquisition(self):
         # Reached from the Stop click, the FPGA error signal, the camera poll
         # timer's buffer-state check, both disconnect paths and closeEvent --
@@ -2771,6 +3089,24 @@ class MainWindow(QMainWindow):
         else:
             self.camera_poll_timer.stop()
 
+        # ADDED 2026-09-22: decide whether this stop is a mid-sequence
+        # advance (per-stack teardown only, stay ACQUIRING) or a real,
+        # terminal stop (sequence finished/aborted/errored, or there never
+        # was one -- the plain single-stack case, unchanged). See
+        # self._stack_finished_naturally's definition in __init__ for why
+        # every path except the one true natural-completion site defaults
+        # to terminal/abort.
+        naturally = self._stack_finished_naturally
+        self._stack_finished_naturally = False
+        advancing = naturally and self._sequence is not None and not self._sequence.is_last()
+        if advancing:
+            self._on_stack_finished()
+            self._start_sequence_transition()
+            return
+
+        self._sequence_abort.set()
+        if self._sequence is not None and self.sample_stage_dialog is not None:
+            self.sample_stage_dialog.end_sequence_control()
         self.acquiring = False
         self.acquire_btn.setText("Acquire")
         self.acq_status_label.setText("IDLE")
@@ -2779,11 +3115,20 @@ class MainWindow(QMainWindow):
             "padding: 6px; border-radius: 3px;"
         )
         self.acq_progress.setValue(0)
+        self.overall_progress.setValue(0)
         self.mode_combo.setEnabled(True)
+        self._update_scan_setup_enable_state()
         self._update_connection_buttons()
         self._clear_image_to_black()
         self._log("Acquisition stopped, back to IDLE.")
+        # FIXED 2026-09-22: _on_stack_finished() reads self._sequence.current()
+        # for the timepoint/position to save under -- for the sequence's own
+        # LAST step, this is the terminal branch (is_last() is what routes it
+        # here), so self._sequence must still be valid when this runs. Clearing
+        # it before the save silently fell back to (0, None, None), landing
+        # the sequence's final stack outside any position folder.
         self._on_stack_finished()
+        self._sequence = None
 
     def _on_fpga_status(self, st):
         """~20/s snapshot of the FPGA's own counters while free-running,
@@ -2819,7 +3164,15 @@ class MainWindow(QMainWindow):
             total = self.z_target_frames + self._run_closing
             pct = min(100, int(round(100 * count / total)))
             self.acq_progress.setValue(pct)
-            self.overall_progress.setValue(pct)
+            # ADDED 2026-09-22: overall_progress used to just duplicate
+            # acq_progress (there was only ever one stack); now it reflects
+            # the whole sequence, acq_progress just the current stack.
+            if self._sequence is not None:
+                steps = self._sequence.total_steps()
+                overall = min(100, int(round(100 * (self._sequence.index + count / total) / steps)))
+                self.overall_progress.setValue(overall)
+            else:
+                self.overall_progress.setValue(pct)
             if count >= total and not self._finishing:
                 # The FPGA has stopped itself (bounded mode). The last
                 # frame is still exposing/reading out -- stopping the
@@ -2967,6 +3320,9 @@ class MainWindow(QMainWindow):
         if self._finishing and self.frame_count >= self.z_target_frames:
             self._log(f"Z-stack complete: {self.frame_count} frames from "
                       f"{self._triggers_fired} triggers.")
+            # The ONE true "this stack really finished" site -- see
+            # self._stack_finished_naturally's definition in __init__.
+            self._stack_finished_naturally = True
             self._stop_acquisition()
             return
         # Surface the silent-stop conditions rather than just freezing.

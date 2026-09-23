@@ -853,6 +853,100 @@ def test_the_cell_counter_increments_in_the_same_parent_folder(app, window, tmp_
     assert w._next_experiment_name(base) == "Cell3"
 
 
+# -- multi-timepoint / multi-position ("Multi-location") acquisition (2026-09-22) ------
+
+class _FakeStage:
+    """Stands in for whichever XYZStage backend is connected -- only its
+    class name is read (the honesty log line in _build_acquisition_sequence)."""
+
+
+class _FakeLocationSequence:
+    def __init__(self, positions):
+        self._positions = positions
+
+    def positions_um(self):
+        return self._positions
+
+
+class _FakeSequenceDialog:
+    """A minimal stand-in for SampleStageDialog exposing only what
+    MainWindow's sequence controller actually calls -- avoids coupling this
+    test to SampleStageDialog's own ini-file loading machinery (see
+    test_sample_stage_dialog.py's env fixture for that; this test is about
+    the sequence controller's own logic, not stage-panel plumbing already
+    covered elsewhere)."""
+
+    def __init__(self, positions):
+        self.sequence = _FakeLocationSequence(positions)
+        self.stage = _FakeStage()
+        self.z_stage = _FakeStage()
+        self.moves: list = []
+        self.sequence_control_active = False
+
+    def move_to_position_blocking(self, xyz, timeout_s=None):
+        self.moves.append(xyz)
+
+    def begin_sequence_control(self):
+        self.sequence_control_active = True
+
+    def end_sequence_control(self):
+        self.sequence_control_active = False
+
+
+def test_multi_position_multi_timepoint_sequence(app, window, tmp_path):
+    """2 timepoints x 2 positions = 4 stacks, one Acquire click. Proves the
+    whole loop end to end: stage moves happen, files land under distinct
+    position subfolders, AcqInfo.txt carries real Multi-positionAcq/position
+    fields, and the run returns to IDLE on its own when the sequence is
+    exhausted."""
+    w = window
+    w._data_dir = tmp_path
+    w.save_files_chk.setChecked(True)
+    # Small stack (fast test): 2 slices instead of the fixture's default 10.
+    w.z_start_spin.setValue(0.0); w.z_end_spin.setValue(1.0); w.z_interval_spin.setValue(1.0)
+
+    positions = [(100.0, 200.0, 5.0), (300.0, 200.0, 5.0)]
+    fake_dlg = _FakeSequenceDialog(positions)
+    w.sample_stage_dialog = fake_dlg
+    w.multilocation_chk.setChecked(True)
+    w.tp_combo.setCurrentText("Multi")
+    w.tp_spin.setValue(2)
+    w.tp_delay_spin.setValue(0.0)
+
+    w.mode_combo.setCurrentText(mw.MODE_ZSTACK)
+    pump(app, 0.05)
+    w.on_acquire_clicked()
+    assert w.acquiring
+    assert fake_dlg.sequence_control_active, "the sequence must take exclusive stage control"
+
+    done = pump(app, 20.0, until=lambda: not w.acquiring)
+    assert done, "the 2x2 sequence did not finish on its own"
+    assert pump(app, 5.0, until=lambda: not w._saving_stack), "the last save did not finish"
+    assert not fake_dlg.sequence_control_active, "stage control must be handed back at the end"
+
+    # One move per NEW position: position alternates every stack (2,2),
+    # so 3 moves for 4 stacks (no move needed when position repeats... it
+    # never does here, positions strictly alternate 0,1,0,1).
+    assert fake_dlg.moves == [positions[1], positions[0], positions[1]], fake_dlg.moves
+
+    ch = w._selected_channel_index()
+    exp = tmp_path / "Cell1"
+    found = sorted(str(p.relative_to(exp)) for p in exp.rglob(f"*_CH{ch:02d}_*.tif"))
+    # position -> folder, timepoint -> filename suffix (Build Image Path.vi)
+    assert found == [
+        "position 1\\img_CH00_000000.tif", "position 1\\img_CH00_000001.tif",
+        "position 2\\img_CH00_000000.tif", "position 2\\img_CH00_000001.tif",
+    ], found
+    assert (exp / "position 2" / "img_CH00_000001.tif").exists(), "the sequence's LAST stack (its own edge case)"
+
+    # One companion file per experiment (not per position/timepoint), so it
+    # reflects whichever stack was written last -- (t=1, p=1) @ position 2.
+    acq = (exp / "AcqInfo.txt").read_text(encoding="utf-8")
+    assert "Multi-positionAcq = TRUE" in acq
+    assert "PositionX_mm = 0.300" in acq and "PositionY_mm = 0.200" in acq  # 300 um -> 0.300 mm
+    assert "Timepoints = 2" in acq
+
+
 def test_a_folder_already_on_disk_still_wins(app, window, tmp_path):
     """Someone else's Cell7 in the same folder must not be overwritten."""
     w = window

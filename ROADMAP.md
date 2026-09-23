@@ -626,9 +626,16 @@ below is being implemented until the user picks.
    Settling Time default of 0.0 is overridden at load by the ini's 300 ms, so
    300 is the effective default and ours. Only their on-screen POSITION is
    still assumed. The rest of the item stands: the
-   window drops LouisXIV's error clusters (701x735 vs 701x805); Gen. Grid
-   Sequence greyed; multi-position acquisition coupling deferred. When the MP-285
+   window drops LouisXIV's error clusters (701x735 vs 701x805). When the MP-285
    is cabled: COM8, 9600 8-N-1, low-resolution mode at 2500 um/s to confirm.
+   **UPDATED 2026-09-22:** ~~Gen. Grid Sequence greyed; multi-position
+   acquisition coupling deferred~~ -- both done. Gen. Grid Sequence is live
+   (`GridSequenceDialog`, 2026-09-15); main_window.py's acquisition sequence
+   controller (`_build_acquisition_sequence`) now actually steps a Z-stack
+   through Timepoints=Multi and/or a Multi-location position sequence,
+   moving the stage via a new `SampleStageDialog.move_to_position_blocking`.
+   The stage backend here is now ASI MS-2000 (X/Y) + Arduino focus (Z), not
+   MP-285 -- see docs/sample_stage.md and hardware/asi_stage.py.
 8. Low-Level Waveform Config: still greyed -- delays, Duty, DOE, AOTF pulse /
    sweep / cycle fields, Z wave Sweep, Wait for Zsettle, Sine; Z motion enum
    items unknown beyond the default.

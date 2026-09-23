@@ -200,11 +200,24 @@ class _ZActor(QThread):
             if cmd is not None:
                 kind = cmd[0]
                 if kind == 'move':
+                    # cmd[2] (optional): a queue.Queue a non-GUI caller blocks
+                    # on for the outcome -- added 2026-09-22 for the multi-
+                    # position acquisition sequence controller, which runs on
+                    # its own background thread and must never touch
+                    # self._stage directly (this actor is its sole owner; see
+                    # the class docstring) nor rely on a Qt signal connection
+                    # (QueuedConnection delivery needs a running GUI event
+                    # loop, which a plain background thread doesn't pump).
+                    reply_q = cmd[2] if len(cmd) > 2 else None
                     try:
                         final = self._stage.move_relative_steps(cmd[1])
                         self.z_move_done.emit(final)
+                        if reply_q is not None:
+                            reply_q.put(('ok', final))
                     except FocusError as exc:
                         self.z_move_error.emit(str(exc))
+                        if reply_q is not None:
+                            reply_q.put(('error', str(exc)))
                     last_poll = _time.monotonic()
                     continue
                 elif kind == 'set_zero':
@@ -1036,6 +1049,63 @@ class SampleStageDialog(QWidget):
             delta_steps = int(round(delta_um * self._z_steps_per_um))
             if delta_steps != 0:
                 self._z_actor.send_cmd(('move', delta_steps))
+
+    # -- headless, programmatic control (2026-09-22, for the multi-position
+    # acquisition sequence controller in main_window.py) -----------------------
+    #: ArduinoFocusProtocol.move() itself times out at 35 s (arduino_focus.py);
+    #: this is a safety margin above that, not a real expected duration.
+    _Z_MOVE_TIMEOUT_S = 40.0
+
+    def begin_sequence_control(self) -> None:
+        """Hand exclusive control of the stage to a sequence controller:
+        pause Auto Refresh (it polls self.stage on the GUI thread -- a race
+        against a background sequence thread also touching self.stage) and
+        disable the interactive move controls, so nothing but the sequence
+        controller touches self.stage/self.z_stage until end_sequence_control."""
+        self._timer.stop()
+        for w in (self.go_btn, self.recall_btn, self.seq_recall_btn):
+            w.setEnabled(False)
+
+    def end_sequence_control(self) -> None:
+        self._timer.start()
+        for w in (self.go_btn, self.recall_btn, self.seq_recall_btn):
+            w.setEnabled(True)
+
+    def move_to_position_blocking(self, xyz: Vec3, timeout_s: float | None = None) -> None:
+        """Move to ``xyz`` and block until BOTH axes have actually arrived,
+        for a caller on its own background thread (never a GUI slot -- this
+        touches no QWidget, unlike set_position()/on_recall_*, which read
+        and write QDoubleSpinBox controls directly).
+
+        Unlike set_position(), this always waits (ignores
+        wait_for_moves_chk -- an automated sequence must always confirm
+        arrival) and RAISES StageError/FocusError on failure or timeout
+        instead of catching and logging: the caller needs a hard yes/no,
+        not a log line. Z still goes through _ZActor (the sole owner of
+        that serial port, see its class docstring) via a reply queue,
+        never called directly.
+        """
+        self.stage.move_absolute_um((xyz[0], xyz[1], 0.0), wait=True, timeout_s=timeout_s)
+        pos = self.stage.get_position_um()
+        new_z = self._current_z_um
+        if self._z_actor is not None and self.z_stage.is_connected:
+            delta_um = xyz[2] - self._current_z_um
+            delta_steps = int(round(delta_um * self._z_steps_per_um))
+            if delta_steps != 0:
+                reply_q: queue.Queue = queue.Queue()
+                self._z_actor.send_cmd(('move', delta_steps, reply_q))
+                limit = self._Z_MOVE_TIMEOUT_S if timeout_s is None else timeout_s
+                try:
+                    outcome = reply_q.get(timeout=limit)
+                except queue.Empty:
+                    raise StageError(f"Z focus move timed out after {limit:.1f} s")
+                kind, payload = outcome
+                if kind == 'error':
+                    raise StageError(f"Z focus move failed: {payload}")
+                new_z = payload / self._z_steps_per_um
+        self._current_z_um = new_z
+        self._current = (pos[0], pos[1], new_z)
+        self.position_changed.emit(*self._current)
 
     def on_set_origin(self) -> None:
         """[2] "Set current position as origin?" -> 'Set Origin' on XY + SET_ZERO on Z."""

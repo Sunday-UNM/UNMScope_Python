@@ -14,9 +14,22 @@ LouisXIV opens this panel from the Utilities button `3D Stage Control`
 (caption "Sample Stage Control") and from Scan Setup's `Configure` next to
 `Multi-location` -- both in SPIM MAIN event case [4] via Launch Asynch VI --
 and hides it on Exit. The Python panel is `SampleStageDialog`: construct it
-once (`show()` from both buttons, `closeEvent` hides). Nothing here is wired
-into `main_window.py` / `utilities_tab.py` yet (integrator's job); the
-constructor takes optional `stage`, `sequence` (the shared
+once (`show()` from both buttons, `closeEvent` hides).
+
+UPDATED 2026-09-22: this WAS unwired (see the two stale claims below, kept
+struck through rather than deleted since the surrounding VI-mapping table is
+still accurate). It no longer is: `main_window.py` constructs
+`SampleStageDialog` with real ASI/Arduino factories (`_show_sample_stage`),
+mirrors its `LocationSequence` into the Scan Setup table
+(`_refresh_locations_table`), and -- the acquisition-side piece that was
+missing -- `_build_acquisition_sequence`/`_start_sequence_transition` in
+main_window.py actually step a Z-stack acquisition through Timepoints=Multi
+and/or a Multi-location position sequence, moving the stage between
+positions via a new headless `SampleStageDialog.move_to_position_blocking`.
+Multi-position acquisition is no longer out of scope; see
+`_build_acquisition_sequence`'s docstring for exactly what it reads.
+~~Nothing here is wired into `main_window.py` / `utilities_tab.py` yet
+(integrator's job)~~; the constructor takes optional `stage`, `sequence` (the shared
 `LocationSequence` the acquisition will read for multi-position stacks),
 `real_stage_factory`, `rel_offset_provider`, `log`, and emits
 `rel_offset_recalled(float)` (LouisXIV's 'Write Relative Offset' to SPIM
@@ -61,7 +74,7 @@ into `VI_Diagrams/SPIM/SPIM LV8.6 VIs/Motion/`:
 | Remove / Remove All | live | [5] "Remove selected location?"; [18] "Remove ALL unlocked saved locations?" |
 | Location Sequence table | live | `Location Sequence FG` Load/Read |
 | Seq. Recall / double-click, Remove, Remove All | live | [13] 'Recall Sequence'; [12] "Remove selected location from sequence?"; [17] "Remove ALL locations from sequence?" |
-| Gen. Grid Sequence | greyed | [22] launches `Generate Multipoint Grid Sequence GUI.vi` (needs the acquisition's image size and Z piezo pixels; multi-position acquisition is out of scope) |
+| Gen. Grid Sequence | live (2026-09-22; ~~greyed~~/~~out of scope~~ are stale) | [22] launches `Generate Multipoint Grid Sequence GUI.vi` (`GridSequenceDialog`, ported 2026-09-15) -- feeds the same `LocationSequence` main_window.py's acquisition sequence controller now reads |
 | Locations File / Sequence Locations File paths | live (our copies' paths) | path indicators |
 | Simulate? | greyed, checked | connector-pane input; `SIMP-285 Module` 'Init': simulate = ini Simulate OR Simulate? OR NOT Enable?. Becomes live when a `real_stage_factory` is passed |
 | XYZ Stage Settings: COM Port, Enable Stage, Simulate, XYZ Assignment, Stage Velocity, Settling Time | live | 'Init Controls' = `SIMP-285 INI FG` 'Read Register' |

@@ -84,7 +84,13 @@ def test_first_use_copies_and_defaults(dlg, env):
 
 
 def test_greyed_parts(dlg):
-    assert not dlg.gen_grid_btn.isEnabled()
+    # FIXED 2026-09-22: gen_grid_btn was disabled when this test was written
+    # (a9bd88d); the later grid-sequence checkpoint commit (3abed8d) wired
+    # it live (opens GridSequenceDialog) and never re-greyed it for this
+    # case -- the assertion was stale, not the source. It has no position
+    # to grey against until the stage is actually connected, so "always
+    # enabled" is correct, not a bug.
+    assert dlg.gen_grid_btn.isEnabled()
     assert all(not w.isEnabled() for w in dlg.rotation_controls)
     assert dlg.simulate_switch.isChecked() and not dlg.simulate_switch.isEnabled()
     # nothing selected -> Recall / Sequence / Remove greyed (frame [6] / [16])

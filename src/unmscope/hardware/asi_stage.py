@@ -23,7 +23,7 @@ import re
 import time
 from typing import Callable, Protocol
 
-from unmscope.hardware.stage import StageError, Vec3, XYZStage
+from unmscope.hardware.stage import StageError, Vec3, XYZStage, calc_xyz_move_time_s
 
 
 class ASIError(StageError):
@@ -145,16 +145,23 @@ class ASIStage(XYZStage):
 
     def __init__(self, transport_factory: Callable[[str], ASITransport],
                  com_port: str = "COM5",
+                 velocity_um_s: float = 2500.0,
+                 settling_ms: float = 300.0,
                  sleep: Callable[[float], None] = time.sleep,
                  clock: Callable[[], float] = time.monotonic):
         self._factory = transport_factory
         self.com_port = com_port
+        self.velocity_um_s = velocity_um_s
+        self.settling_ms = settling_ms
         self._sleep = sleep
         self._clock = clock
         self._proto: ASIProtocol | None = None
         self._pos_um: tuple[float, float] = (0.0, 0.0)
         self._moving = False
         self._move_done_time: float = 0.0
+        # -- move-time estimate (see move_absolute_um/is_moving) --
+        self._move_started: float = 0.0
+        self._expected_complete: float = 0.0
 
     # -- lifecycle ---------------------------------------------------------------
 
@@ -194,10 +201,33 @@ class ASIStage(XYZStage):
     def move_absolute_um(self, target: Vec3,
                          wait: bool = False,
                          timeout_s: float | None = None) -> None:
+        """FIXED 2026-09-22: previously returned as soon as the MS-2000
+        ACKed the command (':A', command-accepted) and never set
+        ``self._moving`` True anywhere, so ``is_moving()`` was permanently
+        False -- there was no way to tell whether the stage had actually
+        arrived. This estimates the move time from distance/velocity, the
+        same pattern ``MP285Serial`` already uses in stage.py, since this
+        bitfile/protocol has no implemented MS-2000 status-query command
+        to poll for real arrival. ESTIMATED, NOT a hardware handshake --
+        needs bench verification.
+        """
+        current = (self._pos_um[0], self._pos_um[1], 0.0)
+        move_time = calc_xyz_move_time_s(current, (target[0], target[1], 0.0),
+                                         self.velocity_um_s, self.settling_ms)
         self._p().move_absolute_um(target[0], target[1])
         self._pos_um = (target[0], target[1])
+        self._moving = True
+        self._move_started = self._clock()
+        self._expected_complete = self._move_started + move_time
+        if wait:
+            limit = move_time if timeout_s is None else timeout_s
+            self._sleep(min(move_time, limit) if limit is not None else move_time)
+            self._moving = False
+            self._expected_complete = self._clock()
 
     def is_moving(self) -> bool:
+        if self._moving and self._clock() >= self._expected_complete:
+            self._moving = False
         return self._moving
 
     def set_origin(self) -> None:
@@ -227,14 +257,21 @@ class ASIStage(XYZStage):
 # ---------------------------------------------------------------------------
 
 class SimulatedASIStage(XYZStage):
-    """In-process fake: moves are instant, position tracked in memory."""
+    """In-process fake: position tracked in memory, move time estimated
+    the same way ``ASIStage``/``SimulatedMP285`` do (stage.py), so tests
+    exercising ``wait``/``is_moving`` see realistic (if fast) timing
+    instead of moves that are trivially already-done."""
 
-    def __init__(self, clock: Callable[[], float] = time.monotonic,
+    def __init__(self, velocity_um_s: float = 2500.0, settling_ms: float = 300.0,
+                 clock: Callable[[], float] = time.monotonic,
                  sleep: Callable[[float], None] = time.sleep):
+        self.velocity_um_s = velocity_um_s
+        self.settling_ms = settling_ms
         self._clock = clock
         self._sleep = sleep
         self._connected = False
         self._pos_um: tuple[float, float] = (0.0, 0.0)
+        self._expected_complete: float = 0.0
 
     def connect(self) -> None:
         self._connected = True
@@ -258,10 +295,17 @@ class SimulatedASIStage(XYZStage):
                          wait: bool = False,
                          timeout_s: float | None = None) -> None:
         self._require()
+        current = (self._pos_um[0], self._pos_um[1], 0.0)
+        move_time = calc_xyz_move_time_s(current, (target[0], target[1], 0.0),
+                                         self.velocity_um_s, self.settling_ms)
         self._pos_um = (float(target[0]), float(target[1]))
+        self._expected_complete = self._clock() + move_time
+        if wait:
+            self._sleep(move_time)
+            self._expected_complete = self._clock()
 
     def is_moving(self) -> bool:
-        return False
+        return self._connected and self._clock() < self._expected_complete
 
     def set_origin(self) -> None:
         self._require()

@@ -345,14 +345,24 @@ class ASIStageDialog(QDialog):
 # Factory helper
 # ---------------------------------------------------------------------------
 
-def real_asi_factory(com_port: str) -> ASIStage:
-    """Build an ``ASIStage`` with a real pyserial transport."""
+def real_asi_factory(com_port: str, velocity_um_s: float = 2500.0,
+                     settling_ms: float = 300.0) -> ASIStage:
+    """Build an ``ASIStage`` with a real pyserial transport.
+
+    ``velocity_um_s``/``settling_ms`` feed the move-time estimate
+    ``ASIStage.is_moving()`` relies on (see asi_stage.py) -- previously
+    hardcoded to the class defaults regardless of the Settings page's
+    Stage Velocity / Settling Time controls, which is the same number
+    the MP-285 codepath already uses live.
+    """
     import serial
     from unmscope.hardware.asi_stage import BAUD, READ_TIMEOUT_S
     return ASIStage(
         transport_factory=lambda port: serial.Serial(port, BAUD,
                                                      timeout=READ_TIMEOUT_S),
         com_port=com_port,
+        velocity_um_s=velocity_um_s,
+        settling_ms=settling_ms,
     )
 
 

@@ -25,6 +25,9 @@ What is deliberately NOT remembered:
   or frozen state, which reads as broken rather than as restored.
 - **Connection state.** Nothing here connects to hardware; it only fills in
   the controls, and the user still presses Connect.
+- **Exposure.** Comes up at the Camera tab's fixed 100 ms default every
+  time (user, 2026-09-23) rather than whatever was last typed -- the same
+  "reads as broken, not restored" reasoning as Hold.
 """
 from __future__ import annotations
 

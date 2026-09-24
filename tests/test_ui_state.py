@@ -124,16 +124,15 @@ def test_the_next_session_starts_where_the_last_one_finished(app):
 
 
 def test_the_camera_settings_come_back_too(app):
-    """"Same for other places" -- not just the Waveforms tab."""
+    """"Same for other places" -- not just the Waveforms tab. Exposure is
+    excluded on purpose (see test_exposure_always_comes_back_at_the_fixed_default)."""
     w = mw.MainWindow()
-    w.camera_tab.exposure_spin.setValue(77.0)
     w.camera_tab.sync_readout_chk.setChecked(False)
     w.camera_tab.roi_bottom.setValue(1024)
     w.close()
 
     w2 = mw.MainWindow()
     try:
-        assert w2.camera_tab.exposure_spin.value() == pytest.approx(77.0)
         assert not w2.camera_tab.sync_readout_chk.isChecked()
         assert w2.camera_tab.roi_bottom.value() == 1024
     finally:
@@ -169,9 +168,27 @@ def test_saving_is_not_confused_by_the_shutdown(app):
     w.backend_combo.setCurrentText("Simulated")
     w.on_connect_clicked()
     assert w.camera is not None
+    w.camera_tab.sync_readout_chk.setChecked(False)
+    w.close()
+    assert ui_state.load().get("cam_sync_readout") is False
+
+
+def test_exposure_always_comes_back_at_the_fixed_default(app):
+    """Coming up at a fixed, known-safe exposure beats silently carrying
+    over whatever was last typed -- user, 2026-09-23: "The exposure time
+    should be 100ms by default." Same reasoning as Hold/window geometry in
+    test_hold_and_geometry_are_deliberately_not_remembered."""
+    w = mw.MainWindow()
     w.camera_tab.exposure_spin.setValue(63.0)
     w.close()
-    assert ui_state.load().get("cam_exposure_ms") == pytest.approx(63.0)
+
+    assert "cam_exposure_ms" not in ui_state.load()
+
+    w2 = mw.MainWindow()
+    try:
+        assert w2.camera_tab.exposure_spin.value() == pytest.approx(100.0)
+    finally:
+        w2.close()
 
 
 def test_the_images_tab_display_options_come_back(app):

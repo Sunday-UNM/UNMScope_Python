@@ -49,10 +49,11 @@ crashes.
 from __future__ import annotations
 
 import datetime
+import math
 import re
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
@@ -83,6 +84,7 @@ from unmscope.fileio.tiff_stack import (
 from unmscope.gui.save_image_dialog import SaveImageDialog
 from unmscope.gui.scope_view import FpgaScopePanel
 from unmscope.gui.camera_tab import CameraTab
+from unmscope.gui.zoomable_image import ZoomableImageView
 from unmscope.gui.display import FrameAverager, display_range, render_frame
 from unmscope.gui.utilities_tab import UtilitiesTab
 from unmscope.gui.camera_debug_panel import CameraDebugPanel, CameraDebugStatus
@@ -930,7 +932,7 @@ class MainWindow(QMainWindow):
         self.save_files_chk = QCheckBox("Save Files")
         form.addWidget(self.save_files_chk, 1, 0, 1, 3)
 
-        self.tp_interval_field = _narrow(QLineEdit("00:00.00"), 110)
+        self.tp_interval_field = _narrow(QLineEdit("00:00:00"), 110)
         self.tp_interval_field.setReadOnly(True)
         self.tp_interval_field.setToolTip(
             "Computed: how long one full timepoint round (all positions) "
@@ -954,7 +956,7 @@ class MainWindow(QMainWindow):
             self.tp_extra_rows += [lab, widget]
 
         for r, (label, default) in enumerate([
-            ("Stack Acq. Time", "00:00.00"),
+            ("Stack Acq. Time", "00:00:00"),
             ("Total time", "00:00:00"),
         ], start=4):
             form.addWidget(QLabel(label), r, 0)
@@ -967,6 +969,8 @@ class MainWindow(QMainWindow):
                 self.total_time_field = field
 
         tp_combo.currentTextChanged.connect(self._on_timepoints_mode_changed)
+        tp_spin.valueChanged.connect(self._update_time_estimates)
+        self.tp_delay_spin.valueChanged.connect(self._update_time_estimates)
         self._on_timepoints_mode_changed(tp_combo.currentText())
         return box
 
@@ -975,6 +979,7 @@ class MainWindow(QMainWindow):
         self.tp_spin.setEnabled(multi)
         for w in self.tp_extra_rows:
             w.setVisible(multi)
+        self._update_time_estimates()
 
     def _build_multilocation_box(self) -> QWidget:
         box = QWidget()
@@ -1005,6 +1010,7 @@ class MainWindow(QMainWindow):
         # when not in use, matching Single/Multi-location's other enable
         # state (_update_scan_setup_enable_state).
         chk.toggled.connect(lambda on: table.setEnabled(on))
+        chk.toggled.connect(self._update_time_estimates)
         table.setEnabled(False)
         return box
 
@@ -1015,7 +1021,10 @@ class MainWindow(QMainWindow):
         self.camera_tab = CameraTab(
             get_camera=lambda: self.camera,
             pixel_size_um=lambda binning=1: self.calibration.detection.pixel_size_um(binning=binning),
-            log=self._log)
+            log=self._log,
+            magnification=self.calibration.detection.magnification,
+            camera_pixel_um=self.calibration.detection.camera_pixel_um,
+            set_detection=self._on_set_detection)
         self.exposure_spin = self.camera_tab.exposure_spin
         self.exposure_spin.valueChanged.connect(self.on_exposure_changed)
         # LouisXIV runs this Orca in DCAM SYNCREADOUT trigger mode
@@ -1374,10 +1383,16 @@ class MainWindow(QMainWindow):
             gutter.addStretch(1)
             proj_row.addLayout(gutter)
 
-            view = QLabel()
+            # ZoomableImageView (user, 2026-09-23: "stack projections should
+            # also be zoomable"): scroll to zoom, drag to pan, double-click
+            # to reset -- see gui/zoomable_image.py. Same fixed viewport
+            # size as the plain QLabel it replaces, so the box itself still
+            # matches the reference measurement.
+            view = ZoomableImageView()
             # #f0f0f0 -- confirmed by pixel-sampling, not black.
-            view.setStyleSheet("background-color: #f0f0f0;")
+            view.setStyleSheet("background-color: #f0f0f0; border: none;")
             view.setFixedSize(245, 196)  # exact reference measurement
+            view.setToolTip("Scroll to zoom, drag to pan, double-click to reset.")
             self.projection_labels[name] = view
             proj_row.addWidget(view, alignment=Qt.AlignTop)
 
@@ -1749,7 +1764,7 @@ class MainWindow(QMainWindow):
         self._last_projections = projs
         for name, view in self.projection_labels.items():
             pix = self._render(projs[name])
-            view.setPixmap(pix.scaled(view.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            view.set_pixmap(pix)
             self.projection_save_btns[name].setEnabled(True)
         self._log("Projections: " + ", ".join(f"{k} {v.shape[1]}x{v.shape[0]}" for k, v in projs.items())
                   + (" (deskewed)" if self.deskew_check.isChecked() else " (no deskew)"))
@@ -1849,6 +1864,81 @@ class MainWindow(QMainWindow):
             return
         n = max(1, int(round(abs(end - start) / interval)) + 1)
         self.slice_count_field.setText(str(n))
+        self._update_time_estimates()
+
+    @staticmethod
+    def _fmt_hms(seconds: float) -> str:
+        # Ceiling, not round: a nonzero total (e.g. a 0.5 s test stack)
+        # must never display as "00:00:00" -- indistinguishable from the
+        # dummy placeholder this whole field used to be stuck at.
+        total = 0 if seconds <= 0 else max(1, int(math.ceil(seconds - 1e-9)))
+        h, rem = divmod(total, 3600)
+        m, s = divmod(rem, 60)
+        return f"{h:02d}:{m:02d}:{s:02d}"
+
+    def _update_time_estimates(self) -> None:
+        """Live, quiet preview of Stack Acq. Time / Timepoint Interval /
+        Total time from the current Scan Setup values.
+
+        These fields used to just sit at their construction-time
+        placeholder ("00:00:00") forever -- nothing ever wrote to them
+        (user, 2026-09-23, after a real 42-point run: "all the time
+        variables remained 0s"). All three use the SAME hours:minutes:
+        seconds format (user, same day: mixing that with a minutes:
+        seconds.hundredths format on Stack Acq. Time made Total time look
+        smaller than Stack Acq. Time even when it numerically never can be
+        -- Total is always n_timepoints * n_positions * Stack Acq. Time
+        plus any timepoint delays). Deliberately does NOT reuse
+        _compute_scan_waveform() for this: that method logs several lines
+        every call (meant for once-per-actual-arm), which would spam the
+        log on every spin-box keystroke. Uses the same pure camera_cycle_s
+        formula it falls back to when no camera is connected, or the
+        camera's own cycle_time_s() when one is, or (best) the real
+        self._trigger_period_s left over from the last arm.
+
+        Guarded on self.camera_tab existing: this is wired to fire from
+        z/exposure/timepoint/position controls built before the Camera
+        tab is, so the very first calls (during __init__) are no-ops.
+        """
+        if not hasattr(self, "camera_tab"):
+            return
+        if self.mode_combo.currentText() != MODE_ZSTACK:
+            self.stack_acq_time_field.setText("00:00:00")
+            self.tp_interval_field.setText("00:00:00")
+            self.total_time_field.setText("00:00:00")
+            return
+
+        interval = self.z_interval_spin.value()
+        if interval > 0:
+            n_slices = max(1, int(round(abs(self.z_end_spin.value() - self.z_start_spin.value()) / interval)) + 1)
+        else:
+            n_slices = 1
+
+        exposure_ms = self.exposure_spin.value()
+        cam = self.camera if (self.camera is not None and self.camera.is_connected) else None
+        sync = (cam.trigger_active == cam.TRIGGER_SYNCREADOUT) if cam is not None \
+            else self.sync_readout_chk.isChecked()
+        if self._trigger_period_s > 0:
+            period_s = self._trigger_period_s
+        elif cam is not None:
+            period_s = cam.cycle_time_s(exposure_ms)
+        else:
+            period_s = camera_cycle_s(exposure_ms / 1000.0, self.camera_tab.roi.height, sync)
+        stack_s = n_slices * period_s
+
+        n_positions = 1
+        if self.multilocation_chk.isChecked() and self.sample_stage_dialog is not None:
+            n_positions = max(1, len(self.sample_stage_dialog.sequence.positions_um()))
+        round_s = n_positions * stack_s
+
+        multi_tp = self.tp_combo.currentText() == "Multi"
+        n_timepoints = self.tp_spin.value() if multi_tp else 1
+        delay_s = self.tp_delay_spin.value() if multi_tp else 0.0
+        total_s = n_timepoints * round_s + max(0, n_timepoints - 1) * delay_s
+
+        self.stack_acq_time_field.setText(self._fmt_hms(stack_s))
+        self.tp_interval_field.setText(self._fmt_hms(round_s))
+        self.total_time_field.setText(self._fmt_hms(total_s))
 
     # -- Blocking driver calls: the re-entrancy guard -----------------------
     #
@@ -1991,13 +2081,18 @@ class MainWindow(QMainWindow):
         self.status_label.setStyleSheet("font-weight: bold; color: green;")
         self._log(f"Camera connected: {info}")
 
+        # FIXED 2026-09-23 (user: "exposure still isn't 100ms by default"):
+        # this used to read the camera's OWN remembered exposure back into
+        # the spin box, so a real camera left at some other exposure by a
+        # previous session (or DCAM's own device default) silently
+        # overrode the GUI's 100 ms default the moment you connected. The
+        # spin box is the setpoint -- Actual exposure/frame time (the
+        # read-back) comes from refresh_from_camera below -- so push it TO
+        # the camera, the same direction on_exposure_changed already uses.
         try:
-            self.exposure_spin.blockSignals(True)
-            self.exposure_spin.setValue(self.camera.get_exposure_ms())
-        except Exception:
-            pass
-        finally:
-            self.exposure_spin.blockSignals(False)
+            self.camera.set_exposure_ms(self.exposure_spin.value())
+        except Exception as e:
+            self._log(f"Set exposure on connect FAILED: {type(e).__name__}: {e}")
         self.camera_tab.refresh_from_camera()
         self._push_engine_times()          # LouisXIV's connect-time "Set Camera"
 
@@ -2062,6 +2157,7 @@ class MainWindow(QMainWindow):
         # the Scan Setup exposure regardless of camera or run state, as
         # LouisXIV's own "Set Camera" does.
         self._push_engine_times()
+        self._update_time_estimates()
         if self._blocking_op is not None:
             return  # a pumped spin-box event during a blocking driver call
         if self.acquiring:
@@ -2179,6 +2275,27 @@ class MainWindow(QMainWindow):
                   f"{cal.z_galvo.um_per_volt:g} um/V, Z piezo {cal.z_piezo.um_per_volt:g} um/V "
                   f"(source: {cal.source}).")
 
+    def _on_set_detection(self, magnification: float, camera_pixel_um: float) -> None:
+        """Camera tab's Detection Optics > Set Optics (UNMScope addition,
+        see camera_tab.py): apply the new magnification/camera pixel size
+        to this run immediately, persist them to the UNMScope ini copy the
+        same way um/V Cal does, and refresh FOV. User, 2026-09-23: "the FOV
+        should be calculated from the magnification of the objective in use
+        and the pixel size camera" -- the formula (Detection.pixel_size_um)
+        was already correct; the two numbers just weren't editable."""
+        detection = replace(self.calibration.detection,
+                            magnification=magnification, camera_pixel_um=camera_pixel_um)
+        self.calibration = replace(self.calibration, detection=detection)
+        try:
+            path = detection.save()
+        except Exception as e:
+            self._log(f"Detection optics: save failed: {type(e).__name__}: {e}")
+        else:
+            self._log(f"Detection optics set: {magnification:g}x magnification, "
+                      f"{camera_pixel_um:g} um camera pixel -> "
+                      f"{detection.xy_pixel_um:.4f} um/px sample-space (saved to {path}).")
+        self.camera_tab.refresh_fov()
+
     def _show_calibration_tab(self) -> None:
         """Utilities > um per V calibration: LouisXIV's [31] 'Edit um/V Cal'
         launches the settings GUI as its own window."""
@@ -2268,6 +2385,7 @@ class MainWindow(QMainWindow):
             vals = (f"{xyz[r][0]:.2f}", f"{xyz[r][1]:.2f}", f"{xyz[r][2]:.2f}", f"{rel[r]:.2f}") if r < len(xyz) else ("", "", "", "")
             for c, v in enumerate(vals):
                 self.locations_table.setItem(r, c, QTableWidgetItem(v))
+        self._update_time_estimates()
 
     def _camera_debug_status(self) -> CameraDebugStatus:
         """The counters LouisXIV's Debug Panel shows, from what this window
@@ -2994,6 +3112,16 @@ class MainWindow(QMainWindow):
 
         steps = [(t, p, positions[p]) for t in range(n_timepoints) for p in range(n_positions)]
         delay_s = self.tp_delay_spin.value() if multi_tp else 0.0
+        # ADDED 2026-09-23 (user, after a real 42-point run kept acquiring
+        # past the 42nd position): with Timepoints=Multi, a run legitimately
+        # repeats every position once per timepoint -- e.g. 42 positions x 2
+        # timepoints = 84 stacks, correctly revisiting position 1 after
+        # position 42. That was silent before (Total time was dummy, see
+        # _update_time_estimates); state the real total plainly so a
+        # misconfigured timepoint count is obvious before/while it runs,
+        # not after the fact.
+        self._log(f"Sequence: {n_timepoints} timepoint(s) x {n_positions} position(s) = "
+                  f"{len(steps)} stack(s) total, timepoint delay {delay_s:.3f} s.")
         return _AcqSequence(steps=steps, n_timepoints=n_timepoints, n_positions=n_positions,
                             timepoint_delay_s=delay_s)
 

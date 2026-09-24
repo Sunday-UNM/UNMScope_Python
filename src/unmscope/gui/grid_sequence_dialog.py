@@ -90,9 +90,16 @@ def _btn(parent, text, rect, slot=None):
 def generate_grid(start_xyz, range_xyz, size_xyz, overlap_pct: float):
     """Return a list of (x, y, z) stage positions for a tiled grid.
 
-    Per axis: step = size × (1 − overlap_pct/100).
+    Per axis: step magnitude = size × (1 − overlap_pct/100), signed by the
+    direction of range (range can be negative -- e.g. an Absolute-mode End
+    below Start, or a Relative-mode Range typed negative -- meaning "step
+    the other way," not "no points": FIXED 2026-09-23, user: "the Y
+    coordinate remained unchanged... even though the start and end values
+    for the Y coordinate are different" -- a negative range used to fail
+    the stopping test on its very first point and silently fall back to a
+    single, unmoving point.
     Points: start, start+step, start+2·step, …
-    Stop when step×n > range − size (always include at least the start point).
+    Stop when step_mag×n > |range| − size (always include at least start).
     Order: Z outermost, Y middle, X innermost.
     """
     axis_pts: list[list[float]] = []
@@ -104,14 +111,16 @@ def generate_grid(start_xyz, range_xyz, size_xyz, overlap_pct: float):
             axis_pts.append([start])
             continue
         overlap = size * (overlap_pct / 100.0)
-        step = size - overlap
-        if step <= 0:
+        step_mag = size - overlap
+        if step_mag <= 0:
             axis_pts.append([start])
             continue
+        step = step_mag if rng >= 0 else -step_mag
+        abs_rng = abs(rng)
         pts = [start]
         n = 1
         # LouisXIV: while (range - size) >= step*n  (always at least 1 point)
-        while (rng - size) >= step * n - 1e-9:
+        while (abs_rng - size) >= step_mag * n - 1e-9:
             pts.append(start + step * n)
             n += 1
         axis_pts.append(pts)
@@ -158,7 +167,35 @@ class GridSequenceDialog(QDialog):
         self._seq_changed = sequence_changed
         self._log = log or (lambda msg: None)
         self._grid_points: list[tuple[float, float, float]] = []
+        self._updating = False
         self._build()
+        # Seed Start from the live stage position ONCE, here at
+        # construction -- not on every show(). An earlier fix
+        # (2026-09-23, "it starts from a different position than the
+        # actual starting position") called this from a showEvent
+        # override instead, re-seeding on every re-show; the user then
+        # found that silently overwrote a Start they had since edited by
+        # hand or reasoned about relative to a manually-typed End, any
+        # time the dialog was hidden and reopened (2026-09-24: "the start
+        # position coordinates should not be affected... after entering
+        # the end position manually" / Current Position "should only
+        # alter the start position when clicked" -- i.e. by nothing else).
+        # This dialog is built once and reused (closeEvent hides, never
+        # destroys), so "once at construction" still means "once per
+        # session" in practice, and Current Position remains the only way
+        # to refresh Start after that.
+        self._on_current_position()
+        # FIXED 2026-09-23 (user: "once a grid sequence is generated it
+        # never gets deleted even after clicking remove all"): this
+        # dialog's own preview table only ever reflected its OWN last
+        # Generate click -- a Remove/Remove All done elsewhere (Sample
+        # Stage Control's Location Sequence panel) correctly cleared the
+        # real, shared LocationSequence, but left this stale "N points"
+        # preview sitting there, and clicking Set Sequence again would
+        # silently resurrect exactly what was just removed. If the shared
+        # sequence goes empty from outside this dialog, clear the preview
+        # to match.
+        self._sequence.add_listener(self._on_sequence_changed_elsewhere)
 
     # ── construction ─────────────────────────────────────────────────────────
 
@@ -184,30 +221,42 @@ class GridSequenceDialog(QDialog):
         self._relative_btn.setChecked(False)
         self._relative_btn.toggled.connect(self._on_relative_toggled)
 
-        # Range
-        _lbl(self, "Range", (230, 6, 50, 16), bold=True)
-        self._range: list[QDoubleSpinBox] = []
+        # Middle column (x 230..360, right after Start) and right column
+        # (x 370..500): WHICH of Range/End sits in which, and which one is
+        # the user's input vs. the computed read-back, swaps with the
+        # Absolute/Relative toggle -- user, 2026-09-23: "In the Absolute
+        # option, the end comes first and the range after, and the range
+        # is determined automatically from the start and end positions
+        # entered. The range comes before the end position in the relative
+        # option and the range values are manually entered." Geometry never
+        # moves; only role, label text and read-only state do, applied by
+        # _apply_field_roles (called once at the end of _build, and again
+        # on every Absolute/Relative toggle).
+        self._mid_label = _lbl(self, "End", (230, 6, 80, 16), bold=True)
+        self._mid: list[QDoubleSpinBox] = []
         for i, letter in enumerate(("X", "Y", "Z")):
             y0 = 26 + i * 26
             _lbl(self, letter, (230, y0 + 3, 12, 16))
-            s = _spin(self, (244, y0, 90, 22), lo=0, hi=1e7, step=10.0)
-            s.valueChanged.connect(self._update_end_calc)
+            s = _spin(self, (244, y0, 90, 22), lo=-1e7, hi=1e7, step=10.0)
+            s.valueChanged.connect(self._recompute_range_end)
             _lbl(self, "um", (336, y0 + 3, 22, 16))
-            self._range.append(s)
+            self._mid.append(s)
 
-        # End (Calc) — read-only
-        _lbl(self, "End (Calc)", (370, 6, 80, 16), bold=True)
-        self._end_calc: list[QDoubleSpinBox] = []
+        self._right_label = _lbl(self, "Range (Calc)", (370, 6, 80, 16), bold=True)
+        self._right: list[QDoubleSpinBox] = []
         for i, letter in enumerate(("X", "Y", "Z")):
             y0 = 26 + i * 26
             _lbl(self, letter, (370, y0 + 3, 12, 16))
-            s = _spin(self, (384, y0, 90, 22), ro=True)
+            # Full range, not Range's original lo=0: this column plays End
+            # in Relative mode, which must allow negative stage coordinates.
+            s = _spin(self, (384, y0, 90, 22), lo=-1e7, hi=1e7, step=10.0)
+            s.valueChanged.connect(self._recompute_range_end)
             _lbl(self, "um", (476, y0 + 3, 22, 16))
-            self._end_calc.append(s)
+            self._right.append(s)
 
-        # Wire start changes → update end calc
+        # Wire start changes -> recompute whichever column is derived
         for s in self._start:
-            s.valueChanged.connect(self._update_end_calc)
+            s.valueChanged.connect(self._recompute_range_end)
 
         # ── separator ────────────────────────────────────────────────────────
         sep = QFrame(self); sep.setGeometry(8, 136, 764, 1)
@@ -279,10 +328,21 @@ class GridSequenceDialog(QDialog):
 
         _btn(self, "Close", (608, 514, 162, 40), self.close)
 
+        self._apply_field_roles()
+
     # ── slots ─────────────────────────────────────────────────────────────────
 
     def _on_current_position(self) -> None:
-        """Fill Start spinboxes from the stage's current position."""
+        """Fill Start spinboxes from the stage's current position.
+
+        FIXED 2026-09-23 (user: "the set current position button no
+        longer works in the relative option"): a previous change here made
+        this zero Start instead in Relative mode, on the theory that
+        Relative meant "offset added to the current position at Generate
+        time." That theory was wrong -- Absolute/Relative is ONLY about
+        which of Range/End is the manual input and their left/right order
+        (_apply_field_roles); Start always means the same literal stage
+        coordinate in both modes, so this always reads the real position."""
         try:
             xyz = self._xyz_provider()
         except Exception as exc:
@@ -293,25 +353,54 @@ class GridSequenceDialog(QDialog):
 
     def _on_relative_toggled(self, checked: bool) -> None:
         self._relative_btn.setText("Relative" if checked else "Absolute")
+        self._apply_field_roles()
 
-    def _update_end_calc(self) -> None:
-        for s_sp, r_sp, e_sp in zip(self._start, self._range, self._end_calc):
-            e_sp.setValue(s_sp.value() + r_sp.value())
+    def _set_field_editable(self, s: QDoubleSpinBox, editable: bool) -> None:
+        s.setReadOnly(not editable)
+        s.setButtonSymbols(QDoubleSpinBox.UpDownArrows if editable else QDoubleSpinBox.NoButtons)
+        s.setStyleSheet(f"background: {_WHITE if editable else _BG}; border: 1px solid {_BORDER};")
+
+    def _apply_field_roles(self) -> None:
+        """The mid column is always the user's input, the right column
+        always the computed read-back -- only WHICH quantity (Range vs
+        End) plays which role, and the labels, swap with the mode:
+        Absolute: mid = End (input), right = Range (Calc). Relative:
+        mid = Range (input), right = End (Calc). Geometry never moves --
+        see _build's comment on the mid/right columns."""
+        relative = self._relative_btn.isChecked()
+        for s in self._mid:
+            self._set_field_editable(s, True)
+        for s in self._right:
+            self._set_field_editable(s, False)
+        self._mid_label.setText("Range" if relative else "End")
+        self._right_label.setText("End (Calc)" if relative else "Range (Calc)")
+        self._recompute_range_end()
+
+    def _recompute_range_end(self) -> None:
+        if self._updating:
+            return
+        self._updating = True
+        try:
+            if self._relative_btn.isChecked():
+                # mid = Range (input), right = End (computed)
+                for s_sp, rng_sp, end_sp in zip(self._start, self._mid, self._right):
+                    end_sp.setValue(s_sp.value() + rng_sp.value())
+            else:
+                # mid = End (input), right = Range (computed)
+                for s_sp, end_sp, rng_sp in zip(self._start, self._mid, self._right):
+                    rng_sp.setValue(end_sp.value() - s_sp.value())
+        finally:
+            self._updating = False
+
+    def _range_widgets(self) -> list[QDoubleSpinBox]:
+        return self._mid if self._relative_btn.isChecked() else self._right
 
     def _on_generate(self) -> None:
         """Compute the grid and populate the table."""
         start_xyz = tuple(s.value() for s in self._start)
-        range_xyz = tuple(r.value() for r in self._range)
+        range_xyz = tuple(s.value() for s in self._range_widgets())
         size_xyz  = tuple(t.value() for t in self._tile)
         overlap   = self._overlap.value()
-
-        # If Relative: offset each start by the current stage position
-        if self._relative_btn.isChecked():
-            try:
-                cur = self._xyz_provider()
-                start_xyz = tuple(s + c for s, c in zip(start_xyz, cur))
-            except Exception as exc:
-                self._log(f"Grid: cannot get stage position: {exc}")
 
         points = generate_grid(start_xyz, range_xyz, size_xyz, overlap)
         self._grid_points = points
@@ -328,6 +417,13 @@ class GridSequenceDialog(QDialog):
         self._npts_label.setText(str(len(points)))
         self._set_btn.setEnabled(len(points) > 0)
         self._log(f"Grid Sequence: {len(points)} points generated")
+
+    def _on_sequence_changed_elsewhere(self, seq: LocationSequence) -> None:
+        if len(seq) == 0 and self._grid_points:
+            self._grid_points = []
+            self._table.setRowCount(0)
+            self._npts_label.setText("0")
+            self._set_btn.setEnabled(False)
 
     def _on_set_sequence(self) -> None:
         """Replace the Location Sequence with the generated grid and notify."""

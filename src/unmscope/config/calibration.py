@@ -87,6 +87,19 @@ class Aotf:
         return int(row_index)
 
 
+#: [Detection optics] ini keys for Magnification / Camera Pixel (um). Not a
+#: LouisXIV section (no VI reads it; nothing in docs/vi_notes.md) -- a
+#: UNMScope-only addition so the objective and camera pixel pitch driving
+#: FOV/pixel-size math are editable without hand-editing the ini (user,
+#: 2026-09-23: "is there any file where I can always change the
+#: magnification... or should we add a section to the camera tab"). See
+#: gui/camera_tab.py's "Detection Optics" box, which writes both keys with
+#: unmscope.config.ini_text.write_keys the same way um_per_volt.py does.
+DETECTION_SECTION = "Detection optics"
+DETECTION_MAGNIFICATION_KEY = "Magnification"
+DETECTION_CAMERA_PIXEL_KEY = "Camera Pixel (um)"
+
+
 @dataclass(frozen=True)
 class Detection:
     """[Detection optics]: what a camera pixel sees at the sample. The XY
@@ -103,6 +116,21 @@ class Detection:
     def pixel_size_um(self, binning: int = 1) -> float:
         """Camera Image Pixel sizes.vi: ``CCD pixel size * Binning / Mag``."""
         return self.camera_pixel_um * max(1, int(binning)) / self.magnification
+
+    def save(self, path: Path | None = None) -> Path:
+        """Write Magnification / Camera Pixel (um) into the UNMScope ini
+        copy's [Detection optics] section, touching nothing else -- same
+        surgical writer and same file um_per_volt.MicronsToVolt.save() uses,
+        so a Save here survives a restart and never touches LouisXIV's own
+        ini (that file is read-only input, project-wide)."""
+        from unmscope.config.ini_text import write_keys
+        from unmscope.config.um_per_volt import ensure_unmscope_ini
+        p = Path(path) if path is not None else ensure_unmscope_ini()
+        write_keys(p, DETECTION_SECTION, {
+            DETECTION_MAGNIFICATION_KEY: f"{self.magnification:.6f}",
+            DETECTION_CAMERA_PIXEL_KEY: f"{self.camera_pixel_um:.6f}",
+        })
+        return p
 
 
 @dataclass(frozen=True)
@@ -157,7 +185,8 @@ def load_calibration(ini_path: str | Path | None = None) -> Calibration:
     mtv = MicronsToVolt.from_configparser(cp, fallback=_UM_PER_VOLT_FALLBACK)
     return Calibration(
         aotf=aotf,
-        detection=Detection(magnification=_get(cp, "Detection optics", "Magnification", 30.0),
+        detection=Detection(magnification=_get(cp, DETECTION_SECTION, DETECTION_MAGNIFICATION_KEY, 30.0),
+                            camera_pixel_um=_get(cp, DETECTION_SECTION, DETECTION_CAMERA_PIXEL_KEY, 6.5),
                             physical_pixel_z_um=_get(cp, "Detection optics", "PhysicalPixelSizeZ (um)", 0.2)),
         x_galvo=Axis("X Galvo", mtv.galvo_cmd_x,
                      _get(cp, "X Galvo Limits (V)", "Min (V)", -2.5), _get(cp, "X Galvo Limits (V)", "Max (V)", 2.5)),

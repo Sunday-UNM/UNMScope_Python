@@ -56,17 +56,27 @@ _rect = rect_mapper(OX, OY)
 
 class CameraTab(QWidget):
     """See the module docstring. ``get_camera`` returns the connected
-    Camera or None; ``pixel_size_um(binning)`` comes from the calibration."""
+    Camera or None; ``pixel_size_um(binning)`` comes from the calibration.
+
+    ``magnification``/``camera_pixel_um`` seed the Detection Optics box
+    (below the real panel's own content -- see ``_build``'s comment there);
+    ``set_detection(magnification, camera_pixel_um)``, when given, is called
+    when the user clicks Set Optics."""
 
     roi_changed = Signal(object)
 
     def __init__(self, get_camera: Callable[[], Camera | None],
                  pixel_size_um: Callable[[int], float], log: Callable[[str], None],
+                 magnification: float = 30.0, camera_pixel_um: float = 6.5,
+                 set_detection: Callable[[float, float], None] | None = None,
                  parent: QWidget | None = None):
         super().__init__(parent)
         self._get_camera = get_camera
         self._pixel_size_um = pixel_size_um
         self._log = log
+        self._initial_magnification = magnification
+        self._initial_camera_pixel_um = camera_pixel_um
+        self._set_detection = set_detection or (lambda mag, px: None)
         self._sensor = (Camera.SENSOR_WIDTH, Camera.SENSOR_HEIGHT)
         self._units = (4, 4, 4, 4)
         self._roi = full_roi(*self._sensor)
@@ -211,13 +221,65 @@ class CameraTab(QWidget):
         self.roi_512_btn = self._button("512x512", _rect(37, 783, 92, 31), lambda: self.on_preset(512))
         self.center_at_btn = self._button("Center  ROI at", _rect(37, 823, 92, 31), self.on_center_roi_at)
 
+        # ---- Detection Optics (UNMScope addition -- no LouisXIV panel or VI
+        # for this; nothing in docs/vi_notes.md) --------------------------------
+        # FOV = pixel count x sample-space pixel size, and sample-space pixel
+        # size = camera sensor pixel (um) / objective magnification
+        # (Detection.pixel_size_um, unmscope/config/calibration.py). Both
+        # numbers used to be editable only by hand-editing the ini's
+        # [Detection optics] section (Magnification), or not at all (Camera
+        # Pixel (um) was hardcoded, never read from the ini) -- user,
+        # 2026-09-23: "the FOV should be calculated from the magnification of
+        # the objective in use and the pixel size camera... should we add a
+        # section to the camera tab". Not pixel-matched to anything real --
+        # plain coordinates, not the _rect() measured-panel mapper. Placed
+        # in the blank column right of the ROI/# of pixels/FOV boxes (the
+        # real panel has nothing there below "Actual"'s bottom, page y~160,
+        # down to the ROI center box at y~448) -- moved up from below the
+        # panel's own content (user, same day: "so I don't have to scroll
+        # down to see it"), and this spot needs no extra scroll height at all.
+        opt_x, opt_top = 244, 180
+        self._label("Detection Optics", (opt_x, opt_top, 145, 16), bold=True)
+        self._box((opt_x, opt_top + 16, 145, 132), white=True)
+        self._label("Magnification (x)", (opt_x + 6, opt_top + 22, 130, 16))
+        self.magnification_spin = QDoubleSpinBox(self)
+        self.magnification_spin.setGeometry(opt_x + 6, opt_top + 38, 90, 20)
+        self.magnification_spin.setRange(1.0, 200.0)
+        self.magnification_spin.setDecimals(2)
+        self.magnification_spin.setSuffix("x")
+        self.magnification_spin.setValue(self._initial_magnification)
+        self.magnification_spin.setKeyboardTracking(False)
+        self.magnification_spin.setToolTip(
+            "Objective magnification (e.g. 30 for a 30x). Drives FOV and the "
+            "sample-space pixel size (Camera Pixel Size / Magnification) -- "
+            "click Set Optics to apply and save it.")
+        self._label("Cam. Pixel Size (um)", (opt_x + 6, opt_top + 62, 130, 16))
+        self.camera_pixel_spin = QDoubleSpinBox(self)
+        self.camera_pixel_spin.setGeometry(opt_x + 6, opt_top + 78, 90, 20)
+        self.camera_pixel_spin.setRange(0.1, 50.0)
+        self.camera_pixel_spin.setDecimals(3)
+        self.camera_pixel_spin.setValue(self._initial_camera_pixel_um)
+        self.camera_pixel_spin.setKeyboardTracking(False)
+        self.camera_pixel_spin.setToolTip(
+            "Physical camera sensor pixel pitch (Orca Flash 4.0 = 6.5 um).")
+        self.set_optics_btn = self._button("Set Optics", (opt_x + 6, opt_top + 104, 90, 26),
+                                           self._on_set_detection)
+        self.set_optics_btn.setToolTip(
+            "Apply these values to FOV/pixel-size calculations now, and save "
+            "them so they come back on the next launch.")
+
     # -- state -------------------------------------------------------------------
     def persistent_widgets(self) -> dict:
         """Camera settings worth carrying into the next session (see
         unmscope.config.ui_state). The ROI corners are stored rather than
-        the derived width/height boxes, which recompute from them."""
-        return {"cam_exposure_ms": self.exposure_spin,
-                "cam_sync_readout": self.sync_readout_chk,
+        the derived width/height boxes, which recompute from them.
+
+        Exposure is deliberately NOT included (user, 2026-09-23: "The
+        exposure time should be 100ms by default") -- same reasoning as
+        Hold/window geometry in main_window.py's _persistent_widgets:
+        coming up at a fixed, known-safe value beats silently carrying over
+        whatever was last typed, which read as a bug, not a convenience."""
+        return {"cam_sync_readout": self.sync_readout_chk,
                 "cam_sensor_mode": self.sensor_mode_combo,
                 "cam_roi_left": self.roi_left, "cam_roi_right": self.roi_right,
                 "cam_roi_top": self.roi_top, "cam_roi_bottom": self.roi_bottom}
@@ -252,6 +314,14 @@ class CameraTab(QWidget):
             self.fov_y.setText(f"{fov_um(roi.height, pix):.1f} um")
         finally:
             self._updating = False
+
+    def refresh_fov(self) -> None:
+        """Re-read pixel_size_um(1) (e.g. after Set Optics changes the
+        calibration this tab was built with) and redraw FOV X/Y."""
+        self._show_roi(self._roi)
+
+    def _on_set_detection(self) -> None:
+        self._set_detection(self.magnification_spin.value(), self.camera_pixel_spin.value())
 
     def _set_roi(self, roi: Roi) -> Roi:
         hpu, vpu, hu, vu = self._units

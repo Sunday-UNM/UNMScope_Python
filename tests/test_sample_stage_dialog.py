@@ -258,3 +258,57 @@ def test_real_factory_is_used_when_simulate_is_off(app, env):
         assert made == ["COM8"] and isinstance(d.stage, Fake)
     finally:
         d.shutdown()
+
+
+# -- Grid Sequence Tile Size auto-fill --------------------------------------------------------
+# FIXED 2026-09-25: GridSequenceDialog.push_acq_settings() existed but nothing
+# ever called it (deferred 2026-09-23/24, user: "the fix on the tile size
+# will be attended to in the next revision"). SampleStageDialog now takes an
+# acq_settings_provider and forwards it via refresh_grid_tile_size().
+
+def test_refresh_grid_tile_size_is_a_noop_before_the_dialog_exists(dlg):
+    # No acq_settings_provider given (the `dlg` fixture doesn't pass one) and
+    # the Grid Sequence dialog was never opened -- nothing to push into, and
+    # nothing to push with; must not raise either way.
+    assert dlg._grid_dialog is None
+    dlg.refresh_grid_tile_size()
+    assert dlg._grid_dialog is None
+
+
+def test_opening_grid_sequence_pushes_the_provided_tile_size(app, env):
+    calls = []
+
+    def provider():
+        calls.append(1)
+        return 444.0, 444.0, 26.0
+
+    d = SampleStageDialog(acq_settings_provider=provider)
+    try:
+        assert calls == []          # not called until the dialog is actually opened
+        d.gen_grid_btn.click()      # -> _show_grid_sequence: creates the dialog, then pushes
+        assert calls == [1]
+        assert [s.value() for s in d._grid_dialog._tile] == [444.0, 444.0, 26.0]
+
+        # Re-opening (dialog already exists, just re-shown) pushes again with
+        # whatever the provider returns now -- this is the "auto" part.
+        d._grid_dialog._tile[0].setValue(999.0)   # simulate the user editing it by hand
+        d.gen_grid_btn.click()
+        assert calls == [1, 1]
+        assert d._grid_dialog._tile[0].value() == 444.0   # overwritten back from the provider
+    finally:
+        d.shutdown()
+
+
+def test_refresh_grid_tile_size_survives_a_provider_that_raises(app, env):
+    def provider():
+        raise RuntimeError("camera not ready")
+
+    d = SampleStageDialog(acq_settings_provider=provider)
+    try:
+        logged = []
+        d._log = logged.append
+        d.gen_grid_btn.click()      # must not raise despite the provider blowing up
+        assert d._grid_dialog is not None
+        assert any("Tile Size" in m for m in logged)
+    finally:
+        d.shutdown()

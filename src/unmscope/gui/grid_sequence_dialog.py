@@ -9,9 +9,10 @@ button.  The user supplies:
   time rather than storing an absolute value.
 * **Range** (X, Y, Z um) — total span to cover (≥ 0).
 * **Tile Size** (X, Y, Z um) — physical size of one image tile on the sample.
-  In LouisXIV these were computed from ``Image Size X|Y * um/px`` and
-  ``Z um/px * # slices``; here they are explicit user inputs because the
-  acquisition pipeline is not connected to this dialog.
+  Editable, but auto-filled from ``Image Size X|Y * um/px`` and
+  ``Z um/px * # slices`` (same as LouisXIV) whenever this dialog is opened
+  or the settings driving that formula change -- see
+  ``push_acq_settings()`` and ``SampleStageDialog.refresh_grid_tile_size()``.
 * **Overlap %** (0–99) — fractional overlap between adjacent tiles expressed as
   a percentage of the tile size.  ``step = size × (1 - overlap/100)``.
 

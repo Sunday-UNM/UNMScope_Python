@@ -551,6 +551,7 @@ class MainWindow(QMainWindow):
         # and the camera's own cycle depends on ROI height (camera_cycle_s's
         # vsize), so a sub-array change refreshes Cam exp / Cycle time here.
         self.camera_tab.roi_changed.connect(lambda _roi: self._push_engine_times())
+        self.camera_tab.roi_changed.connect(lambda _roi: self._refresh_grid_tile_size())
         # The Scan Setup Dither box's sweeps / flyback ARE the cluster's Dither
         # Triangle Pulses / Dither Fract. Flyback: keep the two views in step.
         self.dg_sweeps.valueChanged.connect(self.utilities_tab.waveform_panel.dither_triangle_pulses.setValue)
@@ -1876,6 +1877,37 @@ class MainWindow(QMainWindow):
         m, s = divmod(rem, 60)
         return f"{h:02d}:{m:02d}:{s:02d}"
 
+    def _tile_size_um(self) -> tuple[float, float, float]:
+        """Tile Size (X, Y, Z um) for the Grid Sequence dialog: LouisXIV's
+        ``Image Size X|Y * um/px`` and ``Z um/px * # slices`` (see
+        gui/grid_sequence_dialog.py's module docstring) -- passed to
+        SampleStageDialog as its ``acq_settings_provider`` and called via
+        ``refresh_grid_tile_size()`` (deferred 2026-09-23/24: the dialog's
+        own ``push_acq_settings()`` existed but nothing called it).
+        Uses the Camera tab's configured ROI (works even without a
+        connected camera, same as ``_update_time_estimates``'s n_slices)
+        and binning 1 when no camera is connected, matching
+        ``_scalebar_um_per_px``'s fallback."""
+        binning = self.camera.get_binning() if (self.camera is not None and self.camera.is_connected) else 1
+        px_um = self.calibration.detection.pixel_size_um(binning=binning)
+        roi = self.camera_tab.roi
+        size_x_um = roi.width * px_um
+        size_y_um = roi.height * px_um
+        interval = self.z_interval_spin.value()
+        if interval > 0:
+            n_slices = max(1, int(round(abs(self.z_end_spin.value() - self.z_start_spin.value()) / interval)) + 1)
+        else:
+            n_slices = 1
+        size_z_um = interval * n_slices
+        return size_x_um, size_y_um, size_z_um
+
+    def _refresh_grid_tile_size(self) -> None:
+        """Forward the current Tile Size to the Grid Sequence dialog (no-op
+        until Sample Stage Control has been opened at least once). Call
+        wherever ROI/pixel-size/Z-stack-range/slices change."""
+        if self.sample_stage_dialog is not None:
+            self.sample_stage_dialog.refresh_grid_tile_size()
+
     def _update_time_estimates(self) -> None:
         """Live, quiet preview of Stack Acq. Time / Timepoint Interval /
         Total time from the current Scan Setup values.
@@ -1906,6 +1938,7 @@ class MainWindow(QMainWindow):
             self.stack_acq_time_field.setText("00:00:00")
             self.tp_interval_field.setText("00:00:00")
             self.total_time_field.setText("00:00:00")
+            self._refresh_grid_tile_size()
             return
 
         interval = self.z_interval_spin.value()
@@ -1939,6 +1972,7 @@ class MainWindow(QMainWindow):
         self.stack_acq_time_field.setText(self._fmt_hms(stack_s))
         self.tp_interval_field.setText(self._fmt_hms(round_s))
         self.total_time_field.setText(self._fmt_hms(total_s))
+        self._refresh_grid_tile_size()
 
     # -- Blocking driver calls: the re-entrancy guard -----------------------
     #
@@ -2295,6 +2329,7 @@ class MainWindow(QMainWindow):
                       f"{camera_pixel_um:g} um camera pixel -> "
                       f"{detection.xy_pixel_um:.4f} um/px sample-space (saved to {path}).")
         self.camera_tab.refresh_fov()
+        self._refresh_grid_tile_size()
 
     def _show_calibration_tab(self) -> None:
         """Utilities > um per V calibration: LouisXIV's [31] 'Edit um/V Cal'
@@ -2366,6 +2401,7 @@ class MainWindow(QMainWindow):
                 real_z_factory=real_focus_factory,
                 z_com_port="COM8",
                 rel_offset_provider=lambda: self.rel_offset_spin.value(),
+                acq_settings_provider=self._tile_size_um,
                 log=self._log, parent=self)
             self.sample_stage_dialog.rel_offset_recalled.connect(self.rel_offset_spin.setValue)
             self.sample_stage_dialog.sequence_changed.connect(self._refresh_locations_table)

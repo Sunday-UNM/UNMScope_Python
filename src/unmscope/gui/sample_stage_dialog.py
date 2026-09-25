@@ -441,6 +441,7 @@ class SampleStageDialog(QWidget):
                  z_steps_per_um: float = DEFAULT_STEPS_PER_UM,
                  # ---
                  rel_offset_provider: Callable[[], float] | None = None,
+                 acq_settings_provider: Callable[[], tuple[float, float, float]] | None = None,
                  log: Callable[[str], None] | None = None, parent=None):
         super().__init__(parent, Qt.Window)
         self.setWindowTitle("Sample Stage Control")
@@ -450,6 +451,7 @@ class SampleStageDialog(QWidget):
         self._real_factory = real_stage_factory
         self._real_z_factory = real_z_factory
         self._rel_offset_provider = rel_offset_provider or (lambda: 0.0)
+        self._acq_settings_provider = acq_settings_provider
         self._busy = False
         self._confirm: Callable[[str], bool] = self._ask
         self._notify: Callable[[str], None] = self._info
@@ -1322,9 +1324,31 @@ class SampleStageDialog(QWidget):
                 log=self._log,
                 parent=self,
             )
+        self.refresh_grid_tile_size()
         self._grid_dialog.show()
         self._grid_dialog.raise_()
         self._grid_dialog.activateWindow()
+
+    def refresh_grid_tile_size(self) -> None:
+        """Push the main window's current Tile Size (X, Y, Z um) into the
+        Grid Sequence dialog: ``GridSequenceDialog.push_acq_settings()``
+        existed but nothing ever called it (deferred 2026-09-23/24, user:
+        "the fix on the tile size will be attended to in the next
+        revision"). No-op if the dialog was never opened (nothing to push
+        into yet) or no ``acq_settings_provider`` was given. Called both
+        when the Grid Sequence dialog is (re)shown and, from the main
+        window, whenever Camera ROI/pixel size or Z-stack range/slices
+        change while it may already be open."""
+        if self._grid_dialog is None or self._acq_settings_provider is None:
+            return
+        try:
+            size_x_um, size_y_um, size_z_um = self._acq_settings_provider()
+        except Exception as exc:
+            self._log(f"Grid: could not compute Tile Size: {exc}")
+            return
+        self._grid_dialog.push_acq_settings(
+            size_x_um=size_x_um, size_y_um=size_y_um, size_z_um=size_z_um,
+            description="From Camera ROI / pixel size and the Z-stack range & slices.")
 
     # -- window ----------------------------------------------------------------------------------
     def closeEvent(self, event) -> None:

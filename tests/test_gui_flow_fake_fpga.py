@@ -892,6 +892,9 @@ class _FakeSequenceDialog:
     def end_sequence_control(self):
         self.sequence_control_active = False
 
+    def refresh_grid_tile_size(self):
+        pass
+
 
 def test_multi_position_multi_timepoint_sequence(app, window, tmp_path):
     """2 timepoints x 2 positions = 4 stacks, one Acquire click. Proves the
@@ -1032,3 +1035,61 @@ def test_more_than_one_row_may_be_live_at_once(window, app):
     pump(app, 0.02)
     assert w.fpga.aotf_levels["AOTF ch 1"] > 0
     assert w.fpga.aotf_levels["AOTF ch 2"] > 0
+
+
+# -- Grid Sequence Tile Size auto-fill ---------------------------------------------------------
+# FIXED 2026-09-25: GridSequenceDialog.push_acq_settings() existed but
+# nothing ever called it (deferred 2026-09-23/24, user: "the fix on the
+# tile size will be attended to in the next revision"). MainWindow now
+# computes it (_tile_size_um, LouisXIV's Image Size X|Y * um/px and Z step
+# * # slices) and pushes it via SampleStageDialog.refresh_grid_tile_size()
+# whenever ROI, Detection Optics or the Z-stack range/slices change.
+# test_sample_stage_dialog.py covers the SampleStageDialog/GridSequenceDialog
+# side of this wiring; these cover MainWindow's half without touching real
+# stage hardware (see _FakeSequenceDialog above for why).
+
+def test_tile_size_um_matches_roi_pixel_size_and_zstack_range(window):
+    """The fixture connects a Simulated camera (2048x2048, full ROI) and
+    sets z_start=0/z_end=9/z_interval=1 -> 10 slices."""
+    w = window
+    px_um = w.calibration.detection.pixel_size_um(binning=w.camera.get_binning())
+    size_x, size_y, size_z = w._tile_size_um()
+    assert size_x == pytest.approx(w.camera_tab.roi.width * px_um)
+    assert size_y == pytest.approx(w.camera_tab.roi.height * px_um)
+    assert size_z == pytest.approx(10.0)          # 1.0 um/slice x 10 slices
+
+
+class _FakeGridAwareDialog:
+    """Minimal stand-in for SampleStageDialog exposing only the one method
+    _refresh_grid_tile_size calls -- the dialog's own push_acq_settings
+    plumbing is covered in test_sample_stage_dialog.py."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def refresh_grid_tile_size(self):
+        self.calls += 1
+
+
+def test_refresh_grid_tile_size_is_a_noop_with_no_dialog_open(window):
+    w = window
+    w.sample_stage_dialog = None
+    w._refresh_grid_tile_size()                  # must not raise
+
+
+def test_roi_change_refreshes_grid_tile_size(window):
+    w = window
+    fake = _FakeGridAwareDialog()
+    w.sample_stage_dialog = fake
+    w.camera_tab.on_preset(1024)                  # -> roi_changed -> _refresh_grid_tile_size
+    assert fake.calls == 1
+
+
+def test_zstack_range_change_refreshes_grid_tile_size(window):
+    w = window
+    fake = _FakeGridAwareDialog()
+    w.sample_stage_dialog = fake
+    w.mode_combo.setCurrentText(mw.MODE_ZSTACK)   # _update_slice_count only recomputes in Z-stack mode
+    before = fake.calls
+    w.z_interval_spin.setValue(2.0)
+    assert fake.calls > before

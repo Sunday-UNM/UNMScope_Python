@@ -901,8 +901,9 @@ def test_multi_position_multi_timepoint_sequence(app, window, tmp_path):
     whole loop end to end: stage moves happen, files land under distinct
     position subfolders, each position keeps its OWN AcqInfo.txt with its
     own Multi-positionAcq/position fields (not overwritten by later
-    positions), TileConfiguration.txt is written for stitching, and the
-    run returns to IDLE on its own when the sequence is exhausted."""
+    positions), the BigStitcher locations file and Stich/ folder are
+    written for stitching, and the run returns to IDLE on its own when
+    the sequence is exhausted."""
     w = window
     w._data_dir = tmp_path
     w.save_files_chk.setChecked(True)
@@ -956,16 +957,26 @@ def test_multi_position_multi_timepoint_sequence(app, window, tmp_path):
     assert "Timepoints = 2" in acq1 and "Timepoints = 2" in acq2
     assert not (exp / "AcqInfo.txt").exists(), "no stray experiment-root copy"
 
-    # TileConfiguration.txt (ImageJ Grid/Collection Stitching "Positions
-    # from file"): one row per position, pixel offsets relative to
-    # position 1. xy_pixel_um from the default calibration (30x, 6.5 um
-    # camera pixel) = 6.5/30 um/px; positions differ only in X by 200 um.
-    tile_cfg = (exp / "TileConfiguration.txt").read_text(encoding="utf-8")
-    assert "dim = 3" in tile_cfg
-    px_um = w.calibration.detection.xy_pixel_um
-    expected_dx = 200.0 / px_um
-    assert "position 1\\img_CH00_000000.tif; ; (0.00, 0.00, 0.00)" in tile_cfg
-    assert f"position 2\\img_CH00_000000.tif; ; ({expected_dx:.2f}, 0.00, 0.00)" in tile_cfg
+    # ADDED 2026-09-29 (user: incorporate their own two hand-run stitching
+    # scripts into the software as an augmentation to the normal save):
+    # BigStitcher_relative_physical_locations_um.txt -- microns, relative
+    # to position 1, X/Y negated (BIGSTITCHER_INVERT_XYZ, the sign this
+    # rig's own script found correct), Z untouched. Positions differ only
+    # in X by 200 um -> dx = -200.00 (negated), view 0 is the origin.
+    locs = (exp / "BigStitcher_relative_physical_locations_um.txt").read_text(encoding="utf-8")
+    assert "dim=3" in locs
+    assert "0;;(0.00,0.00,0.00)" in locs
+    assert "1;;(-200.00,0.00,0.00)" in locs
+
+    # Stich/<N>.tif (N = 1-based position number): a flat, numbered copy
+    # of each position's stack, hard-linked (same bytes, no extra disk
+    # space) from whichever stack most recently saved for that position --
+    # here each position's LAST (t=1) stack.
+    stich1 = exp / "Stich" / "1.tif"
+    stich2 = exp / "Stich" / "2.tif"
+    assert stich1.exists() and stich2.exists()
+    assert stich1.stat().st_size == (exp / "position 1" / "img_CH00_000001.tif").stat().st_size
+    assert stich2.stat().st_size == (exp / "position 2" / "img_CH00_000001.tif").stat().st_size
 
 
 def test_a_folder_already_on_disk_still_wins(app, window, tmp_path):

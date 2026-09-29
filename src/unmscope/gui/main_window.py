@@ -50,7 +50,9 @@ from __future__ import annotations
 
 import datetime
 import math
+import os
 import re
+import shutil
 import threading
 import time
 from dataclasses import dataclass, field, replace
@@ -205,7 +207,11 @@ class SequenceSignals(QObject):
 @dataclass
 class _SaveJob:
     """One queued background stack write -- see MainWindow._save_stack's
-    2026-09-22 fix (queued, not dropped, when a save is already in flight)."""
+    2026-09-22 fix (queued, not dropped, when a save is already in flight).
+
+    ``position`` (ADDED 2026-09-29, the Stich-folder augmentation) is the
+    Build Image Path.vi position index, or None outside a multi-location
+    run -- see _dispatch_next_save_job's worker."""
     path: Path
     stack: object
     pixel_size_um: float
@@ -213,6 +219,7 @@ class _SaveJob:
     channel_name: str
     exp: Path
     acq_fields_extras: tuple[dict, dict]
+    position: int | None = None
 
 
 @dataclass
@@ -1690,7 +1697,8 @@ class MainWindow(QMainWindow):
                           self.separate_position_folders)
         job = _SaveJob(path=path, stack=stack, pixel_size_um=cal.detection.xy_pixel_um,
                       z_step_um=self.z_interval_spin.value(), channel_name=self.excitation_rows[ch][1],
-                      exp=exp, acq_fields_extras=self._acq_info(stack, position_xyz=position_xyz))
+                      exp=exp, acq_fields_extras=self._acq_info(stack, position_xyz=position_xyz),
+                      position=position)
         # FIXED 2026-09-22: a multi-position/timepoint sequence can legitimately
         # finish a stack before the PREVIOUS stack's background write is done
         # (small stacks, a fast stage); this used to just log "Save skipped"
@@ -1723,6 +1731,8 @@ class MainWindow(QMainWindow):
                 # own metadata "next to the images" (Write Companion Metadata
                 # File.vi's own description).
                 write_acq_info(job.path.parent, acq_fields, acq_extras)
+                if job.position is not None:
+                    self._link_into_stich_folder(job.exp, job.path, job.position)
             except Exception as e:                                      # noqa: BLE001
                 self.save_signals.failed.emit(f"{type(e).__name__}: {e}")
             else:
@@ -1732,6 +1742,35 @@ class MainWindow(QMainWindow):
         self._log(f"Saving {job.stack.shape[0]}-slice stack in the background: {job.path}"
                   + (f" ({len(self._save_queue)} more queued)" if self._save_queue else ""))
         threading.Thread(target=worker, name="unmscope-stack-save", daemon=True).start()
+
+    def _link_into_stich_folder(self, exp: Path, path: Path, position: int) -> None:
+        """Augment the normal save with a flat, numbered copy for stitching
+        tools -- ADDED 2026-09-29, replicating (in-software) two scripts
+        the user had been running by hand after every multi-location
+        acquisition: ``collect_position_stacks_to_stich.py`` (collects
+        each position's stack into a flat ``Stich/<N>.tif``, N = 1-based
+        position number, same convention/folder NAME -- "Stich", not
+        "Stitch" -- the user's script already used) and
+        ``SPIMProject_to_BigStitcher_correct_locations.py`` (writes the
+        matching location file -- see _write_bigstitcher_locations).
+        Runs on the background save thread, same as the rest of this
+        worker. A hard link, not a copy: same NTFS volume (Stich/ lives
+        inside the experiment folder), so this costs no extra disk space
+        for what can be multi-GB stacks, and the original file is
+        untouched either way (matches the user's script's own promise,
+        "Original files are NOT changed or deleted"). Falls back to an
+        actual copy if hard-linking fails (e.g. a filesystem that does
+        not support it) rather than losing the stitching copy entirely.
+        """
+        stich_dir = exp / "Stich"
+        stich_dir.mkdir(parents=True, exist_ok=True)
+        dest = stich_dir / f"{position + 1}.tif"
+        try:
+            if dest.exists():
+                dest.unlink()
+            os.link(path, dest)
+        except OSError:
+            shutil.copy2(path, dest)
 
     def _on_stack_save_finished(self, path: Path, exp: Path, n_slices: int):
         self._saving_stack = False
@@ -3156,7 +3195,7 @@ class MainWindow(QMainWindow):
             # Hand exclusive stage control to the sequence for the whole
             # run -- see begin_sequence_control's docstring for why.
             dlg.begin_sequence_control()
-            self._write_tile_configuration(positions)
+            self._write_bigstitcher_locations(positions)
 
         steps = [(t, p, positions[p]) for t in range(n_timepoints) for p in range(n_positions)]
         delay_s = self.tp_delay_spin.value() if multi_tp else 0.0
@@ -3173,56 +3212,60 @@ class MainWindow(QMainWindow):
         return _AcqSequence(steps=steps, n_timepoints=n_timepoints, n_positions=n_positions,
                             timepoint_delay_s=delay_s)
 
-    def _write_tile_configuration(self, positions: list[Vec3]) -> None:
-        """Write ``TileConfiguration.txt`` (ImageJ's Grid/Collection
-        Stitching plugin, "Positions from file") into the experiment
-        folder, one row per position -- so a multi-location run can be
-        stitched without hand-converting stage coordinates.
+    #: Axis orientation the user's own hand-run script
+    #: (SPIMProject_to_BigStitcher_correct_locations.py) found necessary
+    #: for this rig, empirically: X and Y stage motion come out mirrored
+    #: relative to the image axes BigStitcher expects; Z does not.
+    BIGSTITCHER_INVERT_XYZ = (True, True, False)
 
-        User, 2026-09-28: found their own manually-built
-        ``SPIMProject...relative_invertedXY.txt`` sitting next to a
-        stitching attempt -- exactly the tedious, error-prone conversion
-        (absolute stage um -> relative pixel offsets) this automates.
+    def _write_bigstitcher_locations(self, positions: list[Vec3]) -> None:
+        """Write ``BigStitcher_relative_physical_locations_um.txt`` into
+        the experiment folder -- one row per position, in the exact
+        format/convention the user's own
+        ``SPIMProject_to_BigStitcher_correct_locations.py`` produced by
+        hand after every multi-location run (2026-09-29: "incorporate
+        this into our software" -- an augmentation, the normal per-
+        position save is unchanged).
 
-        Offsets are in PIXELS: X/Y = (this position's stage um - the
-        first position's) / the real xy pixel size; Z the same, divided
-        by the Z-stack's own interval (rarely nonzero for a tiled grid,
-        but not assumed to be). Uses the SAME sign convention as the raw
-        stage coordinates (Location Sequence file) -- NOT verified
-        against this rig's actual camera/stage axis calibration (a 45
-        degree stage angle is in play, see AcqInfo's StageAngle_deg), so
-        if the first stitch attempt comes out mirrored or offset the
-        wrong way, negate the affected axis/axes in this file (or ask for
-        that to be made automatic once the correct sign is known).
+        Position 1 is the origin; each row is that position's stage delta
+        in MICRONS (not pixels -- load in BigStitcher with "pixel units"
+        UNCHECKED, same as the user's script's own instruction), with X
+        and Y negated and Z left alone (BIGSTITCHER_INVERT_XYZ, verified
+        by the user's own script comment: "Axis orientation that worked
+        for this microscope"). Rows are ``view_id;;(x,y,z)`` with NO
+        filename column -- BigStitcher's own "Read Locations From File"
+        matches rows to tiles positionally, by load order, and view_id
+        here (0-based) already matches the position folder numbering
+        (position 1 -> view 0) and the Stich/<N>.tif numbering
+        (_link_into_stich_folder) the same way the user's two scripts'
+        outputs already lined up with each other.
         """
         if len(positions) < 2 or self._data_dir is None:
             return
-        # Same resolution _save_stack uses -- _experiment_dir is set once
-        # the Save Image dialog is accepted, but fall back the same way
-        # rather than popping a second prompt of our own.
         exp = self._experiment_dir or self.next_experiment_folder(self._data_dir)
-        px_um = self.calibration.detection.xy_pixel_um
-        z_step_um = self.z_interval_spin.value()
-        ch = self._selected_channel_index()
+        invert_x, invert_y, invert_z = self.BIGSTITCHER_INVERT_XYZ
         ref = positions[0]
-        lines = ["# Define the number of dimensions we are working on", "dim = 3", "",
-                 "# Define the image coordinates"]
-        for i, xyz in enumerate(positions):
-            rel_path = stack_path(exp, self._save_base, ch, 0, i, True).relative_to(exp)
-            dx_px = (xyz[0] - ref[0]) / px_um if px_um else 0.0
-            dy_px = (xyz[1] - ref[1]) / px_um if px_um else 0.0
-            dz_px = (xyz[2] - ref[2]) / z_step_um if z_step_um else 0.0
-            lines.append(f"{rel_path}; ; ({dx_px:.2f}, {dy_px:.2f}, {dz_px:.2f})")
-        path = exp / "TileConfiguration.txt"
+        lines = ["dim=3", ""]
+        for view_id, xyz in enumerate(positions):
+            dx, dy, dz = (xyz[0] - ref[0]), (xyz[1] - ref[1]), (xyz[2] - ref[2])
+            if invert_x:
+                dx = -dx
+            if invert_y:
+                dy = -dy
+            if invert_z:
+                dz = -dz
+            # Remove negative zero, same as the user's own script.
+            dx, dy, dz = (0.0 if abs(v) < 5e-3 else v for v in (dx, dy, dz))
+            lines.append(f"{view_id};;({dx:.2f},{dy:.2f},{dz:.2f})")
+        path = exp / "BigStitcher_relative_physical_locations_um.txt"
         try:
             exp.mkdir(parents=True, exist_ok=True)   # this runs before any stack has created it
             path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         except Exception as e:
-            self._log(f"Could not write TileConfiguration.txt: {type(e).__name__}: {e}")
+            self._log(f"Could not write {path.name}: {type(e).__name__}: {e}")
             return
-        self._log(f"Wrote {path.name}: {len(positions)} position(s), {px_um:.4f} um/px "
-                  "(ImageJ Grid/Collection Stitching > Positions from file; verify axis "
-                  "orientation on the first stitch -- see this method's docstring).")
+        self._log(f"Wrote {path.name}: {len(positions)} position(s), relative to position 1, "
+                  "in microns (BigStitcher > Read Locations From File > pixel units UNCHECKED).")
 
     def _start_sequence_transition(self) -> None:
         """After a stack finishes naturally, mid-sequence: advance the step
